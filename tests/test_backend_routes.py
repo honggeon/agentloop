@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import Settings
 from backend.app.main import app
+from backend.app.routes.runs import _render_judge_markdown
 
 
 def _write_run(tmp_path):
@@ -13,6 +14,38 @@ def _write_run(tmp_path):
     (run / "audit.json").write_text(json.dumps({"tool_calls": [], "findings": [], "phases": []}), encoding="utf-8")
     (run / "trajectory.jsonl").write_text("", encoding="utf-8")
     return run
+
+
+def test_render_judge_markdown_includes_dimensions_and_reliability():
+    markdown = _render_judge_markdown(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "部分完成",
+            "dimensions": {
+                "intent_recognition": {
+                    "score": 80,
+                    "status": "pass",
+                    "summary": "理解目标",
+                    "recommendation": "保持",
+                    "source": "judge",
+                }
+            },
+            "judge_reliability": {
+                "evidence_coverage": 0.75,
+                "unsupported_claim_count": 1,
+                "invalid_evidence_count": 0,
+                "fact_inference_mismatch_count": 1,
+            },
+            "findings": [],
+        }
+    )
+
+    assert "### Evaluation Dimensions" in markdown
+    assert "意图识别" in markdown
+    assert "### Judge Reliability" in markdown
+    assert "0.75" in markdown
 
 
 def test_health():

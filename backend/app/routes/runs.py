@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Response
 
 from agentloop.cli import _run_dir, _source_meta, _write_run_outputs
+from agentloop.agents.schemas import render_dimensions_markdown, render_reliability_markdown
 from agentloop.agents.tools import build_chart_data, list_runs, load_audit, load_run_summary
 from agentloop.client import AgentClient
 from backend.app.config import get_settings, resolve_run_path
@@ -290,6 +291,10 @@ def _render_judge_markdown(judge: dict[str, Any]) -> str:
             "",
             "### Summary",
             str(judge.get("summary") or ""),
+            "",
+            render_dimensions_markdown(judge.get("dimensions")),
+            "",
+            render_reliability_markdown(judge.get("judge_reliability")),
             "",
             _render_findings_markdown("### Judge Findings", judge.get("findings") or []),
         ]
