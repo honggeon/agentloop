@@ -86,6 +86,21 @@ def test_run_view_explains_charts_with_insights_and_tables():
     assert "findingSeverityRows" in source
 
 
+def test_run_view_shows_evaluation_dimensions_and_judge_reliability():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert "export interface JudgeDimension" in api_source
+    assert "export interface JudgeReliability" in api_source
+    assert "invalid_evidence" in api_source
+    assert "评测维度" in source
+    assert "Judge 可信度" in source
+    assert "dimensionRows" in source
+    assert "reliabilityRows" in source
+    assert "未评估" in source
+    assert "意图识别" in source
+
+
 def test_live_eval_can_auto_continue_confirmations():
     source = LIVE_VIEW.read_text(encoding="utf-8")
     api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")

@@ -176,6 +176,47 @@ const findingSeverityRows = computed(() => {
   );
 });
 
+const DIMENSION_LABELS: Record<string, string> = {
+  intent_recognition: "意图识别",
+  task_planning: "任务规划",
+  tool_selection: "工具选择",
+  parameter_generation: "参数生成",
+  evidence_citation: "证据引用",
+  state_tracking: "状态更新",
+  final_response: "最终表达",
+  context_management: "上下文管理",
+  execution_closure: "执行闭环",
+  error_recovery: "错误恢复",
+  verification: "验证能力",
+  safety_permission: "安全与权限",
+  efficiency: "成本与效率"
+};
+
+const dimensionRows = computed(() =>
+  Object.entries(judge.value?.dimensions || {}).map(([key, item]) => ({
+    key,
+    label: DIMENSION_LABELS[key] || key,
+    score: Number(item.score || 0),
+    status: item.status || "unknown",
+    source: item.source || "missing",
+    summary: item.summary || "",
+    recommendation: item.recommendation || ""
+  }))
+);
+
+const reliabilityRows = computed(() => {
+  const reliability = judge.value?.judge_reliability;
+  if (!reliability) return [];
+  return [
+    { label: "Evidence Coverage", value: formatPercent(reliability.evidence_coverage) },
+    { label: "Unsupported Claims", value: formatNumber(reliability.unsupported_claim_count) },
+    { label: "Invalid Evidence", value: formatNumber(reliability.invalid_evidence_count) },
+    { label: "Fact/Inference Mismatch", value: formatNumber(reliability.fact_inference_mismatch_count) },
+    { label: "Valid Evidence", value: formatNumber(reliability.valid_evidence_count) },
+    { label: "Total Evidence", value: formatNumber(reliability.total_evidence_count) }
+  ];
+});
+
 function sortMetricRows<T extends { rawValue: number; label: string; value: string }>(rows: T[]): T[] {
   return [...rows].sort((left, right) => right.rawValue - left.rawValue || left.label.localeCompare(right.label));
 }
@@ -1060,6 +1101,41 @@ onMounted(() => {
       <section class="report-grid reveal">
         <div class="panel">
           <div class="panel-head">
+            <h3>评测维度</h3>
+            <span class="chip quiet">{{ dimensionRows.length }}</span>
+          </div>
+          <div v-if="dimensionRows.length" class="dimension-list">
+            <div
+              v-for="row in dimensionRows"
+              :key="row.key"
+              class="dimension-row"
+            >
+              <span>{{ row.label }}</span>
+              <strong v-if="row.status !== 'unknown'">{{ row.score }}</strong>
+              <strong v-else>—</strong>
+              <em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
+              <small>{{ row.summary || row.recommendation || row.source }}</small>
+            </div>
+          </div>
+          <p v-else class="empty">暂无维度评分。</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Judge 可信度</h3>
+            <span class="chip quiet">evidence</span>
+          </div>
+          <div v-if="reliabilityRows.length" class="metric-list">
+            <div v-for="row in reliabilityRows" :key="row.label">
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+          <p v-else class="empty">暂无可信度指标。</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
             <h3>Agent 判断</h3>
           </div>
           <p class="report">{{ judge?.summary || "尚未生成 DeepAgent 分析报告。" }}</p>
@@ -1096,3 +1172,34 @@ onMounted(() => {
     </template>
   </div>
 </template>
+
+<style scoped>
+.dimension-list {
+  display: grid;
+  gap: 8px;
+}
+
+.dimension-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 56px 76px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(20, 32, 51, 0.1);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  text-align: left;
+}
+
+.dimension-row small {
+  grid-column: 1 / -1;
+  color: #5a6b7d;
+}
+
+.dimension-row em[data-status="unknown"] {
+  color: #5a6b7d;
+  font-style: normal;
+}
+</style>

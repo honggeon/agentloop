@@ -12,6 +12,14 @@ export interface RunItem {
   server_netloc?: string;
 }
 
+export interface JudgeEvidence {
+  source: string;
+  message_index?: number;
+  quote: string;
+  reason?: string;
+  location?: string;
+}
+
 export interface Finding {
   severity: string;
   category?: string;
@@ -19,7 +27,27 @@ export interface Finding {
   type?: string;
   message?: string;
   recommendation?: string;
-  evidence?: Array<{ source: string; message_index?: number; quote: string }>;
+  evidence?: JudgeEvidence[];
+}
+
+export interface JudgeDimension {
+  score: number;
+  status: string;
+  summary: string;
+  evidence: JudgeEvidence[];
+  recommendation: string;
+  source: string;
+}
+
+export interface JudgeReliability {
+  evidence_coverage: number;
+  unsupported_claim_count: number;
+  invalid_evidence_count: number;
+  fact_inference_mismatch_count: number;
+  valid_evidence_count: number;
+  total_evidence_count: number;
+  notes: string[];
+  invalid_evidence?: JudgeEvidence[];
 }
 
 export interface JudgeReport {
@@ -29,7 +57,9 @@ export interface JudgeReport {
   confidence?: string;
   summary?: string;
   findings?: Finding[];
-  metrics?: Record<string, number | string>;
+  dimensions?: Record<string, JudgeDimension>;
+  judge_reliability?: JudgeReliability;
+  metrics?: Record<string, unknown>;
   charts?: Record<string, unknown>;
 }
 
