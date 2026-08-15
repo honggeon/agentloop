@@ -23,10 +23,13 @@ def assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability:
 
 def _set_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int, status: str, summary: str, recommendation: str) -> None:
     current = dimensions.get(key) or {}
-    judge_score = int(current.get("score") or 0)
-    if current.get("source") == "judge" and judge_score < score:
-        return
-    source = "deterministic" if current.get("source") in {"missing", None, ""} else "deterministic+judge"
+    current_source = current.get("source")
+    unevaluated = current.get("status") == "unknown" or current_source in {"missing", None, ""}
+    if not unevaluated:
+        judge_score = int(current.get("score") or 0)
+        if judge_score < score:
+            return
+    source = "deterministic" if current_source in {"missing", None, ""} else "deterministic+judge"
     dimensions[key] = {
         "score": score,
         "status": status,
@@ -41,17 +44,19 @@ def _cap_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int |
     if score is None:
         return
     current = dimensions.get(key) or {}
-    current_score = int(current.get("score") or 0)
-    if current.get("source") in {"missing", None, ""}:
+    current_source = current.get("source")
+    unevaluated = current.get("status") == "unknown" or current_source in {"missing", None, ""}
+    if unevaluated:
         dimensions[key] = {
             "score": score,
             "status": status,
             "summary": summary,
             "evidence": current.get("evidence") or [],
             "recommendation": recommendation,
-            "source": "deterministic",
+            "source": "deterministic" if current_source in {"missing", None, ""} else "deterministic+judge",
         }
         return
+    current_score = int(current.get("score") or 0)
     if current_score <= score:
         return
     dimensions[key] = {
@@ -60,7 +65,7 @@ def _cap_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int |
         "summary": summary,
         "evidence": current.get("evidence") or [],
         "recommendation": recommendation,
-        "source": "deterministic+judge" if current.get("source") == "judge" else "deterministic",
+        "source": "deterministic+judge" if current_source == "judge" else "deterministic",
     }
 
 

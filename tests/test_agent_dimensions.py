@@ -74,3 +74,69 @@ def test_assess_dimensions_caps_tool_selection_and_invalid_evidence(tmp_path):
     assert dimensions["error_recovery"]["status"] in {"partial", "fail"}
     assert dimensions["evidence_citation"]["status"] == "fail"
     assert dimensions["evidence_citation"]["score"] == 0
+
+
+def _judge_unknown_dimensions():
+    return {
+        key: {"score": 0, "status": "unknown", "source": "judge"}
+        for key in ("execution_closure", "evidence_citation", "tool_selection", "error_recovery")
+    }
+
+
+def test_assess_dimensions_writes_deterministic_when_judge_left_unknown_success(tmp_path):
+    run = _write_tool_run(tmp_path)
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": _judge_unknown_dimensions(),
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+
+    assert dimensions["execution_closure"]["status"] == "pass"
+    assert dimensions["execution_closure"]["source"] == "deterministic+judge"
+    assert dimensions["tool_selection"]["status"] == "unknown"
+    assert dimensions["tool_selection"]["source"] == "judge"
+    assert dimensions["error_recovery"]["status"] == "unknown"
+    assert dimensions["error_recovery"]["source"] == "judge"
+    assert dimensions["evidence_citation"]["status"] == "fail"
+    assert dimensions["evidence_citation"]["score"] == 0
+    assert dimensions["evidence_citation"]["source"] == "deterministic+judge"
+
+
+def test_assess_dimensions_writes_deterministic_when_judge_left_unknown_failure(tmp_path):
+    run = _write_tool_run(tmp_path, status="error")
+    report = normalize_judge_report(
+        {
+            "overall_status": "failed",
+            "completion_score": 40,
+            "confidence": "medium",
+            "summary": "x",
+            "dimensions": {
+                **_judge_unknown_dimensions(),
+                "evidence_citation": {
+                    "score": 0,
+                    "status": "unknown",
+                    "source": "judge",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "missing quote"}],
+                },
+            },
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+
+    assert dimensions["tool_selection"]["status"] in {"fail", "partial"}
+    assert dimensions["tool_selection"]["score"] < 100
+    assert dimensions["tool_selection"]["source"] == "deterministic+judge"
+    assert dimensions["error_recovery"]["status"] in {"partial", "fail"}
+    assert dimensions["error_recovery"]["source"] == "deterministic+judge"
+    assert dimensions["evidence_citation"]["status"] == "fail"
+    assert dimensions["evidence_citation"]["score"] == 0
+    assert dimensions["evidence_citation"]["source"] == "deterministic+judge"
