@@ -7,7 +7,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .schemas import normalize_judge_report, render_judge_markdown
+from .dimensions import assess_dimensions
+from .evidence import validate_judge_evidence
+from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report, render_judge_markdown
 
 
 def _runs_roots() -> List[Path]:
@@ -213,8 +215,15 @@ def write_judge_report(run_path: str, report: object) -> Dict[str, str]:
     """Normalize and write agent_judge.json, agent_judge.md, and chart_data.json."""
     run_dir = _resolve_run_dir(run_path)
     normalized = normalize_judge_report(report)
+    reliability = validate_judge_evidence(str(run_dir), normalized)
+    existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
+    merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]
+    reliability["notes"] = merged_notes
     quality = assess_run_quality(str(run_dir))
     normalized = _merge_quality_report(normalized, quality)
+    normalized["judge_reliability"] = reliability
+    normalized["dimensions"] = assess_dimensions(str(run_dir), normalized, reliability)
+    normalized = normalize_judge_report(normalized)
     chart_data = build_chart_data(str(run_dir))
     charts = dict(chart_data)
     charts.update(normalized.get("charts") or {})
@@ -223,6 +232,22 @@ def write_judge_report(run_path: str, report: object) -> Dict[str, str]:
         "requested_deliverables": len(quality["deliverables"]["requested"]),
         "produced_deliverables": len(quality["deliverables"]["produced"]),
         "missing_deliverables": len(quality["deliverables"]["missing"]),
+    }
+    charts["dimension_scores"] = [
+        {
+            "dimension": key,
+            "label": DIMENSION_DEFINITIONS[key],
+            "score": value["score"],
+            "status": value["status"],
+            "source": value["source"],
+        }
+        for key, value in normalized.get("dimensions", {}).items()
+    ]
+    charts["judge_reliability"] = {
+        "evidence_coverage": normalized["judge_reliability"]["evidence_coverage"],
+        "unsupported_claim_count": normalized["judge_reliability"]["unsupported_claim_count"],
+        "invalid_evidence_count": normalized["judge_reliability"]["invalid_evidence_count"],
+        "fact_inference_mismatch_count": normalized["judge_reliability"]["fact_inference_mismatch_count"],
     }
     normalized["charts"] = charts
 

@@ -318,6 +318,37 @@ def test_render_judge_markdown_includes_evidence():
     assert "session.json#20" in markdown
 
 
+def test_render_judge_markdown_includes_dimensions_and_reliability():
+    markdown = render_judge_markdown(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "部分完成",
+            "dimensions": {
+                "intent_recognition": {
+                    "score": 80,
+                    "status": "pass",
+                    "summary": "理解目标",
+                    "recommendation": "保持",
+                    "source": "judge",
+                }
+            },
+            "judge_reliability": {
+                "evidence_coverage": 0.75,
+                "unsupported_claim_count": 1,
+                "invalid_evidence_count": 0,
+                "fact_inference_mismatch_count": 1,
+            },
+            "findings": [],
+        }
+    )
+    assert "### Evaluation Dimensions" in markdown
+    assert "意图识别" in markdown
+    assert "### Judge Reliability" in markdown
+    assert "0.75" in markdown
+
+
 def test_normalize_judge_report_adds_default_dimensions_and_reliability():
     report = normalize_judge_report(
         {

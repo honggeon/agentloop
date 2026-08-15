@@ -293,6 +293,10 @@ def render_judge_markdown(report: Dict[str, Any]) -> str:
         "",
         normalized["summary"] or "No summary provided.",
         "",
+        render_dimensions_markdown(normalized.get("dimensions")),
+        "",
+        render_reliability_markdown(normalized.get("judge_reliability")),
+        "",
         "## Findings",
         "",
     ]
@@ -312,6 +316,61 @@ def render_judge_markdown(report: Dict[str, Any]) -> str:
             lines.append("  - evidence `%s`: %s" % (label, quote))
     lines.append("")
     return "\n".join(lines)
+
+
+def render_dimensions_markdown(dimensions: Any) -> str:
+    if not isinstance(dimensions, dict) or not dimensions:
+        return "### Evaluation Dimensions\n\nNo dimension scores."
+    rows = []
+    for key, item in dimensions.items():
+        if not isinstance(item, dict):
+            continue
+        label = DIMENSION_DEFINITIONS.get(key, key)
+        rows.append(
+            [
+                label,
+                item.get("score", ""),
+                item.get("status", ""),
+                item.get("source", ""),
+                item.get("summary", ""),
+                item.get("recommendation", ""),
+            ]
+        )
+    header = "Dimension | Score | Status | Source | Summary | Recommendation"
+    sep = "--- | --- | --- | --- | --- | ---"
+    body = "\n".join("|".join(_markdown_cell(value) for value in row) for row in rows)
+    return "### Evaluation Dimensions\n\n%s\n%s\n%s" % (header, sep, body)
+
+
+def render_reliability_markdown(reliability: Any) -> str:
+    if not isinstance(reliability, dict) or not reliability:
+        return "### Judge Reliability\n\nNo reliability metrics."
+    rows = [
+        ["Evidence Coverage", reliability.get("evidence_coverage", "")],
+        ["Unsupported Claims", reliability.get("unsupported_claim_count", "")],
+        ["Invalid Evidence", reliability.get("invalid_evidence_count", "")],
+        ["Fact/Inference Mismatch", reliability.get("fact_inference_mismatch_count", "")],
+        ["Valid Evidence", reliability.get("valid_evidence_count", "")],
+        ["Total Evidence", reliability.get("total_evidence_count", "")],
+    ]
+    body = "Metric | Value\n--- | ---\n" + "\n".join("|".join(_markdown_cell(value) for value in row) for row in rows)
+    invalid = reliability.get("invalid_evidence") or []
+    if invalid:
+        body += "\n\nInvalid evidence:\n"
+        for row in invalid:
+            if isinstance(row, dict):
+                body += "- `%s`: %s\n" % (_markdown_inline(row.get("location", "")), _markdown_inline(row.get("reason", "")))
+    return "### Judge Reliability\n\n%s" % body
+
+
+def _markdown_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("|", "\\|")
+
+
+def _markdown_inline(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("`", "'")
 
 
 def _normalize_finding(item: object) -> Dict[str, Any]:

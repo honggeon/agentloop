@@ -115,6 +115,43 @@ def test_assess_run_quality_flags_missing_requested_deliverable(tmp_path):
     assert any(item["category"] == "delivery" for item in quality["findings"])
 
 
+def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "failed",
+            "completion_score": 20,
+            "confidence": "high",
+            "summary": "工具失败",
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "terminal failed",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "ModuleNotFoundError"}],
+                    "recommendation": "fix dependency",
+                }
+            ],
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    markdown = (run / "agent_judge.md").read_text(encoding="utf-8")
+    charts = json.loads((run / "chart_data.json").read_text(encoding="utf-8"))
+
+    assert "tool_selection" in report["dimensions"]
+    assert report["judge_reliability"]["valid_evidence_count"] == 1
+    assert report["judge_reliability"]["invalid_evidence_count"] == 0
+    assert report["judge_reliability"]["invalid_evidence"] == []
+    assert any(finding["title"] == "Requested deliverable was not produced" for finding in report["findings"])
+    assert any(row["dimension"] == "tool_selection" for row in report["charts"]["dimension_scores"])
+    assert any(row["dimension"] == "tool_selection" for row in charts["dimension_scores"])
+    assert "### Evaluation Dimensions" in markdown
+    assert "### Judge Reliability" in markdown
+
+
 def test_write_judge_report_writes_three_files(tmp_path):
     run = _write_run(tmp_path)
     result = write_judge_report(
