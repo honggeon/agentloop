@@ -1,0 +1,109 @@
+from pathlib import Path
+
+
+APP_VUE = Path("frontend/src/App.vue")
+ROUTER = Path("frontend/src/router.ts")
+BATCH_VIEW = Path("frontend/src/views/BatchView.vue")
+RUN_VIEW = Path("frontend/src/views/RunView.vue")
+LIVE_VIEW = Path("frontend/src/views/LiveEvalView.vue")
+
+
+def test_batch_overview_is_home_route():
+    source = ROUTER.read_text(encoding="utf-8")
+
+    assert 'path: "/"' in source
+    assert 'name: "batch"' in source
+    assert "BatchView" in source
+    assert 'path: "/runs/:runId"' in source
+    assert 'name: "run"' in source
+
+
+def test_batch_overview_does_not_auto_select_first_run():
+    app_source = APP_VUE.read_text(encoding="utf-8")
+    batch_source = BATCH_VIEW.read_text(encoding="utf-8")
+
+    assert "selectRun(runs.value[0].name" not in app_source
+    assert "selectRun(runs.value[0].name" not in batch_source
+    assert 'onMounted(loadRuns)' in app_source
+
+
+def test_sidebar_links_to_batch_overview_and_runs():
+    source = APP_VUE.read_text(encoding="utf-8")
+
+    assert "批量评测总览" in source
+    assert 'to="/"' in source
+    assert "goRun(run.name)" in source
+    assert "route.name === 'batch'" in source
+    assert 'name: "batch"' in source
+    assert "runGroups" in source
+    assert "server_host" in source
+    assert "deleteRun" in source
+
+
+def test_run_view_can_navigate_back_to_batch():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+
+    assert "返回批量总览" in source
+    assert "name: 'batch'" in source
+
+
+def test_run_view_contains_runtime_health_dashboard_sections():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert "Agent Runtime Summary" in source
+    assert "Agent Lifecycle Timeline" in source
+    assert "Agent Health Score" in source
+    assert "Runtime Error Analysis" in source
+    assert "耗时构成" in source
+    assert "RuntimeMetrics" in api_source
+
+
+def test_run_view_can_export_markdown_report():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert "导出 Markdown" in source
+    assert "exportMarkdown" in source
+    assert "/export.md" in source
+    assert "apiDownload" in api_source
+
+
+def test_run_view_explains_charts_with_insights_and_tables():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+
+    assert "图表怎么看" in source
+    assert "图表用来看趋势，表格用来看具体数值" in source
+    assert "Token 趋势" in source
+    assert "耗时构成" in source
+    assert "阶段耗时" in source
+    assert "工具分布" in source
+    assert "chart-insight" in source
+    assert "chart-data-table" in source
+    assert "tokenInsight" in source
+    assert "toolDistributionRows" in source
+    assert "sortMetricRows" in source
+    assert "findingSeverityRows" in source
+
+
+def test_live_eval_can_auto_continue_confirmations():
+    source = LIVE_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert "auto_continue: true" in source
+    assert "自动确认 / 继续" in source
+    assert "auto_continue_limit" in source
+    assert 'event === "auto_interaction"' in source
+    assert "auto_continue?: boolean" in api_source
+
+
+def test_live_eval_route_and_sidebar_entry_exist():
+    router_source = ROUTER.read_text(encoding="utf-8")
+    app_source = APP_VUE.read_text(encoding="utf-8")
+
+    assert LIVE_VIEW.exists()
+    assert 'path: "/live"' in router_source
+    assert 'name: "live"' in router_source
+    assert "LiveEvalView" in router_source
+    assert "运行时评测" in app_source
+    assert 'to="/live"' in app_source

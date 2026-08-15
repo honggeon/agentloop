@@ -1,0 +1,174 @@
+import json
+
+from agentloop import cli
+
+
+def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1", "model": "m1"}), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps({"message_count": 1, "tool_call_count": 0, "tool_calls": [], "findings": []}),
+        encoding="utf-8",
+    )
+    (run / "trajectory.jsonl").write_text(
+        json.dumps({"index": 0, "role": "user", "content": "hi"}),
+        encoding="utf-8",
+    )
+
+    async def fake_invoke(messages, config=None):
+        assert "run_path" in messages[0]["content"]
+        return {
+            "overall_status": "success",
+            "completion_score": 95,
+            "confidence": "high",
+            "summary": "ok",
+            "findings": [],
+        }
+
+    monkeypatch.setattr("agentloop.agents.agent.invoke_agent", fake_invoke)
+    code = cli.main(["judge-run", "--run", str(run)])
+    assert code == 0
+    assert json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))["overall_status"] == "success"
+
+
+def test_write_run_outputs_persists_llm_calls(tmp_path):
+    run = tmp_path / "run"
+    session_response = {
+        "session": {
+            "session_id": "s1",
+            "messages": [{"role": "assistant", "content": "done"}],
+            "llm_calls": [
+                {
+                    "callId": "llm-1",
+                    "model": "xuanjian-pro",
+                    "provider": "LiteLLM",
+                    "latency": 1.25,
+                    "tokenUsage": {"inputTokens": 120, "outputTokens": 30, "totalTokens": 150},
+                }
+            ],
+        }
+    }
+
+    cli._write_run_outputs(run, session_response)
+
+    payload = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))
+    assert payload["llm_calls"][0]["callId"] == "llm-1"
+    assert payload["llm_calls"][0]["tokenUsage"]["totalTokens"] == 150
+
+
+def test_write_run_outputs_imports_configured_proxy_log(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    log = tmp_path / "proxy.jsonl"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps({"callId": "before", "startTime": "2026-08-14T06:53:38.524742Z"}),
+                json.dumps(
+                    {
+                        "callId": "inside",
+                        "startTime": "2026-08-14T06:57:28.939702Z",
+                        "tokenUsage": {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTLOOP_LLM_PROXY_LOG", str(log))
+    session_response = {
+        "session": {
+            "session_id": "s1",
+            "created_at": 1786690648611,
+            "updated_at": 1786690651668,
+            "messages": [{"role": "assistant", "content": "done"}],
+        }
+    }
+
+    cli._write_run_outputs(run, session_response)
+
+    payload = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))
+    assert [item["callId"] for item in payload["llm_calls"]] == ["inside"]
+
+
+def test_import_llm_calls_command_writes_run_payload(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    log = tmp_path / "proxy.jsonl"
+    log.write_text(
+        json.dumps({"callId": "llm-1", "tokenUsage": {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code = cli.main(["import-llm-calls", "--run", str(run), "--log", str(log)])
+
+    assert code == 0
+    payload = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))
+    assert payload["llm_calls"][0]["callId"] == "llm-1"
+
+
+def test_import_llm_calls_filters_by_session_time_window(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "session.json").write_text(
+        json.dumps({"session": {"created_at": 1786690648611, "updated_at": 1786690651668}}),
+        encoding="utf-8",
+    )
+    log = tmp_path / "proxy.jsonl"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps({"callId": "before", "startTime": "2026-08-14T06:53:38.524742Z"}),
+                json.dumps(
+                    {
+                        "callId": "inside-1",
+                        "startTime": "2026-08-14T06:57:28.939702Z",
+                        "tokenUsage": {"totalTokens": 13979},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "callId": "inside-2",
+                        "startTime": "2026-08-14T06:57:30.034695Z",
+                        "tokenUsage": {"totalTokens": 284},
+                    }
+                ),
+                json.dumps({"callId": "after", "startTime": "2026-08-14T07:05:00.000000Z"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    code = cli.main(["import-llm-calls", "--run", str(run), "--log", str(log)])
+
+    assert code == 0
+    payload = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))
+    assert [item["callId"] for item in payload["llm_calls"]] == ["inside-1", "inside-2"]
+
+
+def test_judge_run_includes_acceptance_criteria(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1", "model": "m1"}), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps({"message_count": 1, "tool_call_count": 0, "tool_calls": [], "findings": []}),
+        encoding="utf-8",
+    )
+    (run / "trajectory.jsonl").write_text(json.dumps({"index": 0, "role": "user", "content": "hi"}), encoding="utf-8")
+    (run / "expectations.json").write_text(
+        json.dumps({"acceptance_criteria": "必须生成 pptx\n不能伪造用户确认"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    async def fake_invoke(messages, config=None):
+        content = messages[0]["content"]
+        assert "Agent Judge acceptance criteria" in content
+        assert "必须生成 pptx" in content
+        assert "不能伪造用户确认" in content
+        return {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"}
+
+    monkeypatch.setattr("agentloop.agents.agent.invoke_agent", fake_invoke)
+    assert cli.main(["judge-run", "--run", str(run)]) == 0

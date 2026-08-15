@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentloop"
+version = "0.1.0"
+description = "Black-box trajectory collection and audit tool for xuanjian-agent."
+requires-python = ">=3.11,<4.0"
+dependencies = [
+  "fastapi>=0.115",
+  "python-dotenv>=1.0",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+agent = [
+  "deepagents>=0.6.12",
+  "langchain>=0.3",
+  "langchain-deepseek>=0.1",
+  "langgraph>=0.2",
+  "langgraph-checkpoint>=2",
+]
+
+[project.scripts]
+agentloop = "agentloop.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentloop*"]
+exclude = ["runs*", "tests*", "docs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
