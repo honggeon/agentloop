@@ -11,6 +11,36 @@ ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_SEVERITY = {"critical", "high", "medium", "low"}
 ALLOWED_CATEGORY = {"completion", "tool", "latency", "context", "delivery", "safety"}
 ALLOWED_TYPE = {"fact", "inference"}
+DIMENSION_DEFINITIONS = {
+    "intent_recognition": "意图识别",
+    "task_planning": "任务规划",
+    "tool_selection": "工具选择",
+    "parameter_generation": "参数生成",
+    "evidence_citation": "证据引用",
+    "state_tracking": "状态更新",
+    "final_response": "最终表达",
+    "context_management": "上下文管理",
+    "execution_closure": "执行闭环",
+    "error_recovery": "错误恢复",
+    "verification": "验证能力",
+    "safety_permission": "安全与权限",
+    "efficiency": "成本与效率",
+}
+ALLOWED_DIMENSION_STATUS = {"pass", "partial", "fail", "unknown"}
+ALLOWED_DIMENSION_SOURCE = {"deterministic", "judge", "deterministic+judge", "missing"}
+EVIDENCE_SOURCE_ALIASES = {
+    "trajectory": "trajectory.jsonl",
+    "trajectory.jsonl": "trajectory.jsonl",
+    "agent": "trajectory.jsonl",
+    "messages": "trajectory.jsonl",
+    "audit": "audit.json",
+    "audit.json": "audit.json",
+    "tools": "audit.json",
+    "summary": "summary.json",
+    "summary.json": "summary.json",
+    "session": "session.json",
+    "session.json": "session.json",
+}
 
 
 def extract_json_object(value: object) -> Dict[str, Any]:
@@ -225,6 +255,18 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
     charts["finding_severity"] = _count_by(findings, "severity")
     charts.setdefault("tool_distribution", [])
     charts.setdefault("phase_timeline", [])
+    dimensions = _normalize_dimensions(report.get("dimensions"))
+    judge_reliability = _normalize_judge_reliability(report.get("judge_reliability"))
+    charts["dimension_scores"] = [
+        {
+            "dimension": key,
+            "label": DIMENSION_DEFINITIONS[key],
+            "score": row["score"],
+            "status": row["status"],
+            "source": row["source"],
+        }
+        for key, row in dimensions.items()
+    ]
     return {
         "overall_status": status,
         "completion_score": score,
@@ -233,6 +275,8 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
         "findings": findings,
         "metrics": metrics,
         "charts": charts,
+        "dimensions": dimensions,
+        "judge_reliability": judge_reliability,
     }
 
 
@@ -294,12 +338,93 @@ def _normalize_finding(item: object) -> Dict[str, Any]:
     }
 
 
+def _normalize_dimensions(value: object) -> Dict[str, Dict[str, Any]]:
+    raw = value if isinstance(value, dict) else {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for key in DIMENSION_DEFINITIONS:
+        item = raw.get(key)
+        if item is None:
+            item = raw.get(DIMENSION_DEFINITIONS[key])
+        normalized[key] = _normalize_dimension(item)
+    return normalized
+
+
+def _dimension_status(value: object) -> str:
+    text = str(value or "unknown").strip().lower()
+    text = {
+        "通过": "pass",
+        "合格": "pass",
+        "部分通过": "partial",
+        "失败": "fail",
+        "不通过": "fail",
+        "未知": "unknown",
+    }.get(text, text)
+    return _choice(text, ALLOWED_DIMENSION_STATUS, "unknown", "dimension.status")
+
+
+def _dimension_source(value: object) -> str:
+    text = str(value or "missing").strip().lower()
+    text = {"规则": "deterministic", "确定性": "deterministic", "模型": "judge", "评审": "judge"}.get(text, text)
+    return _choice(text, ALLOWED_DIMENSION_SOURCE, "missing", "dimension.source")
+
+
+def _normalize_dimension(value: object) -> Dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    evidence = item.get("evidence") or []
+    if isinstance(evidence, dict):
+        evidence = [evidence]
+    elif isinstance(evidence, str):
+        evidence = [{"source": "agent", "quote": evidence}]
+    if not isinstance(evidence, list):
+        evidence = []
+    normalized_evidence: List[Dict[str, Any]] = []
+    for row in evidence:
+        normalized_evidence.extend(_normalize_evidence(row))
+    return {
+        "score": _score(item.get("score", 0)),
+        "status": _dimension_status(item.get("status")),
+        "summary": str(item.get("summary") or ""),
+        "evidence": normalized_evidence,
+        "recommendation": str(item.get("recommendation") or ""),
+        "source": _dimension_source(item.get("source")),
+    }
+
+
+def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    total = max(0, int(item.get("total_evidence_count") or 0))
+    valid = max(0, int(item.get("valid_evidence_count") or 0))
+    coverage = item.get("evidence_coverage")
+    if coverage is None:
+        coverage = round(valid / total, 4) if total else 0
+    notes = item.get("notes") or []
+    if isinstance(notes, str):
+        notes = [notes]
+    if not isinstance(notes, list):
+        notes = []
+    invalid = item.get("invalid_evidence") or []
+    if not isinstance(invalid, list):
+        invalid = []
+    return {
+        "evidence_coverage": max(0, min(1, float(coverage))),
+        "unsupported_claim_count": max(0, int(item.get("unsupported_claim_count") or 0)),
+        "invalid_evidence_count": max(0, int(item.get("invalid_evidence_count") or 0)),
+        "fact_inference_mismatch_count": max(0, int(item.get("fact_inference_mismatch_count") or 0)),
+        "valid_evidence_count": valid,
+        "total_evidence_count": total,
+        "notes": [str(note) for note in notes if str(note).strip()],
+        "invalid_evidence": [row for row in invalid if isinstance(row, dict)],
+    }
+
+
 def _normalize_evidence(item: object) -> List[Dict[str, Any]]:
     if isinstance(item, str):
         return [{"source": "agent", "quote": item[:500]}]
     if not isinstance(item, dict):
         raise ValueError("evidence must be a dict")
-    base = {"source": str(item.get("source") or ""), "quote": str(item.get("quote") or "")[:500]}
+    source = str(item.get("source") or "")
+    aliased = EVIDENCE_SOURCE_ALIASES.get(source.strip().lower(), source)
+    base = {"source": aliased, "quote": str(item.get("quote") or "")[:500]}
     if item.get("message_index") is None:
         return [base]
     indexes = _parse_message_indexes(item["message_index"])

@@ -316,3 +316,64 @@ def test_render_judge_markdown_includes_evidence():
     assert "# Agentloop Agent Judge" in markdown
     assert "最终回答没有交付物" in markdown
     assert "session.json#20" in markdown
+
+
+def test_normalize_judge_report_adds_default_dimensions_and_reliability():
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "findings": [],
+        }
+    )
+
+    assert "intent_recognition" in report["dimensions"]
+    assert "verification" in report["dimensions"]
+    assert report["dimensions"]["intent_recognition"] == {
+        "score": 0,
+        "status": "unknown",
+        "summary": "",
+        "evidence": [],
+        "recommendation": "",
+        "source": "missing",
+    }
+    assert report["judge_reliability"]["evidence_coverage"] == 0
+    assert report["judge_reliability"]["unsupported_claim_count"] == 0
+    assert report["judge_reliability"]["invalid_evidence"] == []
+    assert report["charts"]["dimension_scores"][0]["dimension"] == "intent_recognition"
+    assert report["charts"]["dimension_scores"][0]["label"] == "意图识别"
+    assert report["charts"]["dimension_scores"][0]["status"] == "unknown"
+
+
+def test_normalize_judge_report_maps_dimension_aliases_and_bounds_scores():
+    report = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "x",
+            "dimensions": {
+                "意图识别": {"score": 120, "status": "通过", "summary": "识别正确", "source": "judge"},
+                "工具选择": {"score": -3, "status": "失败", "summary": "工具错了", "source": "deterministic"},
+            },
+            "judge_reliability": {
+                "evidence_coverage": 0.5,
+                "unsupported_claim_count": 1,
+                "invalid_evidence_count": 1,
+                "fact_inference_mismatch_count": 2,
+                "valid_evidence_count": 1,
+                "total_evidence_count": 2,
+                "notes": ["one invalid quote"],
+                "invalid_evidence": [{"location": "findings.0", "reason": "quote_not_found", "quote": "nope"}],
+            },
+        }
+    )
+
+    assert report["dimensions"]["intent_recognition"]["score"] == 100
+    assert report["dimensions"]["intent_recognition"]["status"] == "pass"
+    assert report["dimensions"]["tool_selection"]["score"] == 0
+    assert report["dimensions"]["tool_selection"]["status"] == "fail"
+    assert report["judge_reliability"]["invalid_evidence"][0]["reason"] == "quote_not_found"
+    assert report["judge_reliability"]["fact_inference_mismatch_count"] == 2
