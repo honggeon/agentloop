@@ -23,6 +23,9 @@ MAIN_SYSTEM_PROMPT = """你是 AgentLoop Analyst，负责分析 xuanjian-agent �
 - 每条 finding 必须包含 severity、category、title、type、evidence、recommendation。
 - type 只能是 fact 或 inference。
 - 没有证据的判断必须降级为 inference，不能写成 fact。
+- Agent 评测不是只看最终结论，还必须输出 dimensions 和 evidence。
+- 维度评分中的 fact 必须能回指 trajectory、audit、summary 或 session 中的证据。
+- 完成度仍以 assess_run_quality 的交付物检查为准；dimensions 不能推翻缺失交付物的失败结论。
 """
 
 
@@ -73,6 +76,30 @@ REPORT_WRITER_PROMPT = """你是报告生成专家。
 - findings
 - metrics
 - charts
+- dimensions: object，必须包含以下 key：
+  - intent_recognition: 意图识别
+  - task_planning: 任务规划
+  - tool_selection: 工具选择
+  - parameter_generation: 参数生成
+  - evidence_citation: 证据引用
+  - state_tracking: 状态更新
+  - final_response: 最终表达
+  - context_management: 上下文管理
+  - execution_closure: 执行闭环
+  - error_recovery: 错误恢复
+  - verification: 验证能力
+  - safety_permission: 安全与权限
+  - efficiency: 成本与效率
+
+每个 dimension 必须包含 score、status、summary、evidence、recommendation、source。
+status 只能是 pass|partial|fail|unknown。
+没有证据时 status 必须是 unknown，不得写成 fail 或 pass，也不得用 0 分冒充已评估失败。
+source 只能先填 judge；确定性校验会在写入报告时覆盖 evidence_citation、execution_closure；只有发生工具失败时才会向下封顶 error_recovery；只有发生工具失败时才会封顶 tool_selection。
+没有工具失败时，error_recovery 必须保持 unknown，不能因为“没有失败”写成 pass。
+不要根据工具成功次数给 tool_selection 打高分；成功只说明调用没有报错，不说明选对了工具。
+没有证据的语义判断不得给 pass；没有证据的判断必须在 summary 中说明证据不足。
+
+- judge_reliability: object，可先填写空对象；系统会基于 evidence 重新计算，并保留 invalid_evidence 明细。
 
 写报告前必须调用 assess_run_quality(run_path)，并用其结果校准完成度、交付物和证据链：
 - 如果用户要求的交付物不存在，不得给 success。

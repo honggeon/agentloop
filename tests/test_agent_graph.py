@@ -1,5 +1,17 @@
 import importlib
 
+from agentloop.agents.prompts import MAIN_SYSTEM_PROMPT, REPORT_WRITER_PROMPT
+
+
+def test_report_writer_prompt_requires_dimensions_and_reliability():
+    assert "dimensions" in REPORT_WRITER_PROMPT
+    assert "judge_reliability" in REPORT_WRITER_PROMPT
+    assert "intent_recognition" in REPORT_WRITER_PROMPT
+    assert "evidence_citation" in REPORT_WRITER_PROMPT
+    assert "没有证据" in REPORT_WRITER_PROMPT
+    assert "unknown" in REPORT_WRITER_PROMPT
+    assert "dimensions" in MAIN_SYSTEM_PROMPT
+
 
 def test_subagents_have_short_descriptions():
     module = importlib.import_module("agentloop.agents.subagents")
