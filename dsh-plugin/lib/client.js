@@ -1,10 +1,11 @@
 /**
  * dsh-agentloop — client bundle.
  *
- * 入口形态：侧边栏底部、设置按钮右侧的「应用」按钮（sidebar.footer.action
- * 插槽，flex 左右布局）。按钮弹出一个 dropdown menu，菜单项「Agentloop」
- * 点击后通过 shell.overlay 插槽在中间栏（centerCol）区域打开评测面板
- * （不遮挡侧边栏；Esc 或 ✕ 关闭）。
+ * 入口形态：侧边栏底部的「菜单」按钮（sidebar.footer.action 插槽）。点击弹出
+ * 纵向菜单（position:fixed，按按钮视口矩形定位），内含「设置」「Agent测评」
+ * 两个按钮：「设置」转发点击 shell 原生设置按钮（被 CSS 零尺寸裁切隐藏、保持
+ * 挂载）打开原生设置面板；「Agent测评」通过 shell.overlay 插槽在中间栏
+ * （centerCol）区域打开评测面板（不遮挡侧边栏；Esc 或 ✕ 关闭）。
  *
  * 面板内容：列出本机 DSH 录制的会话，一键导入 agentloop 做确定性审计；
  * 指标直接展示——审计概览、发现、工具调用明细、阶段划分、轨迹预览，
@@ -41,6 +42,9 @@ window.__ModuleLoader__.load({
     /** localStorage key for the connection config. */
     var LS_KEY = "dsh-agentloop:v1";
 
+    /** localStorage key for the remote-agent connection config. */
+    var LS_REMOTE_KEY = "dsh-agentloop-remote:v1";
+
     var DEFAULT_CONFIG = {
       apiBase: "http://127.0.0.1:18080",
       dashboardBase: "http://127.0.0.1:6173",
@@ -69,8 +73,9 @@ window.__ModuleLoader__.load({
     var STATUS_LABELS = { pass: "通过", partial: "部分", fail: "未通过", unknown: "未评估" };
 
     var zh = {
-      appsButton: "应用",
-      menuItem: "Agentloop 评测",
+      menuButton: "菜单",
+      settingsItem: "设置",
+      appsItem: "Agent测评",
       panelTitle: "Agentloop · DSH Agent 评测",
       close: "关闭",
       desc: "把本机 DeepSeek Harness 录制的会话导入 agentloop，做确定性工具审计与轨迹分析；指标直接在本页展示。需要先启动 agentloop 后端（agentloop 仓库下 ./start.sh）。",
@@ -85,8 +90,8 @@ window.__ModuleLoader__.load({
       loading: "加载中…",
       empty: "未发现 DSH 会话录制（~/.dsh/sessions）。",
       sessionsTitle: "DSH 会话录制",
-      runsTitle: "评测结果（已导入的 DSH 会话）",
-      noRuns: "还没有导入的 DSH 会话，先在上方导入一个。",
+      runsTitle: "评测结果",
+      noRuns: "还没有评测结果，先在上方导入或发起一次评测。",
       colTitle: "会话",
       colWorkspace: "工作区",
       colMessages: "消息",
@@ -129,11 +134,28 @@ window.__ModuleLoader__.load({
       dimTitle: "评测维度",
       untitled: "(无标题)",
       external: "外部看板",
+      remoteTitle: "连接其他 Agent",
+      remoteDesc: "对接任何兼容 xuanjian-agent HTTP API 的 agent 服务：导入已有会话做审计，或发起实时对话评测。",
+      modeImport: "导入已有会话",
+      modeLive: "实时对话评测",
+      remoteBaseUrl: "服务地址",
+      remoteUserId: "用户 ID",
+      remoteSessionId: "会话 ID",
+      remoteToken: "Token（可选）",
+      remoteModel: "模型（可选）",
+      remoteMessage: "测试消息",
+      remoteMessagePlaceholder: "输入要发给被测 agent 的任务/问题…",
+      importRemote: "导入并审计",
+      startLive: "开始评测",
+      liveRunning: "评测进行中…",
+      liveLog: "进度",
+      colSource: "来源",
     };
 
     var en = {
-      appsButton: "Apps",
-      menuItem: "Agentloop Eval",
+      menuButton: "Menu",
+      settingsItem: "Settings",
+      appsItem: "Agent Eval",
       panelTitle: "Agentloop · DSH Agent Evaluation",
       close: "Close",
       desc: "Import locally recorded DeepSeek Harness sessions into agentloop for deterministic tool auditing; metrics render right here. Requires the agentloop backend (./start.sh in the agentloop repo).",
@@ -148,8 +170,8 @@ window.__ModuleLoader__.load({
       loading: "Loading…",
       empty: "No DSH session recordings found (~/.dsh/sessions).",
       sessionsTitle: "DSH session recordings",
-      runsTitle: "Evaluation results (imported DSH sessions)",
-      noRuns: "No imported DSH sessions yet — import one above.",
+      runsTitle: "Evaluation results",
+      noRuns: "No evaluation runs yet — import one or start a live evaluation above.",
       colTitle: "Session",
       colWorkspace: "Workspace",
       colMessages: "Messages",
@@ -192,6 +214,22 @@ window.__ModuleLoader__.load({
       dimTitle: "Dimensions",
       untitled: "(untitled)",
       external: "External dashboard",
+      remoteTitle: "Connect other agents",
+      remoteDesc: "Works with any agent service speaking the xuanjian-agent HTTP API: import an existing session for auditing, or run a live chat evaluation.",
+      modeImport: "Import session",
+      modeLive: "Live evaluation",
+      remoteBaseUrl: "Base URL",
+      remoteUserId: "User ID",
+      remoteSessionId: "Session ID",
+      remoteToken: "Token (optional)",
+      remoteModel: "Model (optional)",
+      remoteMessage: "Test message",
+      remoteMessagePlaceholder: "Task or question to send to the agent under test…",
+      importRemote: "Import & audit",
+      startLive: "Start evaluation",
+      liveRunning: "Evaluation running…",
+      liveLog: "Progress",
+      colSource: "Source",
     };
 
     // =====================================================================
@@ -247,6 +285,86 @@ window.__ModuleLoader__.load({
       } catch (err) { /* ignore */ }
     }
 
+    /** 远程 agent 连接配置（token 不持久化）。 */
+    function loadRemoteConfig() {
+      var base = { baseUrl: "", userId: "", sessionId: "", model: "", message: "", token: "" };
+      try {
+        var raw = window.localStorage.getItem(LS_REMOTE_KEY);
+        if (raw) {
+          var parsed = JSON.parse(raw);
+          Object.keys(base).forEach(function (key) {
+            if (typeof parsed[key] === "string") base[key] = parsed[key];
+          });
+        }
+      } catch (err) { /* ignore corrupt state */ }
+      return base;
+    }
+
+    function saveRemoteConfig(remote) {
+      try {
+        var persisted = Object.assign({}, remote, { token: "" });
+        window.localStorage.setItem(LS_REMOTE_KEY, JSON.stringify(persisted));
+      } catch (err) { /* ignore */ }
+    }
+
+    /**
+     * POST 一个 JSON 并按 SSE 帧（`event: X\ndata: {...}\n\n`）逐条回调。
+     * 返回 Promise，流结束或出错时 settle。
+     */
+    function streamSSE(base, path, payload, onEvent) {
+      return fetch(trimSlash(base) + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (res) {
+        if (!res.ok || !res.body) {
+          return res.text().then(function (text) {
+            var detail = "HTTP " + res.status;
+            try {
+              var body = JSON.parse(text);
+              if (body && body.detail) detail = body.detail;
+            } catch (err) { /* non-JSON */ }
+            throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+          });
+        }
+        var reader = res.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+
+        function dispatch(raw) {
+          var event = "message";
+          var dataLines = [];
+          raw.split("\n").forEach(function (line) {
+            if (line.indexOf("event:") === 0) event = line.slice(6).trim();
+            else if (line.indexOf("data:") === 0) dataLines.push(line.slice(5).trim());
+          });
+          if (!dataLines.length) return;
+          var data = null;
+          try { data = JSON.parse(dataLines.join("\n")); } catch (err) { data = dataLines.join("\n"); }
+          onEvent(event, data);
+        }
+
+        function pump() {
+          return reader.read().then(function (result) {
+            if (result.done) {
+              if (buffer.trim()) dispatch(buffer);
+              return undefined;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+            var idx;
+            while ((idx = buffer.indexOf("\n\n")) >= 0) {
+              var raw = buffer.slice(0, idx);
+              buffer = buffer.slice(idx + 2);
+              dispatch(raw);
+            }
+            return pump();
+          });
+        }
+
+        return pump();
+      });
+    }
+
     function trimSlash(url) {
       return String(url || "").replace(/\/+$/, "");
     }
@@ -288,7 +406,7 @@ window.__ModuleLoader__.load({
       return "#9e9e9e";
     }
 
-    /** 2x2 网格图标（「应用」按钮）。 */
+    /** 2x2 网格图标（菜单里的「应用」项）。 */
     function appsIcon(size) {
       var s = size || 16;
       return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": "true" },
@@ -296,6 +414,23 @@ window.__ModuleLoader__.load({
         h("rect", { x: 9, y: 1, width: 6, height: 6, rx: 1.5 }),
         h("rect", { x: 1, y: 9, width: 6, height: 6, rx: 1.5 }),
         h("rect", { x: 9, y: 9, width: 6, height: 6, rx: 1.5 }));
+    }
+
+    /** 简化齿轮图标（菜单里的「设置」项）。 */
+    function gearIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "aria-hidden": "true" },
+        h("circle", { cx: 8, cy: 8, r: 4.4, "stroke-width": 2.2, "stroke-dasharray": "2.1 1.36" }),
+        h("circle", { cx: 8, cy: 8, r: 1.7, fill: "currentColor", stroke: "none" }));
+    }
+
+    /** 汉堡图标（「菜单」触发按钮）。 */
+    function menuIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": "true" },
+        h("rect", { x: 2, y: 3.4, width: 12, height: 1.8, rx: 0.9 }),
+        h("rect", { x: 2, y: 7.1, width: 12, height: 1.8, rx: 0.9 }),
+        h("rect", { x: 2, y: 10.8, width: 12, height: 1.8, rx: 0.9 }));
     }
 
     function injectCss() {
@@ -330,6 +465,12 @@ window.__ModuleLoader__.load({
         ".al-chip span{opacity:.6}",
         ".al-badge{display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;border:1px solid}",
         ".al-scroll{max-height:280px;overflow:auto;border:1px solid var(--color-border,rgba(127,127,127,.18));border-radius:8px}",
+        ".al-tabs{display:flex;gap:4px;border-bottom:1px solid var(--color-border,rgba(127,127,127,.2));padding-bottom:6px}",
+        ".al-tab{padding:4px 12px;border-radius:6px;border:1px solid transparent;background:transparent;color:inherit;font-size:12px;cursor:pointer}",
+        ".al-tab:hover{background:rgba(127,127,127,.1)}",
+        ".al-tab-active{border-color:var(--color-primary,#4f7cff);color:var(--color-primary,#4f7cff)}",
+        ".al-textarea{width:100%;min-height:72px;padding:6px 8px;border-radius:6px;border:1px solid var(--color-border,rgba(127,127,127,.35));background:transparent;color:inherit;font-size:12px;font-family:inherit;resize:vertical;box-sizing:border-box}",
+        ".al-log{background:rgba(127,127,127,.08);border-radius:8px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:11px;max-height:160px;overflow:auto;white-space:pre-wrap;line-height:1.6}",
         ".al-scroll .al-table td{border-bottom:1px solid var(--color-border,rgba(127,127,127,.08))}",
         ".al-pre{font-family:ui-monospace,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;opacity:.85;margin:0}",
         ".al-msg{border-bottom:1px solid var(--color-border,rgba(127,127,127,.1));padding:6px 8px;font-size:12px}",
@@ -339,20 +480,24 @@ window.__ModuleLoader__.load({
         ".al-dim-bar{flex:1;height:6px;border-radius:3px;background:rgba(127,127,127,.18);overflow:hidden}",
         ".al-dim-bar-fill{height:100%;border-radius:3px}",
         ".al-dim-score{min-width:36px;text-align:right}",
-        /* 侧边栏「应用」按钮与下拉菜单 */
-        ".al-apps{position:relative;display:flex;flex:none}",
-        ".al-apps-btn{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:none;background:transparent;color:inherit;font-size:12px;cursor:pointer}",
+        /* 侧边栏底部「菜单」按钮与弹出菜单。.al-apps 用 display:contents 不产生
+           盒子，只保留 DOM 层级（outside-click 判定）；菜单按钮铺满 footerActions
+           宽度（对齐 shell 原设置按钮的几何），折叠 rail 模式收成圆形图标按钮。 */
+        ".al-apps{display:contents}",
+        ".al-apps-btn{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:calc(100% + 8px);height:34px;margin:4px -4px;padding:6px 2px 6px 10px;border:none;border-radius:12px;background:transparent;color:inherit;font-family:inherit;font-size:14px;line-height:22px;cursor:pointer;overflow:hidden;white-space:nowrap}",
         ".al-apps-btn:hover{background:rgba(127,127,127,.12)}",
-        ".al-menu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:180px;background:var(--color-background,Canvas);color:inherit;border:1px solid var(--color-border,rgba(127,127,127,.3));border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;z-index:1200}",
-        ".al-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:inherit;font-size:12px;cursor:pointer;text-align:left}",
-        ".al-menu-item:hover{background:rgba(127,127,127,.12)}",
-        /* shell 的 footArea 默认纵向堆叠；改成左右 flex 行，设置/应用区域各占一半
-           宽度，应用按钮在自己的半区内靠右。折叠 rail 模式下恢复纵向。
+        "[class*='collapsed'] .al-apps-btn{width:36px;height:36px;border-radius:50%;justify-content:center;gap:0;padding:0;margin:8px 0 10px}",
+        /* 弹出菜单：纵向排列「设置」「Agent测评」两个按钮。position:fixed，
+           位置由 JS 按菜单按钮的视口矩形计算（见 MenuFooterAction）。 */
+        ".al-menu{position:fixed;display:flex;flex-direction:column;gap:6px;padding:8px;background:var(--dsw-alias-bg-layer-2,Canvas);color:inherit;border:1px solid var(--color-border,rgba(127,127,127,.3));border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.28);z-index:1200}",
+        ".al-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:10px 18px;border:none;border-radius:10px;background:rgba(127,127,127,.1);color:inherit;font-size:14px;cursor:pointer;white-space:nowrap;text-align:left}",
+        ".al-menu-item:hover{background:rgba(127,127,127,.2)}",
+        /* shell 原生设置按钮搬进了上面的菜单条：把 footArea 里的 settingsArea
+           压成零尺寸并裁切（不是 display:none——要保持挂载，菜单里的「设置」
+           项通过 JS 点击里面的原生按钮来打开设置面板；设置面板是
+           position:fixed 覆盖层，不受零尺寸裁切影响）。
            哈希类名按后缀匹配，DSH 升级后若失效只需更新这里。 */
-        "[class*='footArea']{flex-direction:row!important;align-items:center}",
-        "[class*='footArea']>[class*='settingsArea']{flex:1 1 50%;min-width:0}",
-        "[class*='footArea']>[class*='footerActions']{flex:1 1 50%;min-width:0;justify-content:flex-end}",
-        "[class*='collapsed'] [class*='footArea']{flex-direction:column!important}",
+        "[class*='footArea']>[class*='settingsArea']{position:absolute;width:0;height:0;overflow:hidden;padding:0;margin:0}",
         /* 覆盖层（shell.overlay 层默认 click-through，需要恢复指针事件）。
            位置/尺寸由内联样式给定：只覆盖中间栏（centerCol）。 */
         ".al-overlay{position:fixed;z-index:1100;pointer-events:auto;background:var(--color-background,Canvas);color:var(--color-text,CanvasText);display:flex;flex-direction:column;border-left:1px solid var(--color-border,rgba(127,127,127,.25))}",
@@ -569,6 +714,176 @@ window.__ModuleLoader__.load({
       var judging = judgingPair[0];
       var setJudging = judgingPair[1];
 
+      // ---- 连接其他 Agent ----
+      var remotePair = useState(loadRemoteConfig);
+      var remote = remotePair[0];
+      var setRemote = remotePair[1];
+
+      var modePair = useState("import");
+      var remoteMode = modePair[0];
+      var setRemoteMode = modePair[1];
+
+      var remoteBusyPair = useState(false);
+      var remoteBusy = remoteBusyPair[0];
+      var setRemoteBusy = remoteBusyPair[1];
+
+      var liveLogPair = useState([]);
+      var liveLog = liveLogPair[0];
+      var setLiveLog = liveLogPair[1];
+
+      function updateRemote(patch) {
+        setRemote(function (prev) {
+          var next = Object.assign({}, prev, patch);
+          saveRemoteConfig(next);
+          return next;
+        });
+      }
+
+      function selectRunAndShow(runId) {
+        if (!runId) return;
+        setSelectedRun(runId);
+        setDetail(null);
+        setTrajOpen(false);
+        loadDetail(runId, false, null).catch(function (err) { setError(String(err && err.message || err)); });
+      }
+
+      function onImportRemote() {
+        if (!remote.baseUrl || !remote.userId || !remote.sessionId) {
+          setError(t("remoteBaseUrl") + " / " + t("remoteUserId") + " / " + t("remoteSessionId") + " ?");
+          return;
+        }
+        setRemoteBusy(true);
+        setError("");
+        fetchJSON(cfg.apiBase, "/api/runs/import-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_url: remote.baseUrl,
+            user_id: remote.userId,
+            session_id: remote.sessionId,
+            token: remote.token || undefined,
+          }),
+        }).then(function (body) {
+          return loadRuns().then(function () {
+            var runId = body && body.run && body.run.name;
+            selectRunAndShow(runId);
+          });
+        }).catch(function (err) {
+          setError(String(err && err.message || err));
+        }).then(function () {
+          setRemoteBusy(false);
+        });
+      }
+
+      function appendLiveLog(line) {
+        setLiveLog(function (prev) { return prev.concat([line]).slice(-80); });
+      }
+
+      function onStartLive() {
+        if (!remote.baseUrl || !remote.userId || !remote.message) {
+          setError(t("remoteBaseUrl") + " / " + t("remoteUserId") + " / " + t("remoteMessage") + " ?");
+          return;
+        }
+        setRemoteBusy(true);
+        setError("");
+        setLiveLog([]);
+        streamSSE(cfg.apiBase, "/api/live/evaluate", {
+          base_url: remote.baseUrl,
+          user_id: remote.userId,
+          message: remote.message,
+          model: remote.model || undefined,
+          token: remote.token || undefined,
+        }, function (event, data) {
+          if (event === "remote_step") {
+            appendLiveLog((data.status === "started" ? "▸ " : "✓ ") + (data.stage || ""));
+          } else if (event === "run_started") {
+            appendLiveLog("▸ run_started " + (data.session_id || ""));
+          } else if (event === "run_finished") {
+            appendLiveLog("✓ run_finished");
+            var runId = data && data.run && data.run.name;
+            loadRuns().then(function () { selectRunAndShow(runId); });
+          } else if (event === "error") {
+            appendLiveLog("✗ " + (data.detail || "error"));
+            setError(String(data.detail || "error"));
+          }
+        }).catch(function (err) {
+          setError(String(err && err.message || err));
+        }).then(function () {
+          setRemoteBusy(false);
+        });
+      }
+
+      function renderRemoteAgent() {
+        return h("div", { className: "al-card" },
+          h("p", { className: "al-section-title" }, t("remoteTitle")),
+          h("p", { className: "al-muted" }, t("remoteDesc")),
+          h("div", { className: "al-tabs" },
+            h("button", {
+              className: "al-tab" + (remoteMode === "import" ? " al-tab-active" : ""),
+              onClick: function () { setRemoteMode("import"); },
+            }, t("modeImport")),
+            h("button", {
+              className: "al-tab" + (remoteMode === "live" ? " al-tab-active" : ""),
+              onClick: function () { setRemoteMode("live"); },
+            }, t("modeLive"))),
+          h("div", { className: "al-row" },
+            h("label", null, t("remoteBaseUrl")),
+            h("input", {
+              value: remote.baseUrl,
+              placeholder: "http://host:8788",
+              onChange: function (e) { updateRemote({ baseUrl: e.target.value }); },
+            })),
+          h("div", { className: "al-row" },
+            h("label", null, t("remoteUserId")),
+            h("input", {
+              value: remote.userId,
+              onChange: function (e) { updateRemote({ userId: e.target.value }); },
+            })),
+          remoteMode === "import"
+            ? h("div", { className: "al-row" },
+                h("label", null, t("remoteSessionId")),
+                h("input", {
+                  value: remote.sessionId,
+                  onChange: function (e) { updateRemote({ sessionId: e.target.value }); },
+                }))
+            : null,
+          remoteMode === "live"
+            ? h("div", { className: "al-row" },
+                h("label", null, t("remoteModel")),
+                h("input", {
+                  value: remote.model,
+                  onChange: function (e) { updateRemote({ model: e.target.value }); },
+                }))
+            : null,
+          remoteMode === "live"
+            ? h("textarea", {
+                className: "al-textarea",
+                placeholder: t("remoteMessagePlaceholder"),
+                value: remote.message,
+                onChange: function (e) { updateRemote({ message: e.target.value }); },
+              })
+            : null,
+          h("div", { className: "al-row" },
+            h("label", null, t("remoteToken")),
+            h("input", {
+              value: remote.token,
+              type: "password",
+              onChange: function (e) { updateRemote({ token: e.target.value }); },
+            })),
+          h("div", { className: "al-row" },
+            remoteMode === "import"
+              ? h("button", { className: "al-btn al-btn-primary", disabled: remoteBusy, onClick: onImportRemote },
+                  remoteBusy ? t("importing") : t("importRemote"))
+              : h("button", { className: "al-btn al-btn-primary", disabled: remoteBusy, onClick: onStartLive },
+                  remoteBusy ? t("liveRunning") : t("startLive"))),
+          liveLog.length
+            ? h("div", null,
+                h("p", { className: "al-section-title" }, t("liveLog")),
+                h("div", { className: "al-log" }, liveLog.join("\n")))
+            : null,
+        );
+      }
+
       var loadSessions = useCallback(function () {
         return fetchJSON(cfg.apiBase, "/api/dsh/sessions?limit=50").then(function (body) {
           setSessions((body && body.sessions) || []);
@@ -577,9 +892,7 @@ window.__ModuleLoader__.load({
 
       var loadRuns = useCallback(function () {
         return fetchJSON(cfg.apiBase, "/api/runs").then(function (body) {
-          var items = ((body && body.runs) || []).filter(function (item) {
-            return item.source_base_url === "dsh://local";
-          });
+          var items = ((body && body.runs) || []).slice();
           items.sort(function (a, b) { return String(b.name).localeCompare(String(a.name)); });
           setRuns(items);
         });
@@ -779,14 +1092,23 @@ window.__ModuleLoader__.load({
           h("table", { className: "al-table" },
             h("thead", null, h("tr", null,
               h("th", null, t("colRun")),
+              h("th", null, t("colSource")),
               h("th", null, t("colJudge")),
               h("th", null, t("colAction")),
             )),
             h("tbody", null, runs.map(function (item) {
               var runId = String(item.name || "");
               var isSelected = selectedRun === runId;
+              var isDsh = item.source_base_url === "dsh://local";
               return h("tr", { key: runId },
                 h("td", null, h("div", { className: "al-title", title: runId }, runId)),
+                h("td", null, h("span", {
+                  className: "al-badge",
+                  title: item.source_base_url || "",
+                  style: isDsh
+                    ? { color: "#4f7cff", borderColor: "#4f7cff" }
+                    : { color: "#9e9e9e", borderColor: "#9e9e9e" },
+                }, isDsh ? "DSH" : (item.server_host || "remote"))),
                 h("td", null, h("span", {
                   className: "al-badge",
                   style: item.has_judge
@@ -843,22 +1165,57 @@ window.__ModuleLoader__.load({
         renderConfig(),
         error ? h("div", { className: "al-error" }, error) : null,
         renderSessions(),
+        renderRemoteAgent(),
         renderRuns(),
         renderDetail(),
       );
     }
 
     // =====================================================================
-    // sidebar footer 「应用」button + dropdown menu
+    // sidebar footer 「菜单」button + popup menu（设置 / 应用）
     // =====================================================================
 
-    function AppsFooterAction(props) {
+    /**
+     * 打开 shell 原生设置面板：footArea 里的原生设置按钮被 CSS 视觉隐藏
+     * （零尺寸裁切）但保持挂载，这里转发一次点击。
+     */
+    function openShellSettings() {
+      var btn = window.document.querySelector("[class*='footArea'] button[class*='trigger']");
+      if (btn) btn.click();
+    }
+
+    function MenuFooterAction(props) {
       var t = props.t;
       var wide = !props || props.wide !== false;
       var menuPair = useState(false);
       var menuOpen = menuPair[0];
       var setMenuOpen = menuPair[1];
       var rootRef = useRef(null);
+      var btnRef = useRef(null);
+
+      // 菜单用 position:fixed（.al-apps 是 display:contents，没有可定位的盒子），
+      // 打开期间按按钮的视口矩形定位（按钮上方、左对齐），并跟踪窗口尺寸变化。
+      var posPair = useState(null);
+      var menuPos = posPair[0];
+      var setMenuPos = posPair[1];
+
+      useEffect(function () {
+        if (!menuOpen) return undefined;
+        function updateMenuPos() {
+          var btn = btnRef.current;
+          if (!btn) return;
+          var r = btn.getBoundingClientRect();
+          setMenuPos({
+            bottom: Math.max(0, window.innerHeight - r.top + 8) + "px",
+            left: Math.max(0, r.left) + "px",
+          });
+        }
+        updateMenuPos();
+        window.addEventListener("resize", updateMenuPos);
+        return function () {
+          window.removeEventListener("resize", updateMenuPos);
+        };
+      }, [menuOpen]);
 
       useEffect(function () {
         if (!menuOpen) return undefined;
@@ -867,24 +1224,39 @@ window.__ModuleLoader__.load({
             setMenuOpen(false);
           }
         }
+        function onKeyDown(event) {
+          if (event.key === "Escape") setMenuOpen(false);
+        }
         window.document.addEventListener("mousedown", onDocMouseDown);
+        window.document.addEventListener("keydown", onKeyDown);
         return function () {
           window.document.removeEventListener("mousedown", onDocMouseDown);
+          window.document.removeEventListener("keydown", onKeyDown);
         };
       }, [menuOpen]);
 
       return h("div", { className: "al-apps", ref: rootRef },
         h("button", {
           className: "al-apps-btn",
-          title: t("appsButton"),
-          "aria-label": t("appsButton"),
+          ref: btnRef,
+          title: t("menuButton"),
+          "aria-label": t("menuButton"),
+          "aria-haspopup": "menu",
           "aria-expanded": menuOpen ? "true" : "false",
           onClick: function () { setMenuOpen(!menuOpen); },
         },
-          appsIcon(16),
-          wide ? h("span", null, t("appsButton")) : null),
+          menuIcon(16),
+          wide ? h("span", null, t("menuButton")) : null),
         menuOpen
-          ? h("div", { className: "al-menu", role: "menu" },
+          ? h("div", { className: "al-menu", style: menuPos || undefined, role: "menu" },
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  openShellSettings();
+                },
+              }, gearIcon(16), h("span", null, t("settingsItem"))),
               h("button", {
                 className: "al-menu-item",
                 role: "menuitem",
@@ -892,7 +1264,7 @@ window.__ModuleLoader__.load({
                   setMenuOpen(false);
                   setPanelOpen(true);
                 },
-              }, appsIcon(14), h("span", null, t("menuItem"))))
+              }, appsIcon(16), h("span", null, t("appsItem"))))
           : null,
       );
     }
@@ -986,7 +1358,7 @@ window.__ModuleLoader__.load({
           order: 10,
           locale: NS,
           inject: function () { return { t: ctx.locale.bind(NS) }; },
-        }, AppsFooterAction);
+        }, MenuFooterAction);
       });
       ctx.slots.inject("shell.overlay", function () {
         return ctx.slots.register({

@@ -11,9 +11,15 @@ from uuid import uuid4
 
 class AgentLoopHTTPError(RuntimeError):
     def __init__(self, status: int, body: str):
-        super().__init__("HTTP %s: %s" % (status, body[:500]))
+        detail = body[:500] or "(empty response body)"
+        super().__init__("HTTP %s: %s" % (status, detail))
         self.status = status
         self.body = body
+
+
+def _transport_error(url: str, exc: urllib.error.URLError) -> "AgentLoopHTTPError":
+    """Wrap a connection-level failure with an explicit, readable message."""
+    return AgentLoopHTTPError(0, "cannot connect to %s (%s)" % (url, exc.reason))
 
 
 @dataclass
@@ -60,6 +66,8 @@ class AgentClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             raise AgentLoopHTTPError(exc.code, raw) from exc
+        except urllib.error.URLError as exc:
+            raise _transport_error(url, exc) from exc
         if not raw:
             return {}
         return json.loads(raw)
@@ -77,8 +85,9 @@ class AgentClient:
         body = _multipart_body(boundary, fields, file_field, filename, content, content_type)
         headers = self._headers(json_body=False)
         headers["Content-Type"] = "multipart/form-data; boundary=%s" % boundary
+        url = self._url(path)
         request = urllib.request.Request(
-            self._url(path),
+            url,
             data=body,
             method="POST",
             headers=headers,
@@ -89,6 +98,8 @@ class AgentClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             raise AgentLoopHTTPError(exc.code, raw) from exc
+        except urllib.error.URLError as exc:
+            raise _transport_error(url, exc) from exc
         if not raw:
             return {}
         return json.loads(raw)
@@ -173,6 +184,8 @@ class AgentClient:
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             raise AgentLoopHTTPError(exc.code, raw) from exc
+        except urllib.error.URLError as exc:
+            raise _transport_error(url, exc) from exc
 
     def _url(self, path: str, params: Optional[Dict[str, str]] = None) -> str:
         url = "%s%s" % (self.base_url, path if path.startswith("/") else "/" + path)
