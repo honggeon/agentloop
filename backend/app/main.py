@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import get_settings
-from backend.app.routes import judge, live, runs
+from backend.app.routes import dsh, judge, live, runs
 
 
 settings = get_settings()
@@ -21,6 +21,7 @@ app.add_middleware(
 app.include_router(runs.router)
 app.include_router(judge.router)
 app.include_router(live.router)
+app.include_router(dsh.router)
 
 
 @app.get("/api/health")

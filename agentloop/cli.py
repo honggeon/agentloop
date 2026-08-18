@@ -56,6 +56,18 @@ def main(argv=None) -> int:
     import_calls.add_argument("--run", required=True)
     import_calls.add_argument("--log", required=True)
 
+    list_dsh = subparsers.add_parser("list-dsh-sessions", help="List locally recorded DeepSeek Harness sessions.")
+    list_dsh.add_argument("--dsh-home", default=None)
+    list_dsh.add_argument("--limit", type=int, default=20)
+    list_dsh.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
+
+    import_dsh = subparsers.add_parser("import-dsh-session", help="Convert a recorded DSH session into a run directory.")
+    import_dsh.add_argument("--session-id", default=None, help="DSH session id (session-<uuid>).")
+    import_dsh.add_argument("--workspace", default=None, help="DSH workspace dir name, to disambiguate duplicate ids.")
+    import_dsh.add_argument("--path", default=None, help="Direct path to a session.jsonl.zstd file.")
+    import_dsh.add_argument("--dsh-home", default=None)
+    import_dsh.add_argument("--out", default="runs")
+
     args = parser.parse_args(argv)
     if args.command == "fetch-session":
         return _fetch_session(args)
@@ -69,6 +81,10 @@ def main(argv=None) -> int:
         return _metrics_proxy(args)
     if args.command == "import-llm-calls":
         return _import_llm_calls(args)
+    if args.command == "list-dsh-sessions":
+        return _list_dsh_sessions(args)
+    if args.command == "import-dsh-session":
+        return _import_dsh_session(args)
     parser.error("unknown command")
     return 2
 
@@ -202,6 +218,65 @@ def _import_llm_calls(args) -> int:
 
     payload = import_proxy_log(Path(args.log), Path(args.run))
     print("Imported %s LLM calls to %s" % (len(payload["llm_calls"]), Path(args.run) / "llm_calls.json"))
+    return 0
+
+
+def _list_dsh_sessions(args) -> int:
+    from .dsh_source import default_dsh_home, list_sessions
+
+    dsh_home = Path(args.dsh_home).expanduser() if args.dsh_home else default_dsh_home()
+    sessions = list_sessions(dsh_home, limit=args.limit)
+    if args.json:
+        print(json.dumps({"dsh_home": str(dsh_home), "sessions": sessions}, ensure_ascii=False, indent=2))
+        return 0
+    if not sessions:
+        print("No DSH session recordings under %s" % dsh_home)
+        return 0
+    for item in sessions:
+        print(
+            "%s  %-40s  msgs=%s tools=%s  %s"
+            % (
+                item.get("session_id") or "?",
+                (item.get("title") or "(untitled)")[:40],
+                item.get("user_message_count", 0),
+                item.get("tool_call_count", 0),
+                item.get("workspace") or item.get("workspace_dir") or "",
+            )
+        )
+    return 0
+
+
+def _import_dsh_session(args) -> int:
+    from .dsh_source import (
+        default_dsh_home,
+        find_session_file,
+        load_session_response,
+        source_meta,
+    )
+
+    if args.path:
+        session_path = Path(args.path).expanduser()
+        if not session_path.is_file():
+            print("Missing %s" % session_path, file=sys.stderr)
+            return 2
+    elif args.session_id:
+        dsh_home = Path(args.dsh_home).expanduser() if args.dsh_home else default_dsh_home()
+        try:
+            session_path = find_session_file(dsh_home, args.session_id, args.workspace)
+        except (ValueError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    else:
+        print("import-dsh-session requires --session-id or --path", file=sys.stderr)
+        return 2
+
+    session_response = load_session_response(session_path)
+    session_id = session_response.get("session", {}).get("session_id") or session_path.parent.name
+    short_id = session_id[8:] if session_id.startswith("session-") else session_id
+    short_id = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in short_id) or "unknown"
+    run_dir = _run_dir(Path(args.out), "dsh-%s" % short_id)
+    _write_run_outputs(run_dir, session_response, source=source_meta(session_response))
+    print("Imported DSH session %s to %s" % (session_id, run_dir))
     return 0
 
 

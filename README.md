@@ -28,6 +28,31 @@ Outputs:
 - `runs/<run_id>/audit.json`
 - `runs/<run_id>/tool_audit.md`
 
+## Evaluate DeepSeek Harness (DSH) Agents
+
+agentloop can audit locally recorded DeepSeek Harness sessions. DSH writes every
+agent session to `~/.dsh/sessions/<workspace>/<session-id>/session.jsonl.zstd`;
+`agentloop/dsh_source.py` converts those event logs into the standard run
+contract, so audit, judge and dashboard work unchanged.
+
+```bash
+# List recorded DSH sessions (newest first)
+python3 -m agentloop.cli list-dsh-sessions
+
+# Import one session as a run directory, then judge it
+python3 -m agentloop.cli import-dsh-session --session-id session-<uuid>
+python3 -m agentloop.cli judge-run --run runs/<run-dir>
+```
+
+Backend routes (used by the DSH plugin):
+
+- `GET /api/dsh/sessions?limit=50` — list recorded DSH sessions.
+- `POST /api/dsh/import` `{ "session_id": "session-<uuid>" }` — import + audit,
+  returns `{ "run_id": ... }`. `DSH_HOME` env var overrides the default `~/.dsh`.
+
+A DSH web plugin that embeds this flow into the DSH settings page (设置 →
+Agent 评测) lives in `dsh-plugin/`; see `dsh-plugin/README.md`.
+
 ## Run a Smoke Chat
 
 ```bash
