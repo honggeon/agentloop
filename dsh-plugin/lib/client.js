@@ -343,15 +343,14 @@ window.__ModuleLoader__.load({
         ".al-apps{position:relative;display:flex;flex:none}",
         ".al-apps-btn{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:none;background:transparent;color:inherit;font-size:12px;cursor:pointer}",
         ".al-apps-btn:hover{background:rgba(127,127,127,.12)}",
-        ".al-menu{position:absolute;bottom:calc(100% + 6px);left:0;min-width:180px;background:var(--color-background,Canvas);color:inherit;border:1px solid var(--color-border,rgba(127,127,127,.3));border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;z-index:1200}",
+        ".al-menu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:180px;background:var(--color-background,Canvas);color:inherit;border:1px solid var(--color-border,rgba(127,127,127,.3));border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;z-index:1200}",
         ".al-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:inherit;font-size:12px;cursor:pointer;text-align:left}",
         ".al-menu-item:hover{background:rgba(127,127,127,.12)}",
-        /* shell 的 footArea 默认纵向堆叠；改成左右 flex 行（应用按钮在左，设置按钮在右，
-           用 order 交换 DOM 顺序）。折叠 rail 模式下恢复纵向。
-           哈希类名按后缀匹配，DSH 升级后若失效只需更新这里。 */
+        /* shell 的 footArea 默认纵向堆叠；改成左右 flex 行（设置按钮在左，应用按钮在右）。
+           折叠 rail 模式下恢复纵向。哈希类名按后缀匹配，DSH 升级后若失效只需更新这里。 */
         "[class*='footArea']{flex-direction:row!important;align-items:center}",
-        "[class*='footArea']>[class*='footerActions']{order:-1;flex:none;width:auto;justify-content:flex-start}",
         "[class*='footArea']>[class*='settingsArea']{flex:1;min-width:0}",
+        "[class*='footArea']>[class*='footerActions']{flex:none;width:auto;justify-content:flex-end}",
         "[class*='collapsed'] [class*='footArea']{flex-direction:column!important}",
         /* 覆盖层（shell.overlay 层默认 click-through，需要恢复指针事件）。
            位置/尺寸由内联样式给定：只覆盖中间栏（centerCol）。 */
