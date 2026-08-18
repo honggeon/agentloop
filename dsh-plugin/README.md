@@ -1,10 +1,11 @@
 # dsh-agentloop · DSH 上的 Agentloop 评测插件
 
 把 [agentloop](https://github.com/)（本仓库）接入 DeepSeek Harness：在 DSH Web
-「设置」里新增 **Agent 评测** 页面，列出本机 DSH 录制的 agent 会话，一键导入
-agentloop 做**确定性工具审计**，并且**指标直接在该页面内展示**——审计概览、
-审计发现、工具调用明细、阶段划分、轨迹预览，以及 DeepAgent 裁判的 13 维评分
-（裁判需模型凭据，可选运行）。也可以从页面跳转 agentloop 看板看完整报告。
+**侧边栏底部、设置按钮右侧**新增一个「应用」按钮（dropdown menu），菜单项
+「Agentloop 评测」点击后**全屏打开评测面板**。面板列出本机 DSH 录制的 agent
+会话，一键导入 agentloop 做**确定性工具审计**，并且**指标直接在面板内展示**——
+审计概览、审计发现、工具调用明细、阶段划分、轨迹预览，以及 DeepAgent 裁判的
+13 维评分（裁判需模型凭据，可选运行）。也可以从面板跳转 agentloop 看板看完整报告。
 
 ## 工作原理
 
@@ -16,9 +17,12 @@ runs/<run_id>/  (session.json / trajectory.jsonl / summary.json / audit.json …
         ▲
 agentloop FastAPI 后端  GET /api/dsh/sessions · POST /api/dsh/import
         ▲  HTTP（本插件 client bundle 直接 fetch）
-DSH 设置页「Agent 评测」（本插件，纯客户端，Host 侧为空操作）
+DSH 侧边栏「应用」菜单 → shell.overlay 全屏面板（本插件，纯客户端，Host 侧空操作）
 ```
 
+- UI 入口使用两个官方插槽：`sidebar.footer.action`（设置按钮旁的 footer
+  action，list 型插槽）放「应用」下拉按钮；`shell.overlay`（框架级浮层）
+  承载全屏面板，Esc 或 ✕ 关闭。
 - 审计、裁判、看板完全复用 agentloop 现有能力，插件只做入口。
 - 数据流走 agentloop 后端 HTTP API，因此 **不需要改 DSH 源码**，也不依赖
   DSH 的 host remote 机制；CORS 已默认放行 `http://127.0.0.1:3080`。
@@ -35,23 +39,25 @@ bash dsh-plugin/install.sh
 
 install.sh 会把本目录作为 file: 依赖装进 `~/.dsh/profiles/web` 并把注册块追加到
 该 profile 的 `cordis.patch.yml`。DSH host 热 watch patch 层，通常几秒内生效；
-若设置页没有出现「Agent 评测」，重启 DSH web 后刷新 `http://127.0.0.1:3080`。
+若侧边栏没有出现「应用」按钮，重启 DSH web 后刷新 `http://127.0.0.1:3080`。
 
 卸载：`bash dsh-plugin/uninstall.sh`。
 
 ## 使用
 
-1. 打开 DSH Web → 设置 → **Agent 评测**。
+1. 点击侧边栏底部（设置按钮右侧）的 **应用** 按钮 → 菜单中选 **Agentloop 评测**，
+   全屏面板打开。
 2. 确认「后端地址」（默认 `http://127.0.0.1:18080`）与「看板地址」
    （默认 `http://127.0.0.1:6173`），点「测试连接」。
 3. 「DSH 会话录制」里点「导入并审计」，导入后自动展开该 run 的指标。
-4. 「评测结果」列表里点「查看指标」，页面内直接展示：
+4. 「评测结果」列表里点「查看指标」，面板内直接展示：
    - 审计概览（消息/工具调用/缺失结果/最终回答字数等）
    - 审计发现（按 severity 着色）、阶段划分、工具调用明细表
    - 「展开轨迹」查看完整消息轨迹
    - DeepAgent 裁判：未裁判时可点「运行裁判」（调用 LLM），已裁判则展示
      总体结论、完成度得分和 13 个评测维度的状态/得分条
 5. 每行的「外部看板」链接可跳到 agentloop 完整看板（图表、Markdown 导出等）。
+6. Esc 或右上角 ✕ 关闭面板。
 
 ## 命令行等价用法
 

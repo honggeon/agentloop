@@ -1,10 +1,13 @@
 /**
  * dsh-agentloop — client bundle.
  *
- * 在 DSH「设置」中新增一个「Agent 评测」页面：
- *   1. 列出本机 DSH 录制的会话，一键导入 agentloop 做确定性审计；
- *   2. 直接在页面内展示评测指标——审计概览、发现、工具调用明细、
- *      阶段划分、轨迹预览，以及（可选）DeepAgent 裁判的 13 维评分。
+ * 入口形态：侧边栏底部、设置按钮右侧的「应用」按钮（sidebar.footer.action
+ * 插槽）。按钮弹出一个 dropdown menu，菜单项「Agentloop」点击后通过
+ * shell.overlay 插槽全屏打开评测面板（Esc 或 ✕ 关闭）。
+ *
+ * 面板内容：列出本机 DSH 录制的会话，一键导入 agentloop 做确定性审计；
+ * 指标直接展示——审计概览、发现、工具调用明细、阶段划分、轨迹预览，
+ * 以及（可选）DeepAgent 裁判的 13 维评分。
  *
  * 数据来源：agentloop FastAPI 后端（默认 http://127.0.0.1:18080）。
  *
@@ -22,15 +25,16 @@ window.__ModuleLoader__.load({
     var useState = React.useState;
     var useEffect = React.useEffect;
     var useCallback = React.useCallback;
+    var useRef = React.useRef;
 
     // =====================================================================
     // constants
     // =====================================================================
 
     /** Dictionary namespace owned by this plugin. */
-    var NS = "settings.agentloop";
+    var NS = "agentloop";
 
-    /** Services required by the Settings registration. */
+    /** Services required by the slot registrations. */
     var inject = ["slots", "locale"];
 
     /** localStorage key for the connection config. */
@@ -64,8 +68,10 @@ window.__ModuleLoader__.load({
     var STATUS_LABELS = { pass: "通过", partial: "部分", fail: "未通过", unknown: "未评估" };
 
     var zh = {
-      nav: "Agent 评测",
-      title: "Agentloop · DSH Agent 评测",
+      appsButton: "应用",
+      menuItem: "Agentloop 评测",
+      panelTitle: "Agentloop · DSH Agent 评测",
+      close: "关闭",
       desc: "把本机 DeepSeek Harness 录制的会话导入 agentloop，做确定性工具审计与轨迹分析；指标直接在本页展示。需要先启动 agentloop 后端（agentloop 仓库下 ./start.sh）。",
       apiBase: "后端地址",
       dashboardBase: "看板地址",
@@ -125,8 +131,10 @@ window.__ModuleLoader__.load({
     };
 
     var en = {
-      nav: "Agent Eval",
-      title: "Agentloop · DSH Agent Evaluation",
+      appsButton: "Apps",
+      menuItem: "Agentloop Eval",
+      panelTitle: "Agentloop · DSH Agent Evaluation",
+      close: "Close",
       desc: "Import locally recorded DeepSeek Harness sessions into agentloop for deterministic tool auditing; metrics render right here. Requires the agentloop backend (./start.sh in the agentloop repo).",
       apiBase: "Backend URL",
       dashboardBase: "Dashboard URL",
@@ -184,6 +192,35 @@ window.__ModuleLoader__.load({
       untitled: "(untitled)",
       external: "External dashboard",
     };
+
+    // =====================================================================
+    // module store: footer button ↔ fullscreen overlay
+    // =====================================================================
+
+    var store = { open: false };
+    var listeners = [];
+
+    function subscribe(listener) {
+      listeners.push(listener);
+      return function () {
+        listeners = listeners.filter(function (item) { return item !== listener; });
+      };
+    }
+
+    function setPanelOpen(open) {
+      store = { open: Boolean(open) };
+      listeners.slice().forEach(function (listener) { listener(store); });
+    }
+
+    function usePanelOpen() {
+      var pair = useState(store.open);
+      var open = pair[0];
+      var setOpen = pair[1];
+      useEffect(function () {
+        return subscribe(function (state) { setOpen(state.open); });
+      }, []);
+      return open;
+    }
 
     // =====================================================================
     // helpers
@@ -250,15 +287,25 @@ window.__ModuleLoader__.load({
       return "#9e9e9e";
     }
 
+    /** 2x2 网格图标（「应用」按钮）。 */
+    function appsIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": "true" },
+        h("rect", { x: 1, y: 1, width: 6, height: 6, rx: 1.5 }),
+        h("rect", { x: 9, y: 1, width: 6, height: 6, rx: 1.5 }),
+        h("rect", { x: 1, y: 9, width: 6, height: 6, rx: 1.5 }),
+        h("rect", { x: 9, y: 9, width: 6, height: 6, rx: 1.5 }));
+    }
+
     function injectCss() {
       var css = [
-        ".al-wrap{padding:4px 0;display:flex;flex-direction:column;gap:16px;max-width:1000px}",
+        ".al-wrap{display:flex;flex-direction:column;gap:16px;max-width:1000px;margin:0 auto;width:100%}",
         ".al-desc{opacity:.75;font-size:13px;line-height:1.6;margin:0}",
         ".al-card{border:1px solid var(--color-border,rgba(127,127,127,.25));border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}",
         ".al-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
         ".al-row label{font-size:12px;opacity:.7;min-width:60px}",
         ".al-row input{flex:1;min-width:200px;padding:5px 8px;border-radius:6px;border:1px solid var(--color-border,rgba(127,127,127,.35));background:transparent;color:inherit;font-size:12px}",
-        ".al-btn{padding:5px 12px;border-radius:6px;border:1px solid var(--color-border,rgba(127,127,127,.35));background:transparent;color:inherit;font-size:12px;cursor:pointer}",
+        ".al-btn{padding:5px 12px;border-radius:6px;border:1px solid var(--color-border,rgba(127,127,127,.35));background:transparent;color:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}",
         ".al-btn:hover:not(:disabled){background:rgba(127,127,127,.12)}",
         ".al-btn:disabled{opacity:.45;cursor:default}",
         ".al-btn-primary{border-color:var(--color-primary,#4f7cff);color:var(--color-primary,#4f7cff)}",
@@ -291,6 +338,20 @@ window.__ModuleLoader__.load({
         ".al-dim-bar{flex:1;height:6px;border-radius:3px;background:rgba(127,127,127,.18);overflow:hidden}",
         ".al-dim-bar-fill{height:100%;border-radius:3px}",
         ".al-dim-score{min-width:36px;text-align:right}",
+        /* 侧边栏「应用」按钮与下拉菜单 */
+        ".al-apps{position:relative;display:flex}",
+        ".al-apps-btn{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:none;background:transparent;color:inherit;font-size:12px;cursor:pointer}",
+        ".al-apps-btn:hover{background:rgba(127,127,127,.12)}",
+        ".al-menu{position:absolute;bottom:calc(100% + 6px);left:0;min-width:180px;background:var(--color-background,Canvas);color:inherit;border:1px solid var(--color-border,rgba(127,127,127,.3));border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.28);padding:4px;z-index:1200}",
+        ".al-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:inherit;font-size:12px;cursor:pointer;text-align:left}",
+        ".al-menu-item:hover{background:rgba(127,127,127,.12)}",
+        /* 全屏面板（shell.overlay 层默认 click-through，需要恢复指针事件） */
+        ".al-overlay{position:fixed;inset:0;z-index:1100;pointer-events:auto;background:var(--color-background,Canvas);color:var(--color-text,CanvasText);display:flex;flex-direction:column}",
+        ".al-overlay-header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--color-border,rgba(127,127,127,.25))}",
+        ".al-overlay-title{font-size:15px;font-weight:600;margin:0;flex:1}",
+        ".al-overlay-close{border:none;background:transparent;color:inherit;font-size:18px;cursor:pointer;padding:4px 10px;border-radius:6px;line-height:1}",
+        ".al-overlay-close:hover{background:rgba(127,127,127,.12)}",
+        ".al-overlay-body{flex:1;overflow:auto;padding:20px}",
       ].join("\n");
       var tag = window.document.createElement("style");
       tag.textContent = css;
@@ -386,7 +447,7 @@ window.__ModuleLoader__.load({
     function Trajectory(props) {
       var messages = props.messages || [];
       if (!messages.length) return null;
-      return h("div", { className: "al-scroll" }, messages.map(function (m, i) {
+      return h("div", { className: "al-scroll", style: { maxHeight: "none" } }, messages.map(function (m, i) {
         var role = m.role || "?";
         var text = m.content || "";
         if (m.tool_calls && m.tool_calls.length) {
@@ -449,11 +510,11 @@ window.__ModuleLoader__.load({
     }
 
     // =====================================================================
-    // main component
+    // panel content (config + sessions + runs + metrics detail)
     // =====================================================================
 
-    function AgentLoopSection(props) {
-      var t = (props && props.t) || function (key) { return (zh[key] || key); };
+    function AgentLoopPanel(props) {
+      var t = props.t;
 
       var cfgPair = useState(loadConfig);
       var cfg = cfgPair[0];
@@ -779,25 +840,115 @@ window.__ModuleLoader__.load({
     }
 
     // =====================================================================
+    // sidebar footer 「应用」button + dropdown menu
+    // =====================================================================
+
+    function AppsFooterAction(props) {
+      var t = props.t;
+      var wide = !props || props.wide !== false;
+      var menuPair = useState(false);
+      var menuOpen = menuPair[0];
+      var setMenuOpen = menuPair[1];
+      var rootRef = useRef(null);
+
+      useEffect(function () {
+        if (!menuOpen) return undefined;
+        function onDocMouseDown(event) {
+          if (rootRef.current && !rootRef.current.contains(event.target)) {
+            setMenuOpen(false);
+          }
+        }
+        window.document.addEventListener("mousedown", onDocMouseDown);
+        return function () {
+          window.document.removeEventListener("mousedown", onDocMouseDown);
+        };
+      }, [menuOpen]);
+
+      return h("div", { className: "al-apps", ref: rootRef },
+        h("button", {
+          className: "al-apps-btn",
+          title: t("appsButton"),
+          "aria-label": t("appsButton"),
+          "aria-expanded": menuOpen ? "true" : "false",
+          onClick: function () { setMenuOpen(!menuOpen); },
+        },
+          appsIcon(16),
+          wide ? h("span", null, t("appsButton")) : null),
+        menuOpen
+          ? h("div", { className: "al-menu", role: "menu" },
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  setPanelOpen(true);
+                },
+              }, appsIcon(14), h("span", null, t("menuItem"))))
+          : null,
+      );
+    }
+
+    // =====================================================================
+    // fullscreen overlay (shell.overlay)
+    // =====================================================================
+
+    function FullscreenOverlay(props) {
+      var t = props.t;
+      var open = usePanelOpen();
+
+      useEffect(function () {
+        if (!open) return undefined;
+        function onKeyDown(event) {
+          if (event.key === "Escape") setPanelOpen(false);
+        }
+        window.document.addEventListener("keydown", onKeyDown);
+        return function () {
+          window.document.removeEventListener("keydown", onKeyDown);
+        };
+      }, [open]);
+
+      if (!open) return null;
+      return h("div", { className: "al-overlay", role: "dialog", "aria-label": t("panelTitle") },
+        h("div", { className: "al-overlay-header" },
+          h("p", { className: "al-overlay-title" }, t("panelTitle")),
+          h("button", {
+            className: "al-overlay-close",
+            "aria-label": t("close"),
+            title: t("close") + " (Esc)",
+            onClick: function () { setPanelOpen(false); },
+          }, "✕")),
+        h("div", { className: "al-overlay-body" },
+          h(AgentLoopPanel, { t: t })),
+      );
+    }
+
+    // =====================================================================
     // plugin entry
     // =====================================================================
 
-    /** Contribute the Agent 评测 page to the settings panel. */
+    /** Register the sidebar Apps dropdown and the fullscreen overlay. */
     function apply(ctx) {
       ctx.effect(function () {
         return ctx.locale.register(NS, { zh: zh, en: en });
       }, "agentloop: dictionaries");
-      var t = ctx.locale.bind(NS);
       var styleTag = injectCss();
-      ctx.slots.inject("settings.section", function () {
+      ctx.slots.inject("sidebar.footer.action", function () {
         return ctx.slots.register({
-          name: "settings.section",
+          name: "sidebar.footer.action",
           id: "agentloop",
-          order: 40,
-          label: function () { return t("nav"); },
+          order: 10,
           locale: NS,
           inject: function () { return { t: ctx.locale.bind(NS) }; },
-        }, AgentLoopSection);
+        }, AppsFooterAction);
+      });
+      ctx.slots.inject("shell.overlay", function () {
+        return ctx.slots.register({
+          name: "shell.overlay",
+          id: "agentloop",
+          order: 10,
+          locale: NS,
+          inject: function () { return { t: ctx.locale.bind(NS) }; },
+        }, FullscreenOverlay);
       });
       return function () {
         if (styleTag) styleTag.remove();
