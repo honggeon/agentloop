@@ -1,11 +1,13 @@
 # dsh-agentloop · DSH 上的 Agentloop 评测插件
 
 把 [agentloop](https://github.com/)（本仓库）接入 DeepSeek Harness：在 DSH Web
-**侧边栏底部、设置按钮右侧**新增一个「应用」按钮（dropdown menu），菜单项
-「Agentloop 评测」点击后**全屏打开评测面板**。面板列出本机 DSH 录制的 agent
-会话，一键导入 agentloop 做**确定性工具审计**，并且**指标直接在面板内展示**——
-审计概览、审计发现、工具调用明细、阶段划分、轨迹预览，以及 DeepAgent 裁判的
-13 维评分（裁判需模型凭据，可选运行）。也可以从面板跳转 agentloop 看板看完整报告。
+**侧边栏底部**把设置按钮和新增的「应用」按钮 flex 左右排列（设置左、应用右）。
+「应用」按钮弹出 dropdown menu，菜单项「Agentloop 评测」点击后在**中间栏
+（conversation 列）区域内**打开评测面板——不遮挡侧边栏，Esc 或 ✕ 关闭。
+面板列出本机 DSH 录制的 agent 会话，一键导入 agentloop 做**确定性工具审计**，
+并且**指标直接在面板内展示**——审计概览、审计发现、工具调用明细、阶段划分、
+轨迹预览，以及 DeepAgent 裁判的 13 维评分（裁判需模型凭据，可选运行）。
+也可以从面板跳转 agentloop 看板看完整报告。
 
 ## 工作原理
 
@@ -21,8 +23,10 @@ DSH 侧边栏「应用」菜单 → shell.overlay 全屏面板（本插件，纯
 ```
 
 - UI 入口使用两个官方插槽：`sidebar.footer.action`（设置按钮旁的 footer
-  action，list 型插槽）放「应用」下拉按钮；`shell.overlay`（框架级浮层）
-  承载全屏面板，Esc 或 ✕ 关闭。
+  action，list 型插槽）放「应用」下拉按钮，并用一段 CSS 覆盖把 shell 默认
+  纵向堆叠的 footArea 改成左右 flex 行；`shell.overlay`（框架级浮层）承载
+  面板，面板矩形通过 `ResizeObserver` 跟踪中间栏（`[class*='centerCol']`）
+  的视口位置，只覆盖中间栏区域，侧边栏保持可见可用。
 - 审计、裁判、看板完全复用 agentloop 现有能力，插件只做入口。
 - 数据流走 agentloop 后端 HTTP API，因此 **不需要改 DSH 源码**，也不依赖
   DSH 的 host remote 机制；CORS 已默认放行 `http://127.0.0.1:3080`。
