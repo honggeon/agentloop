@@ -2,10 +2,12 @@
  * dsh-agentloop — client bundle.
  *
  * 入口形态：侧边栏底部的「菜单」按钮（sidebar.footer.action 插槽）。点击弹出
- * 纵向菜单（position:fixed，按按钮视口矩形定位），内含「设置」「Agent测评」
- * 两个按钮：「设置」转发点击 shell 原生设置按钮（被 CSS 零尺寸裁切隐藏、保持
- * 挂载）打开原生设置面板；「Agent测评」通过 shell.overlay 插槽在中间栏
- * （centerCol）区域打开评测面板（不遮挡侧边栏；Esc 或 ✕ 关闭）。
+ * 纵向菜单（position:fixed，按按钮视口矩形定位），内含「设置」「切换皮肤」
+ * 「Agent测评」三个按钮：「设置」转发点击 shell 原生设置按钮（被 CSS 零尺寸
+ * 裁切隐藏、保持挂载）打开原生设置面板；「切换皮肤」转发点击 dsh-skin-nebula
+ * 的悬浮按钮（被 CSS 隐藏、保持挂载）并把皮肤菜单重定位到本菜单按钮上方；
+ * 「Agent测评」通过 shell.overlay 插槽在中间栏（centerCol）区域打开评测面板
+ * （不遮挡侧边栏；Esc 或 ✕ 关闭）。
  *
  * 面板内容：列出本机 DSH 录制的会话，一键导入 agentloop 做确定性审计；
  * 指标直接展示——审计概览、发现、工具调用明细、阶段划分、轨迹预览，
@@ -75,6 +77,7 @@ window.__ModuleLoader__.load({
     var zh = {
       menuButton: "菜单",
       settingsItem: "设置",
+      skinItem: "切换皮肤",
       appsItem: "Agent测评",
       panelTitle: "Agentloop · DSH Agent 评测",
       close: "关闭",
@@ -155,6 +158,7 @@ window.__ModuleLoader__.load({
     var en = {
       menuButton: "Menu",
       settingsItem: "Settings",
+      skinItem: "Switch skin",
       appsItem: "Agent Eval",
       panelTitle: "Agentloop · DSH Agent Evaluation",
       close: "Close",
@@ -433,6 +437,16 @@ window.__ModuleLoader__.load({
         h("rect", { x: 2, y: 10.8, width: 12, height: 1.8, rx: 0.9 }));
     }
 
+    /** T 恤图标（菜单里的「切换皮肤」项，与 dsh-skin-nebula 的悬浮按钮一致）。 */
+    function shirtIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" },
+        h("path", {
+          d: "M16.2 4 20 6.5c.4.3.6.8.4 1.3l-1.2 3c-.2.5-.8.8-1.3.6l-1.4-.5v8.1c0 .6-.4 1-1 1H8.5c-.6 0-1-.4-1-1v-8.1l-1.4.5c-.5.2-1.1-.1-1.3-.6l-1.2-3c-.2-.5 0-1 .4-1.3L7.8 4h2.4c.1 1 .8 1.7 1.8 1.7S13.7 5 13.8 4h2.4Z",
+          stroke: "currentColor", "stroke-width": 1.5, "stroke-linejoin": "round",
+        }));
+    }
+
     function injectCss() {
       var css = [
         ".al-wrap{display:flex;flex-direction:column;gap:16px;max-width:1000px;margin:0 auto;width:100%}",
@@ -498,6 +512,14 @@ window.__ModuleLoader__.load({
            position:fixed 覆盖层，不受零尺寸裁切影响）。
            哈希类名按后缀匹配，DSH 升级后若失效只需更新这里。 */
         "[class*='footArea']>[class*='settingsArea']{position:absolute;width:0;height:0;overflow:hidden;padding:0;margin:0}",
+        /* 右上角悬浮的「切换皮肤」按钮（dsh-skin-nebula 插件，shell.overlay 层，
+           T 恤图标）也搬进本菜单：按钮本体 display:none 保持挂载，菜单里的
+           「切换皮肤」项通过 JS 点击它展开皮肤菜单；皮肤菜单容器改为 fixed，
+           用 --al-skin-* CSS 变量定位到菜单按钮上方（变量由 JS 设置，见
+           MenuFooterAction）。button 前缀是为了压过 nebula 自带的类选择器
+           （nebula 渲染的是 <button class="dshSkinSwitcherBtn">）。 */
+        "button.dshSkinSwitcherBtn{display:none}",
+        "div.dshSkinSwitcher{position:fixed;top:auto;right:auto;left:var(--al-skin-left,56px);bottom:var(--al-skin-bottom,84px);align-items:flex-start}",
         /* 覆盖层（shell.overlay 层默认 click-through，需要恢复指针事件）。
            位置/尺寸由内联样式给定：只覆盖中间栏（centerCol）。 */
         ".al-overlay{position:fixed;z-index:1100;pointer-events:auto;background:var(--color-background,Canvas);color:var(--color-text,CanvasText);display:flex;flex-direction:column;border-left:1px solid var(--color-border,rgba(127,127,127,.25))}",
@@ -1172,7 +1194,7 @@ window.__ModuleLoader__.load({
     }
 
     // =====================================================================
-    // sidebar footer 「菜单」button + popup menu（设置 / 应用）
+    // sidebar footer 「菜单」button + popup menu（设置 / 切换皮肤 / Agent测评）
     // =====================================================================
 
     /**
@@ -1182,6 +1204,11 @@ window.__ModuleLoader__.load({
     function openShellSettings() {
       var btn = window.document.querySelector("[class*='footArea'] button[class*='trigger']");
       if (btn) btn.click();
+    }
+
+    /** dsh-skin-nebula 的悬浮「切换皮肤」按钮（被 CSS 隐藏、保持挂载）。 */
+    function findSkinSwitcherBtn() {
+      return window.document.querySelector(".dshSkinSwitcherBtn");
     }
 
     function MenuFooterAction(props) {
@@ -1235,6 +1262,21 @@ window.__ModuleLoader__.load({
         };
       }, [menuOpen]);
 
+      // 展开皮肤菜单：先把 --al-skin-* 变量对齐到菜单按钮上方，再转发点击
+      // 被隐藏的 nebula 悬浮按钮（它的内部 open 状态只能由它自己翻转）。
+      function openSkinSwitcher() {
+        var skinBtn = findSkinSwitcherBtn();
+        if (!skinBtn) return;
+        var anchor = btnRef.current;
+        if (anchor) {
+          var r = anchor.getBoundingClientRect();
+          var rootStyle = window.document.documentElement.style;
+          rootStyle.setProperty("--al-skin-left", Math.max(0, r.left) + "px");
+          rootStyle.setProperty("--al-skin-bottom", Math.max(0, window.innerHeight - r.top + 8) + "px");
+        }
+        skinBtn.click();
+      }
+
       return h("div", { className: "al-apps", ref: rootRef },
         h("button", {
           className: "al-apps-btn",
@@ -1257,6 +1299,16 @@ window.__ModuleLoader__.load({
                   openShellSettings();
                 },
               }, gearIcon(16), h("span", null, t("settingsItem"))),
+              findSkinSwitcherBtn()
+                ? h("button", {
+                    className: "al-menu-item",
+                    role: "menuitem",
+                    onClick: function () {
+                      setMenuOpen(false);
+                      openSkinSwitcher();
+                    },
+                  }, shirtIcon(16), h("span", null, t("skinItem")))
+                : null,
               h("button", {
                 className: "al-menu-item",
                 role: "menuitem",
@@ -1264,7 +1316,17 @@ window.__ModuleLoader__.load({
                   setMenuOpen(false);
                   setPanelOpen(true);
                 },
-              }, appsIcon(16), h("span", null, t("appsItem"))))
+              }, appsIcon(16), h("span", null, t("appsItem"))),
+              // ── rag-testing 集成（dsh-rag-testing 插件注入，2026-08-21）──
+              // 在「Agent测评」之后追加「RAG 测试」菜单项，调用 rag-testing 插件暴露的 opener
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  if (window.__RAG_TESTING_OPEN__) window.__RAG_TESTING_OPEN__();
+                },
+              }, appsIcon(16), h("span", null, "RAG 测试")))
           : null,
       );
     }

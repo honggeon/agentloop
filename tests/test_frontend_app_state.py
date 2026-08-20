@@ -47,6 +47,23 @@ def test_run_view_can_navigate_back_to_batch():
     assert "name: 'batch'" in source
 
 
+def test_trajectory_view_route_and_entry_exist():
+    trajectory_view = Path("frontend/src/views/TrajectoryView.vue")
+    router_source = ROUTER.read_text(encoding="utf-8")
+    run_source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert trajectory_view.exists()
+    assert 'path: "/runs/:runId/trajectory"' in router_source
+    assert 'name: "trajectory"' in router_source
+    assert "TrajectoryView" in router_source
+    assert "查看轨迹" in run_source
+    assert "name: 'trajectory'" in run_source
+    assert "TrajectoryMessage" in api_source
+    assert "/api/runs/" in trajectory_view.read_text(encoding="utf-8")
+    assert "/trajectory" in trajectory_view.read_text(encoding="utf-8")
+
+
 def test_run_view_contains_runtime_health_dashboard_sections():
     source = RUN_VIEW.read_text(encoding="utf-8")
     api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")

@@ -109,6 +109,12 @@ def get_run(run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "summary": load_run_summary(str(path))}
 
 
+@router.get("/runs/{run_id}/trajectory")
+def get_run_trajectory(run_id: str) -> dict[str, Any]:
+    path = _run_path_or_404(run_id)
+    return {"run_id": run_id, "messages": _read_jsonl(path / "trajectory.jsonl")}
+
+
 @router.get("/runs/{run_id}/audit")
 def get_run_audit(run_id: str) -> dict[str, Any]:
     path = _run_path_or_404(run_id)

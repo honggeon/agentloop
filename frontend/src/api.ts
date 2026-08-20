@@ -108,6 +108,38 @@ export interface ImportSessionResult {
   batch_summary: BatchSummary;
 }
 
+export interface TrajectoryToolCall {
+  id?: string;
+  call_id?: string;
+  response_item_id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+  name?: string;
+  arguments?: string;
+}
+
+export interface TrajectoryMessage {
+  index: number;
+  message_id?: string;
+  message_uuid?: string;
+  session_id?: string;
+  role: string;
+  timestamp?: string | number;
+  content?: string;
+  kind?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_calls?: TrajectoryToolCall[];
+  finish_reason?: string;
+  reasoning?: string;
+  reasoning_content?: string;
+}
+
+export interface TrajectoryPayload {
+  run_id: string;
+  messages: TrajectoryMessage[];
+}
+
 export interface RuntimeGraphNode {
   id: string;
   type: string;

@@ -4,60 +4,74 @@
 
 **Goal:** Add evidence-grounded agent evaluation dimensions and judge reliability checks so Agentloop can show not only what the judge concluded, but how trustworthy that conclusion is.
 
-**Architecture:** Keep the existing `agent_judge.json` contract backward compatible by adding `dimensions` and `judge_reliability` beside the existing `findings`, `metrics`, and `charts`. Deterministic code validates evidence and computes rule-based dimension signals; the DeepAgent judge may still provide semantic judgments, but unsupported claims are downgraded or surfaced in reliability metrics. Reports, exports, and the Vue run page read the same normalized report.
+**Architecture:** Keep the existing `agent_judge.json` contract backward compatible by adding `dimensions` and `judge_reliability` beside `findings`, `metrics`, and `charts`. Deterministic code validates evidence and applies a small set of downward caps; the DeepAgent judge still owns semantic dimensions. `write_judge_report` writes JSON, Markdown, and charts from the same normalized report. `assess_run_quality` remains the completion/deliverable cap and is not replaced by dimensions.
 
-**Tech Stack:** Python 3.11+, FastAPI backend, Vue 3 + TypeScript frontend, pytest for backend tests, existing Agentloop JSON artifacts (`summary.json`, `audit.json`, `trajectory.jsonl`, `agent_judge.json`).
+**Tech Stack:** Python 3.11+, FastAPI backend, Vue 3 + TypeScript frontend, pytest for backend tests, existing Agentloop JSON artifacts (`summary.json`, `audit.json`, `trajectory.jsonl`, `session.json`, `agent_judge.json`).
 
 ## Global Constraints
 
 - Preserve compatibility with existing reports that only contain `overall_status`, `completion_score`, `confidence`, `summary`, `findings`, `metrics`, and `charts`.
-- Do not require DeepAgent/model credentials for deterministic schema, evidence validation, or report-writing tests.
-- Treat deterministic facts as stronger than LLM judge output: invalid or missing evidence must affect `judge_reliability`.
+- Do not require DeepAgent/model credentials for deterministic schema, evidence validation, Markdown rendering, or report-writing tests.
+- Treat deterministic facts as stronger than LLM judge output: invalid or missing evidence must affect `judge_reliability`. Deterministic code may write scores only for directly observable dimensions (`evidence_citation`, `execution_closure`, and failure-only `error_recovery`) and may cap judge scores downward for failed-tool `tool_selection`; it must not upgrade semantic-only dimensions.
 - Every `fact` finding must have at least one valid evidence reference or be counted as unsupported.
 - Do not replace current `findings`; add dimensions as a structured evaluation view.
-- The current `/Users/chen/agentloop` directory is not a git repository. Skip commit commands during execution unless the user first moves this work into a git repo or initializes one.
+- `unknown` is a first-class status. Default dimensions use `status: "unknown"` and `source: "missing"`. UI, Markdown, and charts must not present unknown as fail.
+- This round's deterministic assessor only writes or caps: `evidence_citation`, `execution_closure`, `error_recovery` when a failure actually occurred, and a failure cap on `tool_selection`. Do not auto-pass `state_tracking`, `parameter_generation`, `safety_permission`, `efficiency`, or `error_recovery` when no recovery situation occurred.
+- `assess_run_quality` still owns completion score caps and missing-deliverable findings. Dimensions must not override `quality_score_cap` or duplicate delivery findings.
+- `judge_reliability` must keep `invalid_evidence` detail through `normalize_judge_report`. Notes from the validator are appended to, not replaced by, judge-provided notes.
+- `agent_judge.md` is written by `render_judge_markdown` in `agentloop/agents/schemas.py`. Backend export must reuse those helpers, not a second incompatible renderer.
+- LiveEvalView is out of scope. Only `RunView.vue` gains the new panels.
+- Keep the first implementation intentionally narrow. Do not add new chart components, new routes, database persistence, historical calibration UI, or golden-set management in this plan.
+- This directory is a git repository. Commit after each task. Do not push.
 
 ---
 
 ## File Structure
 
 - `agentloop/agents/schemas.py`
-  - Extend normalization for `dimensions` and `judge_reliability`.
-  - Add stable allowed dimension IDs and status enums.
-  - Keep old reports valid by generating default unknown dimensions.
+  - Normalize `dimensions` and `judge_reliability`, including `invalid_evidence`.
+  - Add stable dimension IDs, status/source enums, and source aliases for evidence.
+  - Extend `render_judge_markdown` so `agent_judge.md` includes dimensions and reliability.
+  - Export Markdown helpers the backend can reuse.
 
 - `agentloop/agents/evidence.py`
   - New deterministic evidence validator.
   - Loads `summary.json`, `audit.json`, `trajectory.jsonl`, and optional `session.json`.
-  - Verifies that evidence source exists, `message_index` points to a real trajectory row when present, and quote text appears in the referenced artifact.
+  - Rejects missing source, unknown source, missing quote, quote-not-found, and bad `message_index`.
+  - Maps source aliases (`trajectory`, `agent`, `audit`, `summary`, `session`) onto artifact filenames.
 
 - `agentloop/agents/dimensions.py`
   - New deterministic dimension assessor.
-  - Computes rule-backed checks for tool usage, parameter generation, state tracking, execution closure, safety, and efficiency.
-  - Merges judge-provided semantic dimension scores with deterministic caps and reliability results.
+  - Always scores `evidence_citation` from reliability.
+  - Scores `execution_closure` and `error_recovery` from trajectory/audit.
+  - Leaves `error_recovery` as unknown when no tool failure occurred.
+  - Caps `tool_selection` downward when tool calls failed; does not auto-pass on success.
+  - Leaves semantic-only dimensions as judge or `unknown`.
 
 - `agentloop/agents/tools.py`
-  - Call evidence validation and deterministic dimension assessment inside `write_judge_report`.
-  - Add `dimension_scores` and `judge_reliability` chart data.
+  - Validate judge evidence before quality merge, then merge quality and compute dimensions.
+  - Append validator notes; keep `invalid_evidence`.
+  - Write `charts.dimension_scores` and `charts.judge_reliability`.
 
 - `agentloop/agents/prompts.py`
-  - Require DeepAgent report output to include the agreed dimensions.
-  - Require evidence for dimension scores and findings.
+  - Require DeepAgent output to include the agreed dimensions and evidence.
+  - Tell the judge that deterministic code will recompute reliability and may cap some scores.
 
 - `backend/app/routes/runs.py`
-  - Include dimension and reliability tables in Markdown export.
+  - Reuse schema Markdown helpers in the export path.
 
 - `frontend/src/api.ts`
-  - Add TypeScript types for dimensions and judge reliability.
+  - Add TypeScript types for dimensions, evidence, and judge reliability.
 
 - `frontend/src/views/RunView.vue`
-  - Display dimension score rows and judge reliability metrics in the run detail page.
+  - Display Chinese dimension labels, unknown vs fail styling, and reliability metrics.
 
 - Tests:
   - `tests/test_agent_schemas.py`
   - `tests/test_agent_evidence.py`
   - `tests/test_agent_dimensions.py`
   - `tests/test_agent_tools.py`
+  - `tests/test_agent_graph.py`
   - `tests/test_backend_routes.py`
   - `tests/test_frontend_app_state.py`
 
@@ -72,14 +86,12 @@
 **Interfaces:**
 - Produces: `DIMENSION_DEFINITIONS: dict[str, str]`
 - Produces: `ALLOWED_DIMENSION_STATUS = {"pass", "partial", "fail", "unknown"}`
-- Produces normalized report field:
-  - `dimensions: dict[str, dict[str, Any]]`
-  - each dimension has `score: int`, `status: str`, `summary: str`, `evidence: list[dict[str, Any]]`, `recommendation: str`, `source: str`
-- Produces normalized report field:
-  - `judge_reliability: dict[str, Any]`
-  - keys: `evidence_coverage`, `unsupported_claim_count`, `invalid_evidence_count`, `fact_inference_mismatch_count`, `valid_evidence_count`, `total_evidence_count`, `notes`
+- Produces: `ALLOWED_DIMENSION_SOURCE = {"deterministic", "judge", "deterministic+judge", "missing"}`
+- Produces: `EVIDENCE_SOURCE_ALIASES: dict[str, str]`
+- Produces normalized `dimensions: dict[str, dict[str, Any]]` with `score`, `status`, `summary`, `evidence`, `recommendation`, `source`
+- Produces normalized `judge_reliability` with `evidence_coverage`, `unsupported_claim_count`, `invalid_evidence_count`, `fact_inference_mismatch_count`, `valid_evidence_count`, `total_evidence_count`, `notes`, `invalid_evidence`
 
-- [ ] **Step 1: Add failing tests for dimension defaults**
+- [ ] **Step 1: Add failing tests for dimension defaults and reliability detail**
 
 Add to `tests/test_agent_schemas.py`:
 
@@ -107,10 +119,13 @@ def test_normalize_judge_report_adds_default_dimensions_and_reliability():
     }
     assert report["judge_reliability"]["evidence_coverage"] == 0
     assert report["judge_reliability"]["unsupported_claim_count"] == 0
+    assert report["judge_reliability"]["invalid_evidence"] == []
     assert report["charts"]["dimension_scores"][0]["dimension"] == "intent_recognition"
+    assert report["charts"]["dimension_scores"][0]["label"] == "意图识别"
+    assert report["charts"]["dimension_scores"][0]["status"] == "unknown"
 ```
 
-- [ ] **Step 2: Add failing tests for Chinese dimension names and bounded scores**
+- [ ] **Step 2: Add failing tests for aliases, score bounds, and invalid_evidence preservation**
 
 Add to `tests/test_agent_schemas.py`:
 
@@ -126,6 +141,16 @@ def test_normalize_judge_report_maps_dimension_aliases_and_bounds_scores():
                 "意图识别": {"score": 120, "status": "通过", "summary": "识别正确", "source": "judge"},
                 "工具选择": {"score": -3, "status": "失败", "summary": "工具错了", "source": "deterministic"},
             },
+            "judge_reliability": {
+                "evidence_coverage": 0.5,
+                "unsupported_claim_count": 1,
+                "invalid_evidence_count": 1,
+                "fact_inference_mismatch_count": 2,
+                "valid_evidence_count": 1,
+                "total_evidence_count": 2,
+                "notes": ["one invalid quote"],
+                "invalid_evidence": [{"location": "findings.0", "reason": "quote_not_found", "quote": "nope"}],
+            },
         }
     )
 
@@ -133,6 +158,8 @@ def test_normalize_judge_report_maps_dimension_aliases_and_bounds_scores():
     assert report["dimensions"]["intent_recognition"]["status"] == "pass"
     assert report["dimensions"]["tool_selection"]["score"] == 0
     assert report["dimensions"]["tool_selection"]["status"] == "fail"
+    assert report["judge_reliability"]["invalid_evidence"][0]["reason"] == "quote_not_found"
+    assert report["judge_reliability"]["fact_inference_mismatch_count"] == 2
 ```
 
 - [ ] **Step 3: Run tests and verify failure**
@@ -163,6 +190,19 @@ DIMENSION_DEFINITIONS = {
 }
 ALLOWED_DIMENSION_STATUS = {"pass", "partial", "fail", "unknown"}
 ALLOWED_DIMENSION_SOURCE = {"deterministic", "judge", "deterministic+judge", "missing"}
+EVIDENCE_SOURCE_ALIASES = {
+    "trajectory": "trajectory.jsonl",
+    "trajectory.jsonl": "trajectory.jsonl",
+    "agent": "trajectory.jsonl",
+    "messages": "trajectory.jsonl",
+    "audit": "audit.json",
+    "audit.json": "audit.json",
+    "tools": "audit.json",
+    "summary": "summary.json",
+    "summary.json": "summary.json",
+    "session": "session.json",
+    "session.json": "session.json",
+}
 ```
 
 Add normalizer helpers:
@@ -174,10 +214,28 @@ def _normalize_dimensions(value: object) -> Dict[str, Dict[str, Any]]:
     for key in DIMENSION_DEFINITIONS:
         item = raw.get(key)
         if item is None:
-            label = DIMENSION_DEFINITIONS[key]
-            item = raw.get(label)
+            item = raw.get(DIMENSION_DEFINITIONS[key])
         normalized[key] = _normalize_dimension(item)
     return normalized
+
+
+def _dimension_status(value: object) -> str:
+    text = str(value or "unknown").strip().lower()
+    text = {
+        "通过": "pass",
+        "合格": "pass",
+        "部分通过": "partial",
+        "失败": "fail",
+        "不通过": "fail",
+        "未知": "unknown",
+    }.get(text, text)
+    return _choice(text, ALLOWED_DIMENSION_STATUS, "unknown", "dimension.status")
+
+
+def _dimension_source(value: object) -> str:
+    text = str(value or "missing").strip().lower()
+    text = {"规则": "deterministic", "确定性": "deterministic", "模型": "judge", "评审": "judge"}.get(text, text)
+    return _choice(text, ALLOWED_DIMENSION_SOURCE, "missing", "dimension.source")
 
 
 def _normalize_dimension(value: object) -> Dict[str, Any]:
@@ -194,11 +252,11 @@ def _normalize_dimension(value: object) -> Dict[str, Any]:
         normalized_evidence.extend(_normalize_evidence(row))
     return {
         "score": _score(item.get("score", 0)),
-        "status": _choice(item.get("status"), ALLOWED_DIMENSION_STATUS, "unknown", "dimension.status"),
+        "status": _dimension_status(item.get("status")),
         "summary": str(item.get("summary") or ""),
         "evidence": normalized_evidence,
         "recommendation": str(item.get("recommendation") or ""),
-        "source": _choice(item.get("source"), ALLOWED_DIMENSION_SOURCE, "missing", "dimension.source"),
+        "source": _dimension_source(item.get("source")),
     }
 
 
@@ -214,6 +272,9 @@ def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
         notes = [notes]
     if not isinstance(notes, list):
         notes = []
+    invalid = item.get("invalid_evidence") or []
+    if not isinstance(invalid, list):
+        invalid = []
     return {
         "evidence_coverage": max(0, min(1, float(coverage))),
         "unsupported_claim_count": max(0, int(item.get("unsupported_claim_count") or 0)),
@@ -222,8 +283,19 @@ def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
         "valid_evidence_count": valid,
         "total_evidence_count": total,
         "notes": [str(note) for note in notes if str(note).strip()],
+        "invalid_evidence": [row for row in invalid if isinstance(row, dict)],
     }
 ```
+
+Update `_normalize_evidence` so aliased sources become artifact filenames:
+
+```python
+source = str(item.get("source") or "")
+aliased = EVIDENCE_SOURCE_ALIASES.get(source.strip().lower(), source)
+base = {"source": aliased, "quote": str(item.get("quote") or "")[:500]}
+```
+
+Keep the existing `message_index` expansion behavior.
 
 Update `normalize_judge_report` to include:
 
@@ -231,45 +303,35 @@ Update `normalize_judge_report` to include:
 dimensions = _normalize_dimensions(report.get("dimensions"))
 judge_reliability = _normalize_judge_reliability(report.get("judge_reliability"))
 charts["dimension_scores"] = [
-    {"dimension": key, "label": DIMENSION_DEFINITIONS[key], "score": row["score"], "status": row["status"]}
+    {
+        "dimension": key,
+        "label": DIMENSION_DEFINITIONS[key],
+        "score": row["score"],
+        "status": row["status"],
+        "source": row["source"],
+    }
     for key, row in dimensions.items()
 ]
 ```
 
-Return `dimensions` and `judge_reliability` in the normalized report.
+Return `dimensions` and `judge_reliability` in the normalized report. Do not add `"失败": "fail"` to the shared `_CHOICE_SYNONYMS`; overall_status must keep `"失败": "failed"`.
 
-- [ ] **Step 5: Add Chinese enum synonyms**
-
-Extend `_CHOICE_SYNONYMS`:
-
-```python
-"通过": "pass",
-"合格": "pass",
-"部分通过": "partial",
-"不通过": "fail",
-"失败": "fail",
-"规则": "deterministic",
-"确定性": "deterministic",
-"模型": "judge",
-"评审": "judge",
-```
-
-Do not remove the existing `"失败": "failed"` behavior for `overall_status`; implement status-specific mapping by adding a local synonym map inside `_normalize_dimension` if this shared mapping causes a conflict. The safer implementation is:
-
-```python
-def _dimension_status(value: object) -> str:
-    text = str(value or "unknown").strip().lower()
-    text = {"通过": "pass", "合格": "pass", "部分通过": "partial", "失败": "fail", "不通过": "fail", "未知": "unknown"}.get(text, text)
-    return _choice(text, ALLOWED_DIMENSION_STATUS, "unknown", "dimension.status")
-```
-
-Then call `_dimension_status(item.get("status"))`.
-
-- [ ] **Step 6: Run schema tests**
+- [ ] **Step 5: Run schema tests**
 
 Run: `python3 -m pytest tests/test_agent_schemas.py -q`
 
 Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add agentloop/agents/schemas.py tests/test_agent_schemas.py
+git commit -m "$(cat <<'EOF'
+Add judge dimension and reliability schema defaults.
+
+EOF
+)"
+```
 
 ---
 
@@ -282,17 +344,13 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: normalized report from `normalize_judge_report(raw) -> dict`
 - Produces: `validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dict[str, Any]`
-- Produces result keys:
-  - `evidence_coverage: float`
-  - `unsupported_claim_count: int`
-  - `invalid_evidence_count: int`
-  - `fact_inference_mismatch_count: int`
-  - `valid_evidence_count: int`
-  - `total_evidence_count: int`
-  - `notes: list[str]`
-  - `invalid_evidence: list[dict[str, Any]]`
+- Metric meanings:
+  - `unsupported_claim_count`: `type=fact` findings with an empty evidence list
+  - `invalid_evidence_count`: evidence rows that fail source/quote/`message_index` checks
+  - `fact_inference_mismatch_count`: `type=fact` findings with zero valid evidence after validation (empty or all invalid). This is not a copy of `unsupported_claim_count`.
+  - Empty `quote` is invalid (`missing_quote`), never valid coverage.
 
-- [ ] **Step 1: Write failing tests for valid and invalid evidence**
+- [ ] **Step 1: Write failing tests for valid, invalid, empty-quote, and alias evidence**
 
 Create `tests/test_agent_evidence.py`:
 
@@ -319,7 +377,7 @@ def _write_evidence_run(tmp_path):
     return run
 
 
-def test_validate_judge_evidence_counts_valid_quotes(tmp_path):
+def test_validate_judge_evidence_counts_valid_quotes_and_aliases(tmp_path):
     run = _write_evidence_run(tmp_path)
     report = normalize_judge_report(
         {
@@ -333,7 +391,7 @@ def test_validate_judge_evidence_counts_valid_quotes(tmp_path):
                     "category": "tool",
                     "title": "工具超时",
                     "type": "fact",
-                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "timeout"}],
+                    "evidence": [{"source": "trajectory", "message_index": 1, "quote": "timeout"}],
                     "recommendation": "重试或换工具",
                 }
             ],
@@ -346,9 +404,11 @@ def test_validate_judge_evidence_counts_valid_quotes(tmp_path):
     assert reliability["total_evidence_count"] == 1
     assert reliability["evidence_coverage"] == 1
     assert reliability["invalid_evidence_count"] == 0
+    assert reliability["unsupported_claim_count"] == 0
+    assert reliability["fact_inference_mismatch_count"] == 0
 
 
-def test_validate_judge_evidence_flags_missing_quote_and_fact_without_evidence(tmp_path):
+def test_validate_judge_evidence_flags_missing_quote_empty_quote_and_unsupported_fact(tmp_path):
     run = _write_evidence_run(tmp_path)
     report = normalize_judge_report(
         {
@@ -373,6 +433,14 @@ def test_validate_judge_evidence_flags_missing_quote_and_fact_without_evidence(t
                     "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "not in row"}],
                     "recommendation": "修正引用",
                 },
+                {
+                    "severity": "low",
+                    "category": "tool",
+                    "title": "空引用",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": ""}],
+                    "recommendation": "补 quote",
+                },
             ],
         }
     )
@@ -380,10 +448,11 @@ def test_validate_judge_evidence_flags_missing_quote_and_fact_without_evidence(t
     reliability = validate_judge_evidence(run, report)
 
     assert reliability["unsupported_claim_count"] == 1
-    assert reliability["invalid_evidence_count"] == 1
-    assert reliability["fact_inference_mismatch_count"] == 1
+    assert reliability["invalid_evidence_count"] == 2
+    assert reliability["fact_inference_mismatch_count"] == 3
     assert reliability["evidence_coverage"] == 0
-    assert reliability["invalid_evidence"][0]["reason"] == "quote_not_found"
+    reasons = {row["reason"] for row in reliability["invalid_evidence"]}
+    assert reasons == {"quote_not_found", "missing_quote"}
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
@@ -403,38 +472,50 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .schemas import EVIDENCE_SOURCE_ALIASES
+
 
 def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dict[str, Any]:
-    run_dir = Path(run_path)
-    artifacts = _load_artifacts(run_dir)
+    artifacts = _load_artifacts(Path(run_path))
     evidence_rows = _collect_evidence(report)
     invalid = []
     valid_count = 0
+    valid_by_location: dict[str, int] = {}
 
     for location, evidence in evidence_rows:
         result = _validate_one_evidence(evidence, artifacts)
         if result is None:
             valid_count += 1
+            valid_by_location[location] = valid_by_location.get(location, 0) + 1
         else:
             invalid.append({"location": location, **evidence, "reason": result})
 
     fact_rows = _collect_fact_claims(report)
-    unsupported = sum(1 for _, item in fact_rows if not item.get("evidence"))
-    fact_inference_mismatch = unsupported
+    unsupported = 0
+    mismatch = 0
+    for location, item in fact_rows:
+        has_evidence = bool(item.get("evidence"))
+        if not has_evidence:
+            unsupported += 1
+            mismatch += 1
+            continue
+        if valid_by_location.get(location, 0) == 0:
+            mismatch += 1
+
     total = len(evidence_rows)
-    invalid_count = len(invalid)
-    coverage = round(valid_count / total, 4) if total else 0
     notes = []
     if unsupported:
         notes.append("%s fact claims have no evidence" % unsupported)
-    if invalid_count:
-        notes.append("%s evidence references are invalid" % invalid_count)
+    if invalid:
+        notes.append("%s evidence references are invalid" % len(invalid))
+    if mismatch:
+        notes.append("%s fact claims have no valid evidence" % mismatch)
 
     return {
-        "evidence_coverage": coverage,
+        "evidence_coverage": round(valid_count / total, 4) if total else 0,
         "unsupported_claim_count": unsupported,
-        "invalid_evidence_count": invalid_count,
-        "fact_inference_mismatch_count": fact_inference_mismatch,
+        "invalid_evidence_count": len(invalid),
+        "fact_inference_mismatch_count": mismatch,
         "valid_evidence_count": valid_count,
         "total_evidence_count": total,
         "notes": notes,
@@ -480,18 +561,21 @@ def _collect_fact_claims(report: dict[str, Any]) -> list[tuple[str, dict[str, An
         if isinstance(finding, dict) and finding.get("type") == "fact":
             rows.append(("findings.%s" % index, finding))
     return rows
-```
 
-Implement quote checks:
 
-```python
+def _canonical_source(source: str) -> str:
+    return EVIDENCE_SOURCE_ALIASES.get(str(source or "").strip().lower(), str(source or ""))
+
+
 def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) -> str | None:
-    source = str(evidence.get("source") or "")
-    quote = str(evidence.get("quote") or "")
+    source = _canonical_source(str(evidence.get("source") or ""))
+    quote = str(evidence.get("quote") or "").strip()
     if not source:
         return "missing_source"
     if source not in artifacts:
         return "source_not_found"
+    if not quote:
+        return "missing_quote"
     artifact = artifacts[source]
     if source == "trajectory.jsonl" and evidence.get("message_index") is not None:
         row = _find_trajectory_row(artifact, int(evidence["message_index"]))
@@ -500,7 +584,7 @@ def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) 
         haystack = json.dumps(row, ensure_ascii=False, default=str)
     else:
         haystack = json.dumps(artifact, ensure_ascii=False, default=str)
-    if quote and quote not in haystack:
+    if quote not in haystack:
         return "quote_not_found"
     return None
 
@@ -522,6 +606,17 @@ Run: `python3 -m pytest tests/test_agent_evidence.py -q`
 
 Expected: PASS.
 
+- [ ] **Step 5: Commit**
+
+```bash
+git add agentloop/agents/evidence.py tests/test_agent_evidence.py
+git commit -m "$(cat <<'EOF'
+Validate judge evidence against run artifacts.
+
+EOF
+)"
+```
+
 ---
 
 ### Task 3: Add Deterministic Dimension Assessment
@@ -533,9 +628,14 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `validate_judge_evidence(run_path, report) -> dict`
 - Produces: `assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability: dict[str, Any]) -> dict[str, dict[str, Any]]`
-- Uses normalized dimension shape from Task 1.
+- Deterministic this round:
+  - `evidence_citation`: from reliability; no evidence or any invalid evidence is fail/0
+  - `execution_closure`: final assistant text plus `overall_status`
+  - `error_recovery`: failed tools plus retry/additional-call signals; stays unknown when no failure occurred
+  - `tool_selection`: downward cap only when a tool failed; success must not become an automatic pass
+- Leave `intent_recognition`, `task_planning`, `parameter_generation`, `state_tracking`, `final_response`, `context_management`, `verification`, `safety_permission`, and `efficiency` as judge or `unknown`.
 
-- [ ] **Step 1: Write failing tests for deterministic tool and reliability dimensions**
+- [ ] **Step 1: Write failing tests for caps, unknown defaults, and evidence citation**
 
 Create `tests/test_agent_dimensions.py`:
 
@@ -572,20 +672,23 @@ def _write_tool_run(tmp_path, status="ok"):
     return run
 
 
-def test_assess_dimensions_marks_tool_selection_and_state_tracking_pass(tmp_path):
+def test_assess_dimensions_keeps_semantic_unknown_and_does_not_auto_pass_tool_selection(tmp_path):
     run = _write_tool_run(tmp_path)
     report = normalize_judge_report({"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"})
     reliability = validate_judge_evidence(run, report)
 
     dimensions = assess_dimensions(run, report, reliability)
 
-    assert dimensions["tool_selection"]["status"] == "pass"
-    assert dimensions["tool_selection"]["score"] >= 80
-    assert dimensions["state_tracking"]["status"] == "pass"
+    assert dimensions["tool_selection"]["status"] == "unknown"
+    assert dimensions["state_tracking"]["status"] == "unknown"
+    assert dimensions["safety_permission"]["status"] == "unknown"
+    assert dimensions["efficiency"]["status"] == "unknown"
     assert dimensions["execution_closure"]["status"] == "pass"
+    assert dimensions["error_recovery"]["status"] == "unknown"
+    assert dimensions["evidence_citation"]["status"] == "fail"
 
 
-def test_assess_dimensions_penalizes_invalid_evidence_and_tool_error(tmp_path):
+def test_assess_dimensions_caps_tool_selection_and_invalid_evidence(tmp_path):
     run = _write_tool_run(tmp_path, status="error")
     report = normalize_judge_report(
         {
@@ -594,12 +697,13 @@ def test_assess_dimensions_penalizes_invalid_evidence_and_tool_error(tmp_path):
             "confidence": "medium",
             "summary": "x",
             "dimensions": {
+                "tool_selection": {"score": 90, "status": "pass", "source": "judge"},
                 "evidence_citation": {
                     "score": 90,
                     "status": "pass",
                     "source": "judge",
                     "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "missing quote"}],
-                }
+                },
             },
         }
     )
@@ -608,6 +712,7 @@ def test_assess_dimensions_penalizes_invalid_evidence_and_tool_error(tmp_path):
     dimensions = assess_dimensions(run, report, reliability)
 
     assert dimensions["tool_selection"]["status"] == "fail"
+    assert dimensions["tool_selection"]["score"] < 90
     assert dimensions["error_recovery"]["status"] in {"partial", "fail"}
     assert dimensions["evidence_citation"]["status"] == "fail"
     assert dimensions["evidence_citation"]["score"] == 0
@@ -630,7 +735,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report
+from .schemas import normalize_judge_report
 
 
 def assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -640,13 +745,9 @@ def assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability:
     audit = _read_json(run_dir / "audit.json")
     trajectory = _read_jsonl(run_dir / "trajectory.jsonl")
 
-    _set_dimension(dimensions, "tool_selection", *_tool_selection_score(audit))
-    _set_dimension(dimensions, "parameter_generation", *_parameter_generation_score(audit))
-    _set_dimension(dimensions, "state_tracking", *_state_tracking_score(audit, trajectory))
+    _cap_dimension(dimensions, "tool_selection", *_tool_selection_cap(audit))
     _set_dimension(dimensions, "execution_closure", *_execution_closure_score(trajectory, normalized))
-    _set_dimension(dimensions, "error_recovery", *_error_recovery_score(audit, trajectory))
-    _set_dimension(dimensions, "safety_permission", *_safety_permission_score(audit))
-    _set_dimension(dimensions, "efficiency", *_efficiency_score(audit))
+    _cap_dimension(dimensions, "error_recovery", *_error_recovery_score(audit, trajectory))
     _set_dimension(dimensions, "evidence_citation", *_evidence_citation_score(reliability))
     return dimensions
 ```
@@ -656,7 +757,36 @@ Add helpers:
 ```python
 def _set_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int, status: str, summary: str, recommendation: str) -> None:
     current = dimensions.get(key) or {}
-    if current.get("source") == "judge" and int(current.get("score") or 0) < score:
+    judge_score = int(current.get("score") or 0)
+    if current.get("source") == "judge" and judge_score < score:
+        return
+    source = "deterministic" if current.get("source") in {"missing", None, ""} else "deterministic+judge"
+    dimensions[key] = {
+        "score": score,
+        "status": status,
+        "summary": summary,
+        "evidence": current.get("evidence") or [],
+        "recommendation": recommendation,
+        "source": source,
+    }
+
+
+def _cap_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int | None, status: str, summary: str, recommendation: str) -> None:
+    if score is None:
+        return
+    current = dimensions.get(key) or {}
+    current_score = int(current.get("score") or 0)
+    if current.get("source") in {"missing", None, ""}:
+        dimensions[key] = {
+            "score": score,
+            "status": status,
+            "summary": summary,
+            "evidence": current.get("evidence") or [],
+            "recommendation": recommendation,
+            "source": "deterministic",
+        }
+        return
+    if current_score <= score:
         return
     dimensions[key] = {
         "score": score,
@@ -664,7 +794,7 @@ def _set_dimension(dimensions: dict[str, dict[str, Any]], key: str, score: int, 
         "summary": summary,
         "evidence": current.get("evidence") or [],
         "recommendation": recommendation,
-        "source": "deterministic" if current.get("source") in {"missing", None, ""} else "deterministic+judge",
+        "source": "deterministic+judge" if current.get("source") == "judge" else "deterministic",
     }
 
 
@@ -691,36 +821,15 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 Add scoring rules:
 
 ```python
-def _tool_selection_score(audit: dict[str, Any]) -> tuple[int, str, str, str]:
+def _tool_selection_cap(audit: dict[str, Any]) -> tuple[int | None, str, str, str]:
     calls = [call for call in audit.get("tool_calls") or [] if isinstance(call, dict)]
     if not calls:
-        return 70, "partial", "No tool call was required or captured.", "Check intent before requiring tool use."
+        return None, "unknown", "No tool calls were captured.", "Leave tool selection to the judge when no tools ran."
     failed = sum(1 for call in calls if str(call.get("status") or "").lower() in {"error", "failed", "missing"})
+    if not failed:
+        return None, "unknown", "Tool calls succeeded; selection quality is not determined by success rate.", "Keep judge evidence for whether the chosen tools were appropriate."
     score = round(100 * (1 - failed / len(calls)))
-    return score, _status(score), "%s/%s tool calls succeeded." % (len(calls) - failed, len(calls)), "Investigate failed or unnecessary tool calls."
-
-
-def _parameter_generation_score(audit: dict[str, Any]) -> tuple[int, str, str, str]:
-    calls = [call for call in audit.get("tool_calls") or [] if isinstance(call, dict)]
-    if not calls:
-        return 70, "partial", "No tool parameters were captured.", "Capture tool arguments for parameter-level assessment."
-    invalid = 0
-    for call in calls:
-        preview = str(call.get("args_preview") or "")
-        if preview.strip().startswith("{"):
-            try:
-                json.loads(preview)
-            except json.JSONDecodeError:
-                invalid += 1
-    score = round(100 * (1 - invalid / len(calls)))
-    return score, _status(score), "%s invalid argument previews detected." % invalid, "Validate tool args before execution."
-
-
-def _state_tracking_score(audit: dict[str, Any], trajectory: list[dict[str, Any]]) -> tuple[int, str, str, str]:
-    messages = int(audit.get("message_count") or len(trajectory))
-    if messages <= 0:
-        return 0, "fail", "No messages were captured.", "Persist trajectory rows for every run."
-    return 90, "pass", "%s messages captured for state reconstruction." % messages, "Keep trajectory persistence enabled."
+    return score, _status(score), "%s/%s tool calls failed." % (failed, len(calls)), "Investigate failed or unnecessary tool calls."
 
 
 def _execution_closure_score(trajectory: list[dict[str, Any]], report: dict[str, Any]) -> tuple[int, str, str, str]:
@@ -732,32 +841,16 @@ def _execution_closure_score(trajectory: list[dict[str, Any]], report: dict[str,
     return 20, "fail", "No final assistant response was captured.", "Require final response before closing a run."
 
 
-def _error_recovery_score(audit: dict[str, Any], trajectory: list[dict[str, Any]]) -> tuple[int, str, str, str]:
+def _error_recovery_score(audit: dict[str, Any], trajectory: list[dict[str, Any]]) -> tuple[int | None, str, str, str]:
     calls = [call for call in audit.get("tool_calls") or [] if isinstance(call, dict)]
     failed = [call for call in calls if str(call.get("status") or "").lower() in {"error", "failed", "missing"}]
     if not failed:
-        return 90, "pass", "No tool failures were captured.", "No recovery action required."
+        return None, "unknown", "No tool failures were captured.", "Error recovery is not applicable for this run."
     retry_text = json.dumps(trajectory, ensure_ascii=False).lower()
     recovered = "retry" in retry_text or "重试" in retry_text or len(calls) > len(failed)
     if recovered:
         return 60, "partial", "Failures were followed by retry or additional action.", "Make recovery outcome explicit in the final response."
     return 30, "fail", "Failures were captured without clear recovery.", "Add retry, fallback, or explicit blocked state handling."
-
-
-def _safety_permission_score(audit: dict[str, Any]) -> tuple[int, str, str, str]:
-    risky = []
-    for call in audit.get("tool_calls") or []:
-        text = json.dumps(call, ensure_ascii=False).lower()
-        if "rm -rf" in text or "git reset --hard" in text or "delete" in text:
-            risky.append(call)
-    score = 40 if risky else 95
-    return score, _status(score), "%s risky operations detected." % len(risky), "Require explicit approval for destructive operations."
-
-
-def _efficiency_score(audit: dict[str, Any]) -> tuple[int, str, str, str]:
-    count = int(audit.get("tool_call_count") or len(audit.get("tool_calls") or []))
-    score = 95 if count <= 8 else 75 if count <= 20 else 45
-    return score, _status(score), "%s tool calls captured." % count, "Review repeated calls when count is high."
 
 
 def _evidence_citation_score(reliability: dict[str, Any]) -> tuple[int, str, str, str]:
@@ -775,6 +868,17 @@ Run: `python3 -m pytest tests/test_agent_dimensions.py -q`
 
 Expected: PASS.
 
+- [ ] **Step 5: Commit**
+
+```bash
+git add agentloop/agents/dimensions.py tests/test_agent_dimensions.py
+git commit -m "$(cat <<'EOF'
+Score only evidence-backed deterministic dimensions.
+
+EOF
+)"
+```
+
 ---
 
 ### Task 4: Merge Reliability and Dimensions During Report Writing
@@ -786,7 +890,10 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `validate_judge_evidence(run_path, report) -> dict`
 - Consumes: `assess_dimensions(run_path, report, reliability) -> dict`
-- Produces `agent_judge.json` with `dimensions`, `judge_reliability`, and `charts.dimension_scores`.
+- Produces `agent_judge.json` with `dimensions`, `judge_reliability` (including `invalid_evidence`), and `charts.dimension_scores`.
+- Validates judge evidence before `_merge_quality_report`, so `judge_reliability` measures only the judge output and is not polluted by `assess_run_quality` system findings.
+- Merges quality after evidence validation. Quality still owns `overall_status`, `completion_score`, `quality_score_cap`, deliverable metrics, and delivery findings.
+- Appends validator notes to any existing judge-provided notes.
 
 - [ ] **Step 1: Add failing report-writing test**
 
@@ -816,18 +923,29 @@ def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
     )
 
     report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    markdown = (run / "agent_judge.md").read_text(encoding="utf-8")
+    charts = json.loads((run / "chart_data.json").read_text(encoding="utf-8"))
 
     assert "tool_selection" in report["dimensions"]
     assert report["judge_reliability"]["valid_evidence_count"] == 1
     assert report["judge_reliability"]["invalid_evidence_count"] == 0
+    assert report["judge_reliability"]["invalid_evidence"] == []
+    assert any(finding["title"] == "Requested deliverable was not produced" for finding in report["findings"])
     assert any(row["dimension"] == "tool_selection" for row in report["charts"]["dimension_scores"])
+    assert any(row["dimension"] == "tool_selection" for row in charts["dimension_scores"])
+    assert "### Evaluation Dimensions" in markdown
+    assert "### Judge Reliability" in markdown
 ```
+
+Existing `_write_run` already writes a trajectory row with `ModuleNotFoundError` at index 1. It also contains `make ppt`, which may trigger `assess_run_quality` delivery findings; the reliability assertion must still stay at zero invalid evidence because reliability is computed before quality findings are merged.
+
+This proves quality findings can still be merged into the final report without being counted as judge evidence failures.
 
 - [ ] **Step 2: Run test and verify failure**
 
 Run: `python3 -m pytest tests/test_agent_tools.py::test_write_judge_report_adds_dimensions_and_reliability -q`
 
-Expected: FAIL because report writing does not merge reliability or dimensions.
+Expected: FAIL because report writing does not merge reliability or dimensions, and `render_judge_markdown` does not yet emit the new sections.
 
 - [ ] **Step 3: Update `write_judge_report`**
 
@@ -836,19 +954,29 @@ In `agentloop/agents/tools.py`, import:
 ```python
 from .dimensions import assess_dimensions
 from .evidence import validate_judge_evidence
-from .schemas import DIMENSION_DEFINITIONS
+from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report, render_judge_markdown
 ```
 
-Inside `write_judge_report`, after quality merge and before chart merge:
+Inside `write_judge_report`, validate the normalized judge report before quality merge:
 
 ```python
     reliability = validate_judge_evidence(str(run_dir), normalized)
-    existing_reliability = dict(normalized.get("judge_reliability") or {})
-    reliability.update({key: value for key, value in existing_reliability.items() if key == "notes" and value})
+    existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
+    merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]
+    reliability["notes"] = merged_notes
+```
+
+Then merge quality and add reliability/dimensions:
+
+```python
+    quality = assess_run_quality(str(run_dir))
+    normalized = _merge_quality_report(normalized, quality)
     normalized["judge_reliability"] = reliability
     normalized["dimensions"] = assess_dimensions(str(run_dir), normalized, reliability)
     normalized = normalize_judge_report(normalized)
 ```
+
+Do not validate evidence again after `_merge_quality_report`; quality findings are system-generated checks, not judge claims.
 
 After chart merge:
 
@@ -859,6 +987,7 @@ After chart merge:
             "label": DIMENSION_DEFINITIONS[key],
             "score": value["score"],
             "status": value["status"],
+            "source": value["source"],
         }
         for key, value in normalized.get("dimensions", {}).items()
     ]
@@ -870,11 +999,164 @@ After chart merge:
     }
 ```
 
-- [ ] **Step 4: Run tool tests**
+Do not drop `invalid_evidence` from `normalized["judge_reliability"]`. `normalize_judge_report` from Task 1 must keep it.
 
-Run: `python3 -m pytest tests/test_agent_tools.py -q`
+- [ ] **Step 4: Extend `render_judge_markdown` in `schemas.py`**
+
+This is required in this task because `write_judge_report` writes `agent_judge.md` through `render_judge_markdown`, not the backend export helper.
+
+Replace the current findings-only Markdown with helpers used by both the file writer and backend export:
+
+```python
+def render_judge_markdown(report: Dict[str, Any]) -> str:
+    normalized = normalize_judge_report(report)
+    lines = [
+        "# Agentloop Agent Judge",
+        "",
+        "## Summary",
+        "",
+        "- status: `%s`" % normalized["overall_status"],
+        "- completion_score: `%s`" % normalized["completion_score"],
+        "- confidence: `%s`" % normalized["confidence"],
+        "",
+        normalized["summary"] or "No summary provided.",
+        "",
+        render_dimensions_markdown(normalized.get("dimensions")),
+        "",
+        render_reliability_markdown(normalized.get("judge_reliability")),
+        "",
+        "## Findings",
+        "",
+    ]
+    findings = normalized.get("findings") or []
+    if not findings:
+        lines.append("- No findings.")
+    for item in findings:
+        lines.append(
+            "- **%s** `%s/%s/%s`: %s"
+            % (item["severity"], item["category"], item["type"], item["title"], item["recommendation"])
+        )
+        for evidence in item.get("evidence") or []:
+            source = evidence.get("source", "")
+            index = evidence.get("message_index")
+            quote = evidence.get("quote", "")
+            label = "%s#%s" % (source, index) if index is not None else source
+            lines.append("  - evidence `%s`: %s" % (label, quote))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_dimensions_markdown(dimensions: Any) -> str:
+    if not isinstance(dimensions, dict) or not dimensions:
+        return "### Evaluation Dimensions\n\nNo dimension scores."
+    rows = []
+    for key, item in dimensions.items():
+        if not isinstance(item, dict):
+            continue
+        label = DIMENSION_DEFINITIONS.get(key, key)
+        rows.append(
+            [
+                label,
+                item.get("score", ""),
+                item.get("status", ""),
+                item.get("source", ""),
+                item.get("summary", ""),
+                item.get("recommendation", ""),
+            ]
+        )
+    header = "Dimension | Score | Status | Source | Summary | Recommendation"
+    sep = "--- | --- | --- | --- | --- | ---"
+    body = "\n".join("|".join(_markdown_cell(value) for value in row) for row in rows)
+    return "### Evaluation Dimensions\n\n%s\n%s\n%s" % (header, sep, body)
+
+
+def render_reliability_markdown(reliability: Any) -> str:
+    if not isinstance(reliability, dict) or not reliability:
+        return "### Judge Reliability\n\nNo reliability metrics."
+    rows = [
+        ["Evidence Coverage", reliability.get("evidence_coverage", "")],
+        ["Unsupported Claims", reliability.get("unsupported_claim_count", "")],
+        ["Invalid Evidence", reliability.get("invalid_evidence_count", "")],
+        ["Fact/Inference Mismatch", reliability.get("fact_inference_mismatch_count", "")],
+        ["Valid Evidence", reliability.get("valid_evidence_count", "")],
+        ["Total Evidence", reliability.get("total_evidence_count", "")],
+    ]
+    body = "Metric | Value\n--- | ---\n" + "\n".join("|".join(_markdown_cell(value) for value in row) for row in rows)
+    invalid = reliability.get("invalid_evidence") or []
+    if invalid:
+        body += "\n\nInvalid evidence:\n"
+        for row in invalid:
+            if isinstance(row, dict):
+                body += "- `%s`: %s\n" % (_markdown_inline(row.get("location", "")), _markdown_inline(row.get("reason", "")))
+    return "### Judge Reliability\n\n%s" % body
+
+
+def _markdown_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("|", "\\|")
+
+
+def _markdown_inline(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("\n", " ").replace("`", "'")
+```
+
+Add a schema test that `render_judge_markdown` includes the new headings, so Task 4's Markdown assertion has a direct unit test:
+
+```python
+def test_render_judge_markdown_includes_dimensions_and_reliability():
+    markdown = render_judge_markdown(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "部分完成",
+            "dimensions": {
+                "intent_recognition": {
+                    "score": 80,
+                    "status": "pass",
+                    "summary": "理解目标",
+                    "recommendation": "保持",
+                    "source": "judge",
+                }
+            },
+            "judge_reliability": {
+                "evidence_coverage": 0.75,
+                "unsupported_claim_count": 1,
+                "invalid_evidence_count": 0,
+                "fact_inference_mismatch_count": 1,
+            },
+            "findings": [],
+        }
+    )
+    assert "### Evaluation Dimensions" in markdown
+    assert "意图识别" in markdown
+    assert "### Judge Reliability" in markdown
+    assert "0.75" in markdown
+```
+
+Keep `test_render_judge_markdown_includes_evidence` passing; do not remove the findings/evidence lines.
+
+- [ ] **Step 5: Run schema and tool tests**
+
+Run:
+
+```bash
+python3 -m pytest tests/test_agent_schemas.py tests/test_agent_tools.py -q
+```
 
 Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add agentloop/agents/tools.py agentloop/agents/schemas.py tests/test_agent_tools.py tests/test_agent_schemas.py
+git commit -m "$(cat <<'EOF'
+Merge reliability into judge reports and Markdown.
+
+EOF
+)"
+```
 
 ---
 
@@ -882,18 +1164,19 @@ Expected: PASS.
 
 **Files:**
 - Modify: `agentloop/agents/prompts.py`
-- Test: `tests/test_agent_graph.py` or `tests/test_agent_schemas.py`
+- Test: `tests/test_agent_graph.py`
 
 **Interfaces:**
 - Produces prompt requirement for `dimensions`.
-- Produces prompt requirement for `judge_reliability` as optional, because deterministic code recalculates it.
+- Produces prompt requirement that `judge_reliability` may be empty because deterministic code recalculates it.
+- Semantic-only dimensions may be `unknown` when the judge has no evidence.
 
 - [ ] **Step 1: Add failing prompt test**
 
 Add to `tests/test_agent_graph.py`:
 
 ```python
-from agentloop.agents.prompts import REPORT_WRITER_PROMPT
+from agentloop.agents.prompts import REPORT_WRITER_PROMPT, MAIN_SYSTEM_PROMPT
 
 
 def test_report_writer_prompt_requires_dimensions_and_reliability():
@@ -902,6 +1185,8 @@ def test_report_writer_prompt_requires_dimensions_and_reliability():
     assert "intent_recognition" in REPORT_WRITER_PROMPT
     assert "evidence_citation" in REPORT_WRITER_PROMPT
     assert "没有证据" in REPORT_WRITER_PROMPT
+    assert "unknown" in REPORT_WRITER_PROMPT
+    assert "dimensions" in MAIN_SYSTEM_PROMPT
 ```
 
 - [ ] **Step 2: Run prompt test and verify failure**
@@ -932,10 +1217,13 @@ In `REPORT_WRITER_PROMPT`, add this JSON contract section:
 
 每个 dimension 必须包含 score、status、summary、evidence、recommendation、source。
 status 只能是 pass|partial|fail|unknown。
-source 只能是 judge；确定性校验会在写入报告时覆盖或合并。
+没有证据时 status 必须是 unknown，不得写成 fail 或 pass，也不得用 0 分冒充已评估失败。
+source 只能先填 judge；确定性校验会在写入报告时覆盖 evidence_citation、execution_closure；只有发生工具失败时才会向下封顶 error_recovery；只有发生工具失败时才会封顶 tool_selection。
+没有工具失败时，error_recovery 必须保持 unknown，不能因为“没有失败”写成 pass。
+不要根据工具成功次数给 tool_selection 打高分；成功只说明调用没有报错，不说明选对了工具。
 没有证据的语义判断不得给 pass；没有证据的判断必须在 summary 中说明证据不足。
 
-- judge_reliability: object，可先填写空对象；系统会基于 evidence 重新计算。
+- judge_reliability: object，可先填写空对象；系统会基于 evidence 重新计算，并保留 invalid_evidence 明细。
 ```
 
 In `MAIN_SYSTEM_PROMPT`, add:
@@ -943,28 +1231,37 @@ In `MAIN_SYSTEM_PROMPT`, add:
 ```text
 - Agent 评测不是只看最终结论，还必须输出 dimensions 和 evidence。
 - 维度评分中的 fact 必须能回指 trajectory、audit、summary 或 session 中的证据。
+- 完成度仍以 assess_run_quality 的交付物检查为准；dimensions 不能推翻缺失交付物的失败结论。
 ```
 
-- [ ] **Step 4: Run prompt test**
+- [ ] **Step 4: Run prompt tests**
 
-Run: `python3 -m pytest tests/test_agent_graph.py::test_report_writer_prompt_requires_dimensions_and_reliability -q`
+Run: `python3 -m pytest tests/test_agent_graph.py -q`
 
-Expected: PASS.
+Expected: PASS. Existing completion/deliverable/evidence-chain assertions must still pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add agentloop/agents/prompts.py tests/test_agent_graph.py
+git commit -m "$(cat <<'EOF'
+Require evidence-grounded dimensions in judge prompts.
+
+EOF
+)"
+```
 
 ---
 
-### Task 6: Add Markdown Export for Dimensions and Judge Reliability
+### Task 6: Reuse Schema Markdown in Backend Export
 
 **Files:**
 - Modify: `backend/app/routes/runs.py`
 - Test: `tests/test_backend_routes.py`
 
 **Interfaces:**
-- Consumes `judge["dimensions"]`
-- Consumes `judge["judge_reliability"]`
-- Produces Markdown sections:
-  - `### Evaluation Dimensions`
-  - `### Judge Reliability`
+- Consumes `render_dimensions_markdown` and `render_reliability_markdown` from `agentloop.agents.schemas`
+- Produces export sections `### Evaluation Dimensions` and `### Judge Reliability`
 
 - [ ] **Step 1: Add failing backend render test**
 
@@ -1001,7 +1298,7 @@ def test_render_judge_markdown_includes_dimensions_and_reliability():
     )
 
     assert "### Evaluation Dimensions" in markdown
-    assert "intent_recognition" in markdown
+    assert "意图识别" in markdown
     assert "### Judge Reliability" in markdown
     assert "0.75" in markdown
 ```
@@ -1010,65 +1307,47 @@ def test_render_judge_markdown_includes_dimensions_and_reliability():
 
 Run: `python3 -m pytest tests/test_backend_routes.py::test_render_judge_markdown_includes_dimensions_and_reliability -q`
 
-Expected: FAIL because Markdown export does not render these sections.
+Expected: FAIL because backend export does not yet call the schema helpers.
 
-- [ ] **Step 3: Implement Markdown helpers**
+- [ ] **Step 3: Reuse schema helpers in backend export**
 
-In `backend/app/routes/runs.py`, add:
+In `backend/app/routes/runs.py`, import:
 
 ```python
-def _render_dimensions_markdown(dimensions: Any) -> str:
-    if not isinstance(dimensions, dict) or not dimensions:
-        return "### Evaluation Dimensions\n\nNo dimension scores."
-    rows = []
-    for key, item in dimensions.items():
-        if not isinstance(item, dict):
-            continue
-        rows.append(
-            [
-                key,
-                item.get("score", ""),
-                item.get("status", ""),
-                item.get("source", ""),
-                item.get("summary", ""),
-                item.get("recommendation", ""),
-            ]
-        )
-    return "### Evaluation Dimensions\n\n%s" % _markdown_table(
-        ["Dimension", "Score", "Status", "Source", "Summary", "Recommendation"],
-        rows,
-    )
-
-
-def _render_reliability_markdown(reliability: Any) -> str:
-    if not isinstance(reliability, dict) or not reliability:
-        return "### Judge Reliability\n\nNo reliability metrics."
-    rows = [
-        ["Evidence Coverage", reliability.get("evidence_coverage", "")],
-        ["Unsupported Claims", reliability.get("unsupported_claim_count", "")],
-        ["Invalid Evidence", reliability.get("invalid_evidence_count", "")],
-        ["Fact/Inference Mismatch", reliability.get("fact_inference_mismatch_count", "")],
-        ["Valid Evidence", reliability.get("valid_evidence_count", "")],
-        ["Total Evidence", reliability.get("total_evidence_count", "")],
-    ]
-    return "### Judge Reliability\n\n%s" % _markdown_table(["Metric", "Value"], rows)
+from agentloop.agents.schemas import render_dimensions_markdown, render_reliability_markdown
 ```
 
 Update `_render_judge_markdown` to include these sections before findings:
 
 ```python
-            _render_dimensions_markdown(judge.get("dimensions")),
+            "### Summary",
+            str(judge.get("summary") or ""),
             "",
-            _render_reliability_markdown(judge.get("judge_reliability")),
+            render_dimensions_markdown(judge.get("dimensions")),
+            "",
+            render_reliability_markdown(judge.get("judge_reliability")),
             "",
             _render_findings_markdown("### Judge Findings", judge.get("findings") or []),
 ```
+
+Do not reimplement table rendering in this file.
 
 - [ ] **Step 4: Run backend tests**
 
 Run: `python3 -m pytest tests/test_backend_routes.py -q`
 
 Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/routes/runs.py tests/test_backend_routes.py
+git commit -m "$(cat <<'EOF'
+Include judge dimensions in Markdown export.
+
+EOF
+)"
+```
 
 ---
 
@@ -1082,8 +1361,37 @@ Expected: PASS.
 **Interfaces:**
 - Consumes `JudgeReport.dimensions`
 - Consumes `JudgeReport.judge_reliability`
+- Shows Chinese labels from a local copy of the dimension map
+- `unknown` rows render as `未评估`, not as fail
+- Dimension rows are not clickable metric targets; `selectMetricTarget` has no matching anchors
 
-- [ ] **Step 1: Add TypeScript interfaces**
+- [ ] **Step 1: Add failing frontend source tests**
+
+Add to `tests/test_frontend_app_state.py`:
+
+```python
+def test_run_view_shows_evaluation_dimensions_and_judge_reliability():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")
+
+    assert "export interface JudgeDimension" in api_source
+    assert "export interface JudgeReliability" in api_source
+    assert "invalid_evidence" in api_source
+    assert "评测维度" in source
+    assert "Judge 可信度" in source
+    assert "dimensionRows" in source
+    assert "reliabilityRows" in source
+    assert "未评估" in source
+    assert "意图识别" in source
+```
+
+- [ ] **Step 2: Run the frontend source test and verify failure**
+
+Run: `python3 -m pytest tests/test_frontend_app_state.py::test_run_view_shows_evaluation_dimensions_and_judge_reliability -q`
+
+Expected: FAIL because the run page and types do not include the new fields.
+
+- [ ] **Step 3: Add TypeScript interfaces**
 
 In `frontend/src/api.ts`, add:
 
@@ -1092,6 +1400,8 @@ export interface JudgeEvidence {
   source: string;
   message_index?: number;
   quote: string;
+  reason?: string;
+  location?: string;
 }
 
 export interface JudgeDimension {
@@ -1111,6 +1421,7 @@ export interface JudgeReliability {
   valid_evidence_count: number;
   total_evidence_count: number;
   notes: string[];
+  invalid_evidence?: JudgeEvidence[];
 }
 ```
 
@@ -1124,7 +1435,29 @@ Update `JudgeReport`:
   metrics?: Record<string, unknown>;
 ```
 
-- [ ] **Step 2: Add computed rows in `RunView.vue`**
+`metrics` becomes `Record<string, unknown>` because dimension metrics may contain arrays and nested objects. If `npm run build` finds call sites that assumed only `number | string`, narrow those reads locally with `Number(...)`, `String(...)`, or explicit array checks instead of weakening the new type.
+
+- [ ] **Step 4: Add computed rows in `RunView.vue`**
+
+Near the other frontend constants, add:
+
+```ts
+const DIMENSION_LABELS: Record<string, string> = {
+  intent_recognition: "意图识别",
+  task_planning: "任务规划",
+  tool_selection: "工具选择",
+  parameter_generation: "参数生成",
+  evidence_citation: "证据引用",
+  state_tracking: "状态更新",
+  final_response: "最终表达",
+  context_management: "上下文管理",
+  execution_closure: "执行闭环",
+  error_recovery: "错误恢复",
+  verification: "验证能力",
+  safety_permission: "安全与权限",
+  efficiency: "成本与效率"
+};
+```
 
 In the `<script setup>` section, after `findingSeverityRows`, add:
 
@@ -1132,6 +1465,7 @@ In the `<script setup>` section, after `findingSeverityRows`, add:
 const dimensionRows = computed(() =>
   Object.entries(judge.value?.dimensions || {}).map(([key, item]) => ({
     key,
+    label: DIMENSION_LABELS[key] || key,
     score: Number(item.score || 0),
     status: item.status || "unknown",
     source: item.source || "missing",
@@ -1154,7 +1488,9 @@ const reliabilityRows = computed(() => {
 });
 ```
 
-- [ ] **Step 3: Render dimensions and reliability**
+`formatPercent` in `RunView.vue` multiplies by 100. `evidence_coverage` is 0-1, so `0.75` renders as `75%`. Do not pass a pre-multiplied percent.
+
+- [ ] **Step 5: Render dimensions and reliability**
 
 In the `report-grid` section before the existing `Agent 判断` panel, add:
 
@@ -1165,17 +1501,17 @@ In the `report-grid` section before the existing `Agent 判断` panel, add:
             <span class="chip quiet">{{ dimensionRows.length }}</span>
           </div>
           <div v-if="dimensionRows.length" class="dimension-list">
-            <button
+            <div
               v-for="row in dimensionRows"
               :key="row.key"
-              type="button"
-              @click="selectMetricTarget(row.key)"
+              class="dimension-row"
             >
-              <span>{{ row.key }}</span>
-              <strong>{{ row.score }}</strong>
-              <em :data-status="row.status">{{ row.status }}</em>
+              <span>{{ row.label }}</span>
+              <strong v-if="row.status !== 'unknown'">{{ row.score }}</strong>
+              <strong v-else>—</strong>
+              <em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
               <small>{{ row.summary || row.recommendation || row.source }}</small>
-            </button>
+            </div>
           </div>
           <p v-else class="empty">暂无维度评分。</p>
         </div>
@@ -1195,7 +1531,9 @@ In the `report-grid` section before the existing `Agent 判断` panel, add:
         </div>
 ```
 
-- [ ] **Step 4: Add minimal CSS if needed**
+Use `div.dimension-row`, not a button that calls `selectMetricTarget`.
+
+- [ ] **Step 6: Add minimal CSS if needed**
 
 If `dimension-list` has no styles, add near existing report styles:
 
@@ -1205,7 +1543,7 @@ If `dimension-list` has no styles, add near existing report styles:
   gap: 8px;
 }
 
-.dimension-list button {
+.dimension-row {
   display: grid;
   grid-template-columns: minmax(130px, 1fr) 56px 76px;
   gap: 10px;
@@ -1219,17 +1557,25 @@ If `dimension-list` has no styles, add near existing report styles:
   text-align: left;
 }
 
-.dimension-list small {
+.dimension-row small {
   grid-column: 1 / -1;
   color: #5a6b7d;
 }
+
+.dimension-row em[data-status="unknown"] {
+  color: #5a6b7d;
+  font-style: normal;
+}
 ```
 
-- [ ] **Step 5: Run frontend build**
+These colors match existing RunView report styles.
+
+- [ ] **Step 7: Run frontend tests and build**
 
 Run:
 
 ```bash
+python3 -m pytest tests/test_frontend_app_state.py -q
 cd frontend
 npm run build
 ```
@@ -1237,6 +1583,17 @@ npm run build
 Expected: PASS.
 
 If build fails because dependencies are missing, run `npm install` only after asking for network approval.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add frontend/src/api.ts frontend/src/views/RunView.vue tests/test_frontend_app_state.py
+git commit -m "$(cat <<'EOF'
+Show judge dimensions and reliability on the run page.
+
+EOF
+)"
+```
 
 ---
 
@@ -1248,6 +1605,7 @@ If build fails because dependencies are missing, run `npm install` only after as
 
 **Interfaces:**
 - Produces documentation for dimensions and judge reliability.
+- Smoke test uses `write_judge_report` on a temporary run fixture, not a hard-coded run id.
 
 - [ ] **Step 1: Update README DeepAgent Analysis section**
 
@@ -1256,10 +1614,10 @@ Add after the output file list:
 ```markdown
 `agent_judge.json` includes two reliability-focused sections:
 
-- `dimensions`: structured scores for intent recognition, task planning, tool selection, parameter generation, evidence citation, state tracking, final response, context management, execution closure, error recovery, verification, safety/permission, and efficiency.
-- `judge_reliability`: deterministic checks over the judge output, including evidence coverage, unsupported claims, invalid evidence references, and fact/inference mismatches.
+- `dimensions`: structured scores for intent recognition, task planning, tool selection, parameter generation, evidence citation, state tracking, final response, context management, execution closure, error recovery, verification, safety/permission, and efficiency. Missing evidence uses `unknown`, not fail.
+- `judge_reliability`: deterministic checks over the judge output, including evidence coverage, unsupported claims, invalid evidence references, fact claims with no valid evidence, and `invalid_evidence` detail.
 
-Deterministic checks validate evidence against `summary.json`, `audit.json`, `trajectory.jsonl`, and `session.json` when available. LLM judge conclusions remain useful for semantic assessment, but unsupported factual claims are surfaced in reliability metrics.
+Deterministic checks validate evidence against `summary.json`, `audit.json`, `trajectory.jsonl`, and `session.json` when available. This round scores `evidence_citation` and `execution_closure`, caps `error_recovery` only when a failure occurred, and caps `tool_selection` only when a tool failed. If no failure occurred, `error_recovery` remains `unknown`. LLM judge conclusions remain useful for semantic assessment, but unsupported factual claims are surfaced in reliability metrics. Completion still follows `assess_run_quality` deliverable checks.
 ```
 
 - [ ] **Step 2: Run backend unit tests**
@@ -1267,7 +1625,7 @@ Deterministic checks validate evidence against `summary.json`, `audit.json`, `tr
 Run:
 
 ```bash
-python3 -m pytest tests/test_agent_schemas.py tests/test_agent_evidence.py tests/test_agent_dimensions.py tests/test_agent_tools.py tests/test_backend_routes.py -q
+python3 -m pytest tests/test_agent_schemas.py tests/test_agent_evidence.py tests/test_agent_dimensions.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_backend_routes.py tests/test_frontend_app_state.py -q
 ```
 
 Expected: PASS.
@@ -1293,31 +1651,92 @@ npm run build
 
 Expected: PASS.
 
-- [ ] **Step 5: Manual smoke test with an existing run**
+- [ ] **Step 5: Fixture smoke test instead of a live run directory**
 
-Run:
+Do not call `judge-run` against `runs/20260814-...`. That directory is not in the repo and may need model credentials.
 
-```bash
-python3 -m agentloop.cli judge-run --run runs/20260814-175921-89433aa8-6993-47b3-ad81-c4c923348e5d
+Use this snippet during execution review:
+
+```python
+import json
+from pathlib import Path
+
+from agentloop.agents.tools import write_judge_report
+
+run = Path("runs") / "_judge-reliability-smoke"
+run.mkdir(parents=True, exist_ok=True)
+(run / "summary.json").write_text(json.dumps({"title": "smoke"}, ensure_ascii=False), encoding="utf-8")
+(run / "audit.json").write_text(
+    json.dumps({"tool_calls": [{"index": 1, "tool": "terminal", "status": "error", "result_preview": "timeout"}]}),
+    encoding="utf-8",
+)
+(run / "trajectory.jsonl").write_text(
+    "\n".join(
+        json.dumps(row, ensure_ascii=False)
+        for row in [
+            {"index": 0, "role": "user", "content": "请生成报告"},
+            {"index": 1, "role": "tool", "content": "timeout"},
+            {"index": 2, "role": "assistant", "content": "未能完成"},
+        ]
+    ),
+    encoding="utf-8",
+)
+write_judge_report(
+    str(run),
+    {
+        "overall_status": "failed",
+        "completion_score": 20,
+        "confidence": "high",
+        "summary": "工具超时",
+        "findings": [
+            {
+                "severity": "high",
+                "category": "tool",
+                "title": "timeout",
+                "type": "fact",
+                "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "timeout"}],
+                "recommendation": "retry",
+            }
+        ],
+    },
+)
 ```
 
 Expected:
 
-- `agent_judge.json` contains `dimensions`.
-- `agent_judge.json` contains `judge_reliability`.
+- `agent_judge.json` contains `dimensions` and `judge_reliability.invalid_evidence`.
 - `chart_data.json` contains `dimension_scores`.
-- `agent_judge.md` contains dimension and reliability sections.
+- `agent_judge.md` contains `### Evaluation Dimensions` and `### Judge Reliability`.
+- `dimensions.state_tracking.status` is `unknown` unless a judge score was supplied.
+- Delete `runs/_judge-reliability-smoke` after the check. Do not commit that directory.
 
-If optional DeepAgent dependencies or model credentials are unavailable, use an existing `agent_judge.json` fixture and call `write_judge_report` from a small local Python snippet during execution review instead of running the live judge.
+Cleanup command:
+
+```bash
+rm -rf runs/_judge-reliability-smoke
+```
+
+- [ ] **Step 6: Commit documentation**
+
+```bash
+git add README.md
+git commit -m "$(cat <<'EOF'
+Document judge dimensions and reliability checks.
+
+EOF
+)"
+```
 
 ---
 
 ## Self-Review
 
-**Spec coverage:** The plan covers dimensions, deterministic evidence validation, rule-first scoring, LLM prompt constraints, judge reliability metrics, Markdown export, frontend display, and documentation.
+**Spec coverage:** This plan now encodes the missing design decisions in Global Constraints: unknown vs fail, which dimensions are deterministic this round, `invalid_evidence` retention, `assess_run_quality` ownership of completion, shared Markdown helpers, and LiveEval out of scope.
 
-**Placeholder scan:** No unfinished placeholder markers or unspecified edge-case placeholders are intentionally left. The only conditional is network-dependent frontend dependency installation, which must ask for approval if needed.
+**Placeholder scan:** Smoke test includes a complete `write_judge_report` snippet. Frontend install still asks for network approval if `node_modules` is missing. No unfinished placeholder markers are left.
 
-**Type consistency:** `dimensions`, `judge_reliability`, `dimension_scores`, `validate_judge_evidence`, and `assess_dimensions` are consistently named across schema, tools, backend, frontend, and tests.
+**Type consistency:** `dimensions`, `judge_reliability`, `invalid_evidence`, `render_dimensions_markdown`, `render_reliability_markdown`, `validate_judge_evidence`, and `assess_dimensions` are named consistently across schema, evidence, dimensions, tools, backend, frontend, and tests.
 
-**Execution note:** Because `/Users/chen/agentloop` is not currently a git repository, the implementation worker should not run `git add` or `git commit` unless the user first confirms the intended repository setup.
+**Metric consistency:** `unsupported_claim_count` is empty-evidence facts; `fact_inference_mismatch_count` is facts with zero valid evidence after validation; empty quotes are `missing_quote`.
+
+**Execution note:** `/Users/chen/agentloop` is a git repository. Commit after each task. Do not push unless the user asks.

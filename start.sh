@@ -28,7 +28,7 @@ fi
 
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
 BACKEND_PORT="${BACKEND_PORT:-18080}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+FRONTEND_PORT="${FRONTEND_PORT:-6173}"
 RELOAD="${RELOAD:-0}"
 
 is_port_listening() {
@@ -43,7 +43,10 @@ wait_healthy() {
   local desc="$1" fn="$2" tries=30
   printf '等待 %s 就绪 ...' "$desc"
   for _ in $(seq 1 "$tries"); do
-    if $fn; then printf ' OK\n'; return 0; fi
+    if $fn; then
+      printf ' OK\n'
+      return 0
+    fi
     printf '.'
     sleep 1
   done
@@ -128,30 +131,30 @@ status() {
 }
 
 case "${1:-start}" in
-  start)
-    start_backend || exit 1
-    start_frontend || exit 1
-    echo ""
-    echo "✅ 全部就绪"
-    echo "   看板:    http://localhost:$FRONTEND_PORT"
-    echo "   后端:    http://localhost:$BACKEND_PORT/api/health"
-    echo "   日志:    $LOG_DIR"
-    ;;
-  stop)
-    stop_all
-    ;;
-  restart)
-    stop_all
-    sleep 1
-    start_backend || exit 1
-    start_frontend || exit 1
-    echo "✅ 重启完成"
-    ;;
-  status)
-    status
-    ;;
-  *)
-    echo "用法: $0 [start|stop|restart|status]"
-    exit 1
-    ;;
+start)
+  start_backend || exit 1
+  start_frontend || exit 1
+  echo ""
+  echo "✅ 全部就绪"
+  echo "   看板:    http://localhost:$FRONTEND_PORT"
+  echo "   后端:    http://localhost:$BACKEND_PORT/api/health"
+  echo "   日志:    $LOG_DIR"
+  ;;
+stop)
+  stop_all
+  ;;
+restart)
+  stop_all
+  sleep 1
+  start_backend || exit 1
+  start_frontend || exit 1
+  echo "✅ 重启完成"
+  ;;
+status)
+  status
+  ;;
+*)
+  echo "用法: $0 [start|stop|restart|status]"
+  exit 1
+  ;;
 esac

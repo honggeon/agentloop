@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import BatchView from "./views/BatchView.vue";
 import LiveEvalView from "./views/LiveEvalView.vue";
 import RunView from "./views/RunView.vue";
+import TrajectoryView from "./views/TrajectoryView.vue";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -17,6 +18,12 @@ const router = createRouter({
       name: "run",
       component: RunView,
       meta: { title: "单次评测" }
+    },
+    {
+      path: "/runs/:runId/trajectory",
+      name: "trajectory",
+      component: TrajectoryView,
+      meta: { title: "轨迹" }
     },
     {
       path: "/live",

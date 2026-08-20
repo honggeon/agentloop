@@ -595,6 +595,9 @@ onMounted(() => {
         </p>
       </div>
       <div class="hero-actions">
+        <button class="ghost" type="button" :disabled="!runId" @click="router.push({ name: 'trajectory', params: { runId } })">
+          查看轨迹
+        </button>
         <button class="ghost danger" type="button" :disabled="!runId || deleting" @click="deleteCurrentRun">
           {{ deleting ? "删除中" : "删除运行" }}
         </button>

@@ -69,6 +69,63 @@ def test_get_run_summary(tmp_path, monkeypatch):
     assert client.get("/api/runs/run-1").json()["summary"]["session_id"] == "s1"
 
 
+def test_get_run_trajectory_returns_normalized_messages(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    (run / "trajectory.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"index": 0, "role": "user", "timestamp": 1000, "content": "hello", "kind": "user_message"}),
+                json.dumps(
+                    {
+                        "index": 1,
+                        "role": "assistant",
+                        "timestamp": 2000,
+                        "content": "",
+                        "kind": "assistant_tool_request",
+                        "reasoning": "plan",
+                        "tool_calls": [{"id": "call-1", "function": {"name": "search", "arguments": "{\"q\": \"x\"}"}}],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "index": 2,
+                        "role": "tool",
+                        "timestamp": 3000,
+                        "tool_call_id": "call-1",
+                        "tool_name": "search",
+                        "content": "{\"ok\": true}",
+                        "kind": "tool_result",
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    data = client.get("/api/runs/run-1/trajectory").json()
+
+    assert data["run_id"] == "run-1"
+    assert [msg["kind"] for msg in data["messages"]] == ["user_message", "assistant_tool_request", "tool_result"]
+    assert data["messages"][1]["tool_calls"][0]["function"]["name"] == "search"
+    assert data["messages"][2]["tool_name"] == "search"
+
+
+def test_get_run_trajectory_empty_when_missing_file(tmp_path, monkeypatch):
+    _write_run(tmp_path)
+    (tmp_path / "runs" / "run-1" / "trajectory.jsonl").unlink()
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    data = client.get("/api/runs/run-1/trajectory").json()
+
+    assert data["run_id"] == "run-1"
+    assert data["messages"] == []
+
+
 def test_export_run_markdown_report_includes_runtime_and_judge(tmp_path, monkeypatch):
     run = _write_run(tmp_path)
     (run / "summary.json").write_text(
