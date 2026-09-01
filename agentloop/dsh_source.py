@@ -300,12 +300,32 @@ def _text_of_blocks(blocks, block_type: str = "text") -> str:
 
 
 def _model_of(events: List[Dict]) -> Optional[str]:
+    """Return the model recorded by ``request/header`` events.
+
+    DSH stores the model config at ``data.header.config.model``; older
+    recordings carried it directly on ``data``. A session resumed with a
+    different model logs another event, so the last match wins.
+    """
+    model: Optional[str] = None
     for event in events:
         if event.get("type") != "request/header":
             continue
         data = event.get("data") or {}
-        for key in ("model", "modelId", "model_id"):
-            value = data.get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
+        sources: List[Dict] = []
+        header = data.get("header")
+        if isinstance(header, dict) and isinstance(header.get("config"), dict):
+            sources.append(header["config"])
+        sources.append(data)
+        for source in sources:
+            value = next(
+                (
+                    source[key]
+                    for key in ("model", "modelId", "model_id")
+                    if isinstance(source.get(key), str) and source.get(key)
+                ),
+                None,
+            )
+            if value:
+                model = value
+                break
+    return model

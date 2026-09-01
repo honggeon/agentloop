@@ -13,6 +13,7 @@ from agentloop.dsh_source import (
     session_info,
     source_meta,
     validate_session_id,
+    _model_of,
 )
 
 SESSION_ID = "session-11111111-2222-4333-8444-555555555555"
@@ -199,6 +200,53 @@ def test_build_session_response_filters_chunks():
     assert meta["source_type"] == "dsh"
     assert meta["server_host"] == "deepseek-harness"
     assert meta["dsh_session_id"] == SESSION_ID
+
+
+def test_model_of_reads_nested_request_header_config():
+    events = _events() + [
+        {
+            "type": "request/header",
+            "seq": 13,
+            "time": 1787000000500,
+            "data": {"header": {"config": {"provider": "kimi-coding", "model": "k3"}}, "reason": "initial"},
+        }
+    ]
+    assert _model_of(events) == "k3"
+    response = build_session_response(events)
+    assert response["session"]["model"] == "k3"
+
+
+def test_model_of_last_event_wins_and_legacy_flat_shape():
+    events = [
+        {"type": "request/header", "data": {"model": "legacy-model"}},
+        {"type": "request/header", "data": {"header": {"config": {"model": "k3"}}}},
+    ]
+    assert _model_of(events) == "k3"
+    assert _model_of(events[:1]) == "legacy-model"
+    assert _model_of(_events()) is None
+
+
+def test_cli_render_run_recovers_dsh_model(tmp_path, capsys):
+    events = _events() + [
+        {
+            "type": "request/header",
+            "seq": 13,
+            "time": 1787000000500,
+            "data": {"header": {"config": {"model": "k3"}}},
+        }
+    ]
+    # Simulate a run imported before model extraction worked: session.model is
+    # already null, but the raw dsh_events are still in session.json.
+    response = build_session_response(events)
+    response["session"]["model"] = None
+    run = tmp_path / "runs" / "20260901-000000-dsh-old"
+    cli._write_run_outputs(run, response)
+    assert json.loads((run / "summary.json").read_text(encoding="utf-8"))["model"] is None
+
+    code = cli.main(["render-run", "--run", str(run)])
+    assert code == 0
+    summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+    assert summary["model"] == "k3"
 
 
 def test_cli_import_dsh_session_writes_run_contract(tmp_path, capsys):

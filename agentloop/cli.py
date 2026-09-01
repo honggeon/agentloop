@@ -153,9 +153,25 @@ def _render_run(args) -> int:
         )
         return 2
     session_response = json.loads(session_path.read_text(encoding="utf-8"))
+    _recover_dsh_model(session_response)
     _write_run_outputs(run_dir, session_response)
     print("Rendered run %s" % run_dir)
     return 0
+
+
+def _recover_dsh_model(session_response: Dict) -> None:
+    """Fill a missing session model from recorded DSH events, if present."""
+    session = session_response.get("session")
+    if not isinstance(session, dict) or session.get("model"):
+        return
+    events = session_response.get("dsh_events")
+    if not isinstance(events, list) or not events:
+        return
+    from .dsh_source import _model_of
+
+    model = _model_of(events)
+    if model:
+        session["model"] = model
 
 
 def _judge_run(args) -> int:
