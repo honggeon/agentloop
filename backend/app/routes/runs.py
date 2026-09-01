@@ -983,6 +983,8 @@ def _provider_from_model(model: str) -> str:
     lowered = model.lower()
     if "deepseek" in lowered:
         return "DeepSeek"
+    if "kimi" in lowered or lowered.startswith("k2") or lowered.startswith("k3"):
+        return "Moonshot"
     if "claude" in lowered:
         return "Anthropic"
     if "gemini" in lowered:

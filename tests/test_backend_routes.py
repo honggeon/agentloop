@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.config import Settings
 from backend.app.main import app
-from backend.app.routes.runs import _render_judge_markdown
+from backend.app.routes.runs import _provider_from_model, _render_judge_markdown
 
 
 def _write_run(tmp_path):
@@ -313,6 +313,14 @@ def test_get_runtime_metrics_keeps_recovered_tool_error_completed(tmp_path, monk
     assert data["status"] == "success"
     assert data["toolMetrics"]["failed"] == 1
     assert data["duration"] == 4
+
+
+def test_provider_from_model_maps_kimi_models():
+    assert _provider_from_model("k3") == "Moonshot"
+    assert _provider_from_model("kimi-coding") == "Moonshot"
+    assert _provider_from_model("k2-instruct") == "Moonshot"
+    assert _provider_from_model("deepseek-chat") == "DeepSeek"
+    assert _provider_from_model("some-custom-model") == "Unknown"
 
 
 def test_get_runtime_metrics_builds_llm_dashboard_from_structured_calls(tmp_path, monkeypatch):
