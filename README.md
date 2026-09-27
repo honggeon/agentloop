@@ -53,6 +53,75 @@ Backend routes (used by the DSH plugin):
 A DSH web plugin that embeds this flow into the DSH settings page (设置 →
 Agent 评测) lives in `dsh-plugin/`; see `dsh-plugin/README.md`.
 
+## Run a Deterministic Case Suite
+
+`cases/` holds machine-readable acceptance-case suites. A case declares the argv
+to run, an optional file fixture, optional environment overrides, and the
+expected outcome; the runner turns every expectation into an explicit check and
+reports a verdict.
+
+```bash
+# Run the DSH launcher suite, write cases/results/<suite>-<stamp>.{json,md}
+python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json
+
+# Only one case or one module; print without writing reports
+python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json --only DSH-CLI-002 --no-write
+
+# Point the suite at another binary
+python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json --bin ./node_modules/.bin/dsh
+```
+
+Exit code is `0` when the suite passes and `1` otherwise, so it can gate CI.
+Verdicts: `passed`, `failed`, `xfail` (a known defect, asserted as it *should*
+behave — recorded under `defect` and not counted as a failure), `xpass` (a known
+defect that now passes: the suite must be updated, so this fails the run), and
+`error` (timeout or spawn failure — never absorbed by `xfail`, because a broken
+environment must stay visible).
+
+Expectations in `cases/dsh-cli.json` were captured from real runs, not read off
+documentation. `xfail` cases there assert behaviour the launcher should have;
+they fail on `0.1.2-rc.1` and name the defect. Fix the defect and drop the
+`xfail` flag rather than deleting the case.
+
+Supported case fields: `args` (argv, `{tmp}` expands to the fixture dir),
+`files` (fixture files), `env` (environment overrides, e.g. an isolated
+`DSH_HOME={tmp}/home` so profile-mutating cases never touch the operator's real
+`~/.dsh`), `timeout_s`, `xfail`/`defect`, and `expect`.
+
+Supported `expect` keys: `exit_code` (integer, `{"in": [...]}`, or `{"not": N}`),
+`stdout_empty`/`stderr_empty`, `stdout_contains`/`stderr_contains` and their
+`_not_` forms, `stdout_matches`/`stderr_matches` plus `_not_matches` for
+multiline regexes, and `file_exists`/`file_not_exists` for workspace-relative
+paths checked after the run (e.g. an auto-initialized profile directory). An
+unknown key is a hard error: a silently ignored typo would turn an assertion
+into a no-op that always passes.
+
+## Run an Agent Behaviour Suite
+
+`cases/dsh-agent.json` goes one step further: each case runs one headless agent
+task and asserts against the **DSH session recording it produces**. After the
+argv completes, the runner diffs the session recordings under the case's DSH
+home against a pre-run snapshot, converts the newest new recording with
+`dsh_source`, audits it with the deterministic tool audit, and checks the
+case's `session` block:
+
+```bash
+python3 -m agentloop.cli run-cases --suite cases/dsh-agent.json
+```
+
+Supported `session` keys: `recorded`, `trajectory_contains` /
+`trajectory_not_contains` / `trajectory_matches` / `trajectory_not_matches`
+(over the flattened message text), `uses_tool` / `not_uses_tool`,
+`tool_calls_min` / `tool_calls_max`, `no_missing_tool_results`,
+`no_orphan_tool_results`, `no_tool_errors`, and `final_answer`.
+
+This covers the expectations that only a real agent run can produce — sandbox
+denials (`Operation not permitted` / `file access denied`), path-traversal
+blocking, session persistence — with the same verdict/report machinery as the
+argv suite. These cases need model credentials, burn a small amount of model
+quota, and record into the operator's real `~/.dsh/sessions`, so they live in
+their own suite file.
+
 ## Run a Smoke Chat
 
 ```bash
@@ -120,6 +189,11 @@ cd frontend
 npm install
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
+
+The frontend dev server proxies `/api` to the backend (default `http://localhost:18080`,
+overridable via `VITE_API_TARGET`), so requests are same-origin and any frontend port works
+without CORS issues. Only set `VITE_API_BASE_URL` when the browser must talk to a remote
+backend directly, and add that origin to `CORS_ORIGINS` in that case.
 
 Open:
 

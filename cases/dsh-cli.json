@@ -1,0 +1,370 @@
+{
+  "name": "dsh-cli",
+  "target": "DeepSeek Harness CLI launcher (@deepseek-ai/dsh 0.1.2-rc.1)",
+  "binary": "dsh",
+  "notes": "Expectations were captured from real runs of dsh 0.1.2-rc.1 on macOS arm64 / Node v22.23.0, not read off documentation. Cases that touch profile state run with an isolated DSH_HOME={tmp}/home so they never modify the operator's real ~/.dsh. Cases marked xfail assert the behaviour a launcher should have; they fail today and name the defect. Fix the defect, then drop the xfail flag instead of deleting the case. DSH-PLG-004/005 need network access to the npm registry (they assert a 404 passthrough).",
+  "cases": [
+    {
+      "id": "DSH-CLI-001",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "查看启动器帮助",
+      "args": ["--help"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["Usage: dsh", "--profile", "--patch", "--dump-config", "plugin"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-CLI-002",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "查看版本号",
+      "args": ["-V"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_matches": "^\\d+\\.\\d+\\.\\d+",
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-CLI-003",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "web 别名与 --profile web 等价",
+      "notes": "`dsh web --help` must print the same usage line as `dsh --profile web --help` (DSH-CLI-006), proving the alias boots the same profile.",
+      "args": ["web", "--help"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["Usage: dsh --profile web", "--port", "--host"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-CLI-006",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "首个未识别 token 后参数归 app",
+      "notes": "--profile web --help must print the web app's own help, not the launcher help.",
+      "args": ["--profile", "web", "--help"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["Usage: dsh --profile web", "--port", "--host"],
+        "stdout_not_contains": ["plugin [options] [args...]"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-CLI-008",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "缺少 --profile 值",
+      "args": ["--profile"],
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["argument missing"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-CLI-009",
+      "module": "CLI",
+      "priority": "P2",
+      "title": "未知 flag 报错应指出该 flag",
+      "notes": "Actual stderr is \"error: --profile <name> is required\": the unknown option is never named, so the operator cannot tell which token was rejected.",
+      "args": ["--nonexistent-flag"],
+      "xfail": true,
+      "defect": "DSH-BUG-002 启动器对未知 flag 报出与被拒参数无关的 --profile 必填错误，未指出真正的问题参数",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["nonexistent-flag"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-CLI-004",
+      "module": "CLI",
+      "priority": "P0",
+      "title": "非法 profile 应干净报错而非抛异常",
+      "notes": "Actual stderr is a 1 kB uncaught-exception dump: the source line, a caret marker, \"Error: dsh: profile ... does not exist\", five stack frames and the Node.js version footer.",
+      "args": ["--profile", "not-exist-cmd"],
+      "xfail": true,
+      "defect": "DSH-BUG-001 启动器配置/参数错误抛出未捕获异常，Node 堆栈与源码行泄漏到 stderr，无用户友好错误信息",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["does not exist"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-CLI-005",
+      "module": "CLI",
+      "priority": "P1",
+      "title": "plugin 模式应拒绝 app 专属选项",
+      "notes": "Actual: the launcher forwards --port to pnpm, which fails with \"[ERROR] Unknown option: 'port' / Did you mean 'sort'?\" — a misleading message that never says the option does not belong to plugin mode. Exit code is non-zero as required; only the message is wrong.",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["plugin", "--profile", "web", "--port", "9999"],
+      "timeout_s": 120,
+      "xfail": true,
+      "defect": "DSH-BUG-003 plugin 模式未拦截 web app 专属选项，--port 被透传给 pnpm，报出 \"Did you mean 'sort'?\" 等与插件模式无关的误导性错误",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["--port"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-001",
+      "module": "BOOT",
+      "priority": "P0",
+      "title": "web profile 首次自动初始化",
+      "notes": "With a fresh DSH_HOME the launcher must silently create the profile from its template before composing; the created profile directory is the observable signal (auto-init prints nothing, verified against the real binary).",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["--profile", "web", "--dump-config"],
+      "timeout_s": 60,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["- id: timer"],
+        "stderr_empty": true,
+        "file_exists": ["home/profiles/web/package.json", "home/profiles/web/cordis.yml"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-003",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "非内置 profile 不自动初始化",
+      "notes": "Fails with exit 1 and names the missing profile, but the error is raised as an uncaught exception with five stack frames and the Node.js footer.",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["--profile", "myprofile"],
+      "xfail": true,
+      "defect": "DSH-BUG-001 同 DSH-CLI-004：不存在的 profile 抛未捕获异常，Node 堆栈与源码行泄漏到 stderr",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["does not exist"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-004",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "dump 默认配置不含用户层与 patch 层",
+      "notes": "Hermetic contrast with DSH-BOOT-005: the fixture installs a home-layer patch that inserts probe-home-layer; the default dump must exclude it (and the agentloop-probe overlay used in DSH-BOOT-007).",
+      "files": {
+        "home/cordis.patch.yml": "- insert:\n    - id: probe-home-layer\n      name: '@probe/home'\n"
+      },
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["--profile", "web", "--dump-default-config"],
+      "timeout_s": 60,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["- id: timer", "cordis-plugin-timer"],
+        "stdout_not_contains": ["agentloop-probe", "probe-home-layer"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-BOOT-005",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "dump 完整配置包含用户层",
+      "notes": "The full dump must compose the home-layer patch from the fixture DSH_HOME.",
+      "files": {
+        "home/cordis.patch.yml": "- insert:\n    - id: probe-home-layer\n      name: '@probe/home'\n"
+      },
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["--profile", "web", "--dump-config"],
+      "timeout_s": 60,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["- id: timer", "probe-home-layer"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-006",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "补丁层组合顺序 bundle → home → --patch",
+      "notes": "The dump must contain all three layers, and the home-layer entry must appear before the --patch entry (later layers append after earlier ones).",
+      "files": {
+        "home/cordis.patch.yml": "- insert:\n    - id: probe-home-layer\n      name: '@probe/home'\n",
+        "overlay.yml": "- insert:\n    - id: probe-alpha\n      name: '@probe/alpha'\n"
+      },
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["--profile", "web", "--patch", "{tmp}/overlay.yml", "--dump-config"],
+      "timeout_s": 60,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["- id: timer", "probe-home-layer", "probe-alpha"],
+        "stdout_matches": ["probe-home-layer[\\s\\S]*probe-alpha"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-007",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "--patch 覆盖层生效",
+      "files": {
+        "overlay.yml": "- insert:\n    - id: agentloop-probe\n      name: '@agentloop/probe-plugin'\n"
+      },
+      "args": ["--profile", "web", "--patch", "{tmp}/overlay.yml", "--dump-config"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["agentloop-probe"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-BOOT-008",
+      "module": "BOOT",
+      "priority": "P2",
+      "title": "--patch 可重复且按传入顺序应用",
+      "files": {
+        "a.yml": "- insert:\n    - id: probe-alpha\n      name: '@probe/alpha'\n",
+        "b.yml": "- insert:\n    - id: probe-beta\n      name: '@probe/beta'\n"
+      },
+      "args": ["--profile", "web", "--patch", "{tmp}/a.yml", "--patch", "{tmp}/b.yml", "--dump-config"],
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["probe-alpha", "probe-beta"],
+        "stdout_matches": ["probe-alpha[\\s\\S]*probe-beta"],
+        "stderr_empty": true
+      }
+    },
+    {
+      "id": "DSH-BOOT-009",
+      "module": "BOOT",
+      "priority": "P1",
+      "title": "--patch 指向不存在文件应干净报错",
+      "args": ["--profile", "web", "--patch", "{tmp}/definitely-missing.yml", "--dump-config"],
+      "xfail": true,
+      "defect": "DSH-BUG-001 同 DSH-CLI-004：overlay 读取失败同样抛未捕获异常并泄漏堆栈",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["failed to read overlay"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-BOOT-010",
+      "module": "BOOT",
+      "priority": "P2",
+      "title": "--patch 非法 YAML 应干净报错",
+      "files": {
+        "broken.yml": "this: [is: broken\n  yaml: : :\n"
+      },
+      "args": ["--profile", "web", "--patch", "{tmp}/broken.yml", "--dump-config"],
+      "xfail": true,
+      "defect": "DSH-BUG-001 同 DSH-CLI-004：YAML 解析失败抛未捕获异常，错误位置信息被堆栈淹没",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["failed to parse overlay"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-PLG-001",
+      "module": "PLG",
+      "priority": "P1",
+      "title": "安装本地插件包到 profile",
+      "notes": "Adds a file-fixture package by path so the case runs offline; pnpm links it and dsh warns that the package declares no dsh.bundle. A positive remove was verified manually (see the test report): it cannot be chained into a single argv.",
+      "files": {
+        "probe-pkg/package.json": "{ \"name\": \"@probe/local-pkg\", \"version\": \"0.0.1\", \"private\": true }\n"
+      },
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["plugin", "--profile", "web", "add", "{tmp}/probe-pkg"],
+      "timeout_s": 180,
+      "expect": {
+        "exit_code": 0,
+        "stdout_contains": ["@probe/local-pkg"],
+        "stderr_contains": ["declares no dsh.bundle"]
+      }
+    },
+    {
+      "id": "DSH-PLG-002",
+      "module": "PLG",
+      "priority": "P1",
+      "title": "移除未安装的包报错透传",
+      "notes": "pnpm must fail and its error must reach the operator; the non-zero exit code propagates through dsh.",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["plugin", "--profile", "web", "remove", "never-installed-pkg"],
+      "timeout_s": 180,
+      "expect": {
+        "exit_code": {"not": 0},
+        "stdout_contains": ["ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS"],
+        "stderr_contains": ["pnpm failed"]
+      }
+    },
+    {
+      "id": "DSH-PLG-003",
+      "module": "PLG",
+      "priority": "P1",
+      "title": "plugin 缺少 --profile 报错",
+      "args": ["plugin", "add", "some-pkg"],
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["required option '--profile <name>'"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-PLG-004",
+      "module": "PLG",
+      "priority": "P1",
+      "title": "目标 profile 不存在时按设计初始化再失败",
+      "notes": "Requires network (npm registry 404). Corrects the manual test doc: BOOT-003's own error message tells operators to create profiles via `dsh plugin --profile <name> add <package>`, so initializing the missing profile first is by design. Observed: exit 1, and the ghost profile directory is left behind initialized with empty dependencies (asserted via file_exists).",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["plugin", "--profile", "ghost", "add", "this-package-definitely-does-not-exist-xq9"],
+      "timeout_s": 180,
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["initialized profile ghost", "pnpm failed"],
+        "file_exists": ["home/profiles/ghost/package.json"]
+      }
+    },
+    {
+      "id": "DSH-PLG-005",
+      "module": "PLG",
+      "priority": "P2",
+      "title": "安装不存在的包时 pnpm 错误详情透传",
+      "notes": "Requires network (npm registry 404). The pnpm 404 detail must appear on stdout so the operator can tell a missing package from a broken registry; dsh must not swallow it.",
+      "env": {"DSH_HOME": "{tmp}/home"},
+      "args": ["plugin", "--profile", "web", "add", "this-package-definitely-does-not-exist-xq9"],
+      "timeout_s": 180,
+      "expect": {
+        "exit_code": {"not": 0},
+        "stdout_contains": ["ERR_PNPM_FETCH_404"],
+        "stderr_contains": ["pnpm failed"]
+      }
+    },
+    {
+      "id": "DSH-WEB-011",
+      "module": "WEB",
+      "priority": "P1",
+      "title": "非数字端口应干净报错",
+      "notes": "Boundary value for the web app's --port option; the app validates before binding, so the case exits fast.",
+      "args": ["web", "--port", "abc", "--no-open"],
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["--port must be a number"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    },
+    {
+      "id": "DSH-WEB-012",
+      "module": "WEB",
+      "priority": "P1",
+      "title": "端口越界应干净报错",
+      "notes": "Boundary value 70000 > 65535. The validation reason is present in the message, but it is raised as an uncaught exception with the source line and a ValidationError stack.",
+      "args": ["web", "--port", "70000", "--no-open"],
+      "xfail": true,
+      "defect": "DSH-BUG-001 同 DSH-CLI-004：配置校验失败抛未捕获异常，ValidationError 堆栈泄漏到 stderr",
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["65535"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      }
+    }
+  ]
+}

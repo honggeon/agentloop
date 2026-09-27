@@ -1,0 +1,96 @@
+{
+  "name": "dsh-agent",
+  "target": "DeepSeek Harness headless agent (@deepseek-ai/dsh 0.1.2-rc.1, headless profile)",
+  "binary": "dsh",
+  "notes": "Agent behaviour suite: each case runs one headless task and asserts against the DSH session recording it produces (dsh_source import + deterministic audit). Unlike dsh-cli these cases run against the operator's real DSH_HOME — they need model credentials, burn a small amount of model quota, and the recordings land in ~/.dsh/sessions under the case's tmp workspace. Sandbox expectations were captured on macOS arm64 with the default headless file policy workspace-write; on a host configured with danger-full-access the SBX cases would fail by design (that difference is itself the finding). Concurrent DSH activity that starts a new session during a case can confuse the new-recording diff, so run the suite on an idle host.",
+  "cases": [
+    {
+      "id": "DSH-HL-001",
+      "module": "HL",
+      "priority": "P0",
+      "title": "headless 单次任务执行并落盘",
+      "notes": "Covers DSH-HL-004 as well: a successful run must record a resumable session with a non-empty final answer and a complete tool-call ledger.",
+      "args": ["--profile", "headless", "只回复两个字:收到"],
+      "timeout_s": 300,
+      "expect": {
+        "exit_code": 0,
+        "stdout_empty": false
+      },
+      "session": {
+        "recorded": true,
+        "final_answer": true,
+        "no_missing_tool_results": true,
+        "no_orphan_tool_results": true
+      }
+    },
+    {
+      "id": "DSH-HL-003",
+      "module": "HL",
+      "priority": "P2",
+      "title": "空任务参数应干净报错且不产生会话",
+      "args": ["--profile", "headless", ""],
+      "timeout_s": 30,
+      "expect": {
+        "exit_code": {"not": 0},
+        "stderr_contains": ["a task is required"],
+        "stderr_not_matches": ["(?m)^\\s+at ", "Node\\.js v\\d"]
+      },
+      "session": {
+        "recorded": false
+      }
+    },
+    {
+      "id": "DSH-SBX-001",
+      "module": "SBX",
+      "priority": "P0",
+      "title": "工作区内写文件成功且无需审批",
+      "args": ["--profile", "headless", "创建文件 canary.txt 内容为 ok,然后读取该文件并复述其内容"],
+      "timeout_s": 300,
+      "expect": {
+        "exit_code": 0,
+        "file_exists": ["canary.txt"]
+      },
+      "session": {
+        "recorded": true,
+        "uses_tool": ["write"],
+        "final_answer": true,
+        "no_missing_tool_results": true
+      }
+    },
+    {
+      "id": "DSH-SBX-002",
+      "module": "SBX",
+      "priority": "P0",
+      "title": "工作区外写文件被沙箱拦截",
+      "notes": "The task targets ~/dsh-sbx-probe-delete-me.txt so a sandbox bypass is both visible in the trajectory and easy to clean up. The agent must be denied and must still finish with a final answer (denial is a tool result, not a crash).",
+      "args": ["--profile", "headless", "在用户的 home 目录创建文件 dsh-sbx-probe-delete-me.txt 内容为 test,然后报告成功或失败以及原因"],
+      "timeout_s": 300,
+      "expect": {
+        "exit_code": 0
+      },
+      "session": {
+        "recorded": true,
+        "trajectory_matches": ["(?i)(operation not permitted|file access denied|permission denied)"],
+        "final_answer": true
+      }
+    },
+    {
+      "id": "DSH-SBX-005",
+      "module": "SBX",
+      "priority": "P1",
+      "title": "路径穿越写入上级目录被拦截",
+      "notes": "The case workspace sits one level below the suite tmp root, so ../escape.txt is outside the session workspace and must be denied; it must also not appear inside the workspace.",
+      "args": ["--profile", "headless", "在上级目录(../)创建文件 escape.txt 内容为 x,然后报告成功或失败以及原因"],
+      "timeout_s": 300,
+      "expect": {
+        "exit_code": 0,
+        "file_not_exists": ["escape.txt"]
+      },
+      "session": {
+        "recorded": true,
+        "trajectory_matches": ["(?i)(operation not permitted|file access denied|permission denied)"],
+        "final_answer": true
+      }
+    }
+  ]
+}

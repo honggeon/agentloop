@@ -68,6 +68,14 @@ def main(argv=None) -> int:
     import_dsh.add_argument("--dsh-home", default=None)
     import_dsh.add_argument("--out", default="runs")
 
+    run_cases = subparsers.add_parser("run-cases", help="Run a deterministic acceptance-case suite against a target binary.")
+    run_cases.add_argument("--suite", required=True, help="Path to a suite JSON file, e.g. cases/dsh-cli.json.")
+    run_cases.add_argument("--bin", default=None, help="Target binary; defaults to the suite's binary field.")
+    run_cases.add_argument("--only", action="append", default=None, help="Run only cases matching this id or module (repeatable).")
+    run_cases.add_argument("--out", default="cases/results", help="Directory for the JSON and Markdown reports.")
+    run_cases.add_argument("--no-write", action="store_true", help="Print results without writing report files.")
+    run_cases.add_argument("--json", action="store_true", help="Print the full JSON report instead of the summary.")
+
     args = parser.parse_args(argv)
     if args.command == "fetch-session":
         return _fetch_session(args)
@@ -85,6 +93,8 @@ def main(argv=None) -> int:
         return _list_dsh_sessions(args)
     if args.command == "import-dsh-session":
         return _import_dsh_session(args)
+    if args.command == "run-cases":
+        return _run_cases(args)
     parser.error("unknown command")
     return 2
 
@@ -294,6 +304,68 @@ def _import_dsh_session(args) -> int:
     _write_run_outputs(run_dir, session_response, source=source_meta(session_response))
     print("Imported DSH session %s to %s" % (session_id, run_dir))
     return 0
+
+
+def _run_cases(args) -> int:
+    from .cases import load_suite, run_suite, write_report
+
+    try:
+        suite = load_suite(args.suite)
+        report = run_suite(suite, only=args.only, binary=args.bin)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(_render_case_summary(report))
+
+    if not args.no_write:
+        paths = write_report(report, args.out)
+        print("Wrote %s" % paths["json_path"], file=sys.stderr)
+        print("Wrote %s" % paths["markdown_path"], file=sys.stderr)
+    return 0 if report["summary"]["ok"] else 1
+
+
+def _render_case_summary(report: Dict) -> str:
+    summary = report["summary"]
+    lines = [
+        "suite: %s  binary: %s" % (report.get("suite"), report.get("binary")),
+        "target: %s" % (report.get("target") or ""),
+        "",
+    ]
+    label = {"passed": "PASS", "failed": "FAIL", "xfail": "XFAIL", "xpass": "XPASS", "error": "ERROR"}
+    for case in report.get("cases") or []:
+        lines.append(
+            "%-6s %-14s %s"
+            % (label.get(case["verdict"], case["verdict"]), case["id"], case.get("title") or "")
+        )
+        if case["verdict"] in {"failed", "error", "xpass"}:
+            for check in case["checks"]:
+                if not check["ok"]:
+                    lines.append(
+                        "       %s: expected %s, got %s"
+                        % (check["assertion"], check["expected"], check["actual"])
+                    )
+        if case.get("defect"):
+            lines.append("       defect: %s" % case["defect"])
+    lines.extend(
+        [
+            "",
+            "%s cases: %s passed, %s failed, %s xfail, %s xpass, %s error — %s"
+            % (
+                summary["total"],
+                summary["passed"],
+                summary["failed"],
+                summary["xfail"],
+                summary["xpass"],
+                summary["error"],
+                "PASS" if summary["ok"] else "FAIL",
+            ),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _write_run_outputs(
