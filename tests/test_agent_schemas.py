@@ -218,6 +218,23 @@ def test_extract_json_object_from_content_blocks():
     assert extract_json_object(message)["completion_score"] == 60
 
 
+def test_extract_json_object_from_unknown_envelope_key():
+    # Models sometimes wrap the report in an envelope whose nesting key is not
+    # one of the well-known ones (observed: deepseek emits {"schema_version":
+    # "agentloop-judge/1.0", "judge_report": {...}}).
+    payload = {"overall_status": "partial", "completion_score": 42, "confidence": "low", "summary": "ok"}
+    envelope = {
+        "schema_version": "agentloop-judge/1.0",
+        "run_path": "runs/x",
+        "judge_report": payload,
+    }
+    message = {"messages": [{"role": "assistant", "content": json.dumps(envelope)}]}
+    assert extract_json_object(message)["completion_score"] == 42
+
+    # also works when the envelope arrives as an already-parsed dict
+    assert extract_json_object(envelope)["overall_status"] == "partial"
+
+
 def test_extract_json_object_from_nested_fenced_json():
     payload = {
         "overall_status": "failed",

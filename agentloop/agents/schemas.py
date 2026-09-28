@@ -85,6 +85,15 @@ def _iter_json_dicts(value: object, depth: int) -> Iterable[Dict[str, Any]]:
         additional = value.get("additional_kwargs")
         if isinstance(additional, dict):
             yield from _iter_tool_call_payloads(additional.get("tool_calls") or [])
+        # Models sometimes wrap the report in an envelope with unknown keys
+        # ({"schema_version": ..., "judge_report": {...}}); sweep every other
+        # value so a nested report is still found.
+        swept = {"messages", "output", "report", "result", "content", "text", "args", "arguments", "input", "tool_calls", "additional_kwargs"}
+        for key, sub in value.items():
+            if key in swept:
+                continue
+            if isinstance(sub, (dict, list, str)):
+                yield from _iter_json_dicts(sub, depth + 1)
         return
 
     if isinstance(value, list):
@@ -109,7 +118,7 @@ def _iter_json_dicts(value: object, depth: int) -> Iterable[Dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            yield parsed
+            yield from _iter_json_dicts(parsed, depth + 1)
 
 
 def _iter_message_parts(message: object) -> Iterable[object]:
