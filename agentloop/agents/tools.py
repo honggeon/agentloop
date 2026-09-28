@@ -81,14 +81,24 @@ def load_audit(run_path: str) -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
+def _int_or(value: Any, default: int) -> int:
+    """Coerce LLM-supplied numeric args; models routinely pass null for optional parameters."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_trajectory_slice(run_path: str, offset: int = 0, limit: int = 50) -> Any:
     """Load a bounded slice of trajectory.jsonl rows from an Agentloop run directory."""
     try:
         rows = _read_jsonl(_required(_resolve_run_dir(run_path) / "trajectory.jsonl"))
     except (FileNotFoundError, ValueError) as exc:
         return {"error": str(exc)}
-    start = max(0, int(offset))
-    stop = start + max(0, int(limit))
+    start = max(0, _int_or(offset, 0))
+    stop = start + max(0, _int_or(limit, 50))
     return rows[start:stop]
 
 
@@ -211,6 +221,24 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
     }
 
 
+def _downgrade_unsupported_facts(normalized: Dict[str, Any], reliability: Dict[str, Any]) -> int:
+    """Enforce the evidence contract: a fact finding whose evidence cannot be
+    traced back to the run artifacts is an inference, not a fact."""
+    findings = normalized.get("findings") or []
+    count = 0
+    for location in reliability.get("fact_findings_without_valid_evidence") or []:
+        if not isinstance(location, str) or not location.startswith("findings."):
+            continue
+        try:
+            index = int(location.split(".", 1)[1])
+        except ValueError:
+            continue
+        if 0 <= index < len(findings) and findings[index].get("type") == "fact":
+            findings[index]["type"] = "inference"
+            count += 1
+    return count
+
+
 def write_judge_report(run_path: str, report: object) -> Dict[str, str]:
     """Normalize and write agent_judge.json, agent_judge.md, and chart_data.json."""
     run_dir = _resolve_run_dir(run_path)
@@ -218,6 +246,11 @@ def write_judge_report(run_path: str, report: object) -> Dict[str, str]:
     reliability = validate_judge_evidence(str(run_dir), normalized)
     existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
     merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]
+    downgraded = _downgrade_unsupported_facts(normalized, reliability)
+    if downgraded:
+        merged_notes.append(
+            "downgraded %s fact findings to inference: no valid evidence in run artifacts" % downgraded
+        )
     reliability["notes"] = merged_notes
     quality = assess_run_quality(str(run_dir))
     normalized = _merge_quality_report(normalized, quality)
@@ -272,8 +305,8 @@ def _count_by(items: List[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
 def _merge_quality_report(report: Dict[str, Any], quality: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(report)
     completion = quality.get("completion") or {}
-    score_cap = int(completion.get("score_cap", 100))
-    if score_cap < int(merged.get("completion_score", 0)):
+    score_cap = _int_or(completion.get("score_cap"), 100)
+    if score_cap < _int_or(merged.get("completion_score"), 0):
         merged["completion_score"] = score_cap
     quality_status = completion.get("status")
     if quality_status in {"success", "partial", "failed"}:
@@ -303,12 +336,35 @@ def _worst_status(current: str, quality: str) -> str:
     return quality if order.get(quality, 0) > order.get(current, 0) else current
 
 
+# Harnesses inject skill catalogs and runtime context into user-role rows as
+# <system-reminder> blocks; those mentions (".pptx", "markdown", ...) are not
+# the user's request and must not create deliverable expectations.
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+
+# Agentloop's own run artifacts. ``_produced_deliverables`` scans the run
+# directory; without this exclusion every run would "produce" .md/.json
+# deliverables simply because agentloop wrote its reports there.
+_RUN_ARTIFACT_NAMES = {
+    "session.json",
+    "summary.json",
+    "trajectory.jsonl",
+    "audit.json",
+    "tool_audit.md",
+    "source.json",
+    "expectations.json",
+    "llm_calls.json",
+    "agent_judge.json",
+    "agent_judge.md",
+    "chart_data.json",
+}
+
+
 def _requested_deliverables(summary: Dict[str, Any], trajectory: Any) -> List[str]:
     text_parts = [str(summary.get("title") or "")]
     for row in trajectory if isinstance(trajectory, list) else []:
         if isinstance(row, dict) and row.get("role") == "user":
             text_parts.append(str(row.get("content") or ""))
-    text = "\n".join(text_parts).lower()
+    text = _SYSTEM_REMINDER_RE.sub(" ", "\n".join(text_parts)).lower()
     requested = []
     rules = [
         (".pptx", (".pptx", "pptx", "ppt", "演示文稿")),
@@ -328,7 +384,7 @@ def _produced_deliverables(run_dir: Path, requested: List[str]) -> List[str]:
         return []
     produced = set()
     for path in run_dir.rglob("*"):
-        if path.is_file() and path.suffix.lower() in requested:
+        if path.is_file() and path.name not in _RUN_ARTIFACT_NAMES and path.suffix.lower() in requested:
             produced.add(path.suffix.lower())
     return sorted(produced)
 

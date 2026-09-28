@@ -88,6 +88,14 @@ def test_load_and_search_trajectory(tmp_path):
     assert matches[0]["index"] == 1
 
 
+def test_load_trajectory_slice_tolerates_null_numeric_args(tmp_path):
+    # LLMs routinely emit null for optional tool parameters; the tool must not crash.
+    run = _write_run(tmp_path)
+    assert load_trajectory_slice(str(run), None, None)[0]["role"] == "user"
+    assert len(load_trajectory_slice(str(run), None, 2)) == 2
+    assert len(load_trajectory_slice(str(run), 1, None)) >= 1
+
+
 def test_get_tool_calls_filters_by_tool_and_status(tmp_path):
     run = _write_run(tmp_path)
     calls = get_tool_calls(str(run), tool_name="terminal", status="error")
@@ -100,6 +108,56 @@ def test_build_chart_data_uses_audit_details(tmp_path):
     charts = build_chart_data(str(run))
     assert charts["tool_distribution"] == [{"tool": "read_file", "count": 1}, {"tool": "terminal", "count": 1}]
     assert charts["phase_timeline"][0]["phase"] == "execute"
+
+
+def test_assess_run_quality_ignores_system_reminder_injections(tmp_path):
+    # DSH injects the skill catalog into user-role rows as <system-reminder>;
+    # its ".pptx"/"markdown" mentions are not the user's request.
+    run = tmp_path / "runs" / "trivial-answer"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(
+        json.dumps({"session_id": "s1", "title": "只回复两个字:收到", "message_count": 4}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run / "audit.json").write_text(json.dumps({"findings": [], "tool_calls": []}, ensure_ascii=False), encoding="utf-8")
+    rows = [
+        {"index": 0, "role": "user", "content": "只回复两个字:收到"},
+        {"index": 1, "role": "user", "content": "<system-reminder> skills: lark-slides 创建 .pptx 演示文稿, lark-doc 编辑 .docx, lark-sheets .xlsx, lark-markdown .md </system-reminder>"},
+        {"index": 2, "role": "assistant", "content": "收到"},
+    ]
+    (run / "trajectory.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
+    quality = assess_run_quality(str(run))
+    assert quality["deliverables"]["requested"] == []
+    assert quality["completion"]["status"] != "failed"
+
+
+def test_assess_run_quality_does_not_count_agentloop_reports_as_deliverables(tmp_path):
+    # The run dir always holds agentloop's own tool_audit.md; that must not
+    # satisfy a requested .md deliverable.
+    run = tmp_path / "runs" / "md-deliverable"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(
+        json.dumps({"session_id": "s1", "title": "输出 markdown 报告文件", "message_count": 2}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run / "audit.json").write_text(json.dumps({"findings": [], "tool_calls": []}, ensure_ascii=False), encoding="utf-8")
+    (run / "trajectory.jsonl").write_text(
+        json.dumps({"index": 0, "role": "user", "content": "请输出一个 markdown 文件"}) + "\n"
+        + json.dumps({"index": 1, "role": "assistant", "content": "好的"}),
+        encoding="utf-8",
+    )
+    (run / "tool_audit.md").write_text("# audit\n", encoding="utf-8")
+
+    quality = assess_run_quality(str(run))
+    assert quality["deliverables"]["requested"] == [".md"]
+    assert quality["deliverables"]["produced"] == []
+    assert quality["deliverables"]["missing"] == [".md"]
+
+    # a real deliverable file does count
+    (run / "report.md").write_text("# real\n", encoding="utf-8")
+    quality = assess_run_quality(str(run))
+    assert quality["deliverables"]["produced"] == [".md"]
 
 
 def test_assess_run_quality_flags_missing_requested_deliverable(tmp_path):
@@ -168,6 +226,49 @@ def test_write_judge_report_writes_three_files(tmp_path):
     assert (run / "agent_judge.json").exists()
     assert (run / "agent_judge.md").exists()
     assert (run / "chart_data.json").exists()
+
+
+def test_write_judge_report_downgrades_fact_findings_without_valid_evidence(tmp_path):
+    # A judge finding typed as fact whose evidence quotes cannot be traced back
+    # to the run artifacts must be retyped as inference, not presented as fact.
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "failed",
+            "completion_score": 18,
+            "summary": "幻觉 finding 测试",
+            "findings": [
+                {
+                    "severity": "critical",
+                    "category": "delivery",
+                    "title": "Requested deliverables .pptx were never produced",
+                    "type": "fact",
+                    "evidence": [{"source": "summary.json", "quote": "requested deliverables: .pptx, .docx"}],
+                    "recommendation": "block success",
+                },
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "terminal failed",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "ModuleNotFoundError"}],
+                    "recommendation": "fix dependency",
+                },
+            ],
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    by_title = {finding["title"]: finding for finding in report["findings"]}
+    assert by_title["Requested deliverables .pptx were never produced"]["type"] == "inference"
+    assert by_title["terminal failed"]["type"] == "fact"
+    assert any("downgraded 1 fact findings" in note for note in report["judge_reliability"]["notes"])
+    # the written report must survive re-normalization
+    from agentloop.agents.schemas import normalize_judge_report
+
+    renormalized = normalize_judge_report(report)
+    assert {f["title"]: f["type"] for f in renormalized["findings"]}["Requested deliverables .pptx were never produced"] == "inference"
 
 
 def test_write_judge_report_merges_quality_checks_and_caps_completion(tmp_path):

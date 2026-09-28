@@ -49,6 +49,7 @@ def test_validate_judge_evidence_counts_valid_quotes_and_aliases(tmp_path):
     assert reliability["invalid_evidence_count"] == 0
     assert reliability["unsupported_claim_count"] == 0
     assert reliability["fact_inference_mismatch_count"] == 0
+    assert reliability["fact_findings_without_valid_evidence"] == []
 
 
 def test_validate_judge_evidence_flags_missing_quote_empty_quote_and_unsupported_fact(tmp_path):
@@ -94,5 +95,6 @@ def test_validate_judge_evidence_flags_missing_quote_empty_quote_and_unsupported
     assert reliability["invalid_evidence_count"] == 2
     assert reliability["fact_inference_mismatch_count"] == 3
     assert reliability["evidence_coverage"] == 0
+    assert reliability["fact_findings_without_valid_evidence"] == ["findings.0", "findings.1", "findings.2"]
     reasons = {row["reason"] for row in reliability["invalid_evidence"]}
     assert reasons == {"quote_not_found", "missing_quote"}

@@ -25,14 +25,17 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
     fact_rows = _collect_fact_claims(report)
     unsupported = 0
     mismatch = 0
+    mismatch_locations: list[str] = []
     for location, item in fact_rows:
         has_evidence = bool(item.get("evidence"))
         if not has_evidence:
             unsupported += 1
             mismatch += 1
+            mismatch_locations.append(location)
             continue
         if valid_by_location.get(location, 0) == 0:
             mismatch += 1
+            mismatch_locations.append(location)
 
     total = len(evidence_rows)
     notes = []
@@ -52,6 +55,7 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
         "total_evidence_count": total,
         "notes": notes,
         "invalid_evidence": invalid,
+        "fact_findings_without_valid_evidence": mismatch_locations,
     }
 
 
