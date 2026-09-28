@@ -218,6 +218,17 @@ def test_extract_json_object_from_content_blocks():
     assert extract_json_object(message)["completion_score"] == 60
 
 
+def test_extract_json_object_falls_back_to_report_shaped_body_without_status():
+    # deepseek-flash sometimes drops overall_status but still emits the report
+    # body; extraction must degrade to overall_status "unknown" rather than
+    # fail the whole judge run.
+    body = {"run_path": "runs/x", "meta": {"title": "t"}, "findings": [], "dimensions": {"efficiency": {"score": 50}}}
+    message = {"messages": [{"role": "assistant", "content": "```json\n%s\n```" % json.dumps(body)}]}
+    report = normalize_judge_report(extract_json_object(message))
+    assert report["overall_status"] == "unknown"
+    assert "efficiency" in report["dimensions"]
+
+
 def test_extract_json_object_from_unknown_envelope_key():
     # Models sometimes wrap the report in an envelope whose nesting key is not
     # one of the well-known ones (observed: deepseek emits {"schema_version":

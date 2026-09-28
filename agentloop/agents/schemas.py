@@ -44,9 +44,19 @@ EVIDENCE_SOURCE_ALIASES = {
 
 
 def extract_json_object(value: object) -> Dict[str, Any]:
+    fallback: Dict[str, Any] | None = None
     for candidate in _iter_json_dicts(value, depth=0):
         if "overall_status" in candidate:
             return dict(candidate)
+        # Some models drop overall_status but still emit a report-shaped body;
+        # keep the first such candidate so the report can be normalized with
+        # overall_status "unknown" instead of failing the whole run.
+        if fallback is None and any(
+            key in candidate for key in ("findings", "dimensions", "completion_score")
+        ):
+            fallback = dict(candidate)
+    if fallback is not None:
+        return fallback
     preview = _response_preview(value)
     if preview:
         raise ValueError("agent response did not contain a JSON object; last content preview: %s" % preview)
@@ -72,6 +82,10 @@ def _iter_json_dicts(value: object, depth: int) -> Iterable[Dict[str, Any]]:
         return
     if isinstance(value, dict):
         if "overall_status" in value:
+            yield dict(value)
+        else:
+            # fallback candidate: report-shaped bodies that dropped
+            # overall_status are still usable (normalized to "unknown")
             yield dict(value)
         messages = value.get("messages")
         if isinstance(messages, list):
