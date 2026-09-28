@@ -68,7 +68,7 @@ def audit_messages(messages: Iterable[Dict]) -> Dict:
             if call_id:
                 result_ids.add(call_id)
             content = str(msg.get("content") or "")
-            if _looks_like_tool_error(content):
+            if _is_tool_error(msg, content):
                 findings.append(
                     Finding(
                         "error",
@@ -230,6 +230,21 @@ def _tool_call_args(call: Dict) -> str:
     return json.dumps(args, ensure_ascii=False, default=str)
 
 
+def _is_tool_error(message: Dict, content: str) -> bool:
+    """Prefer the structured ``is_error`` flag when the source provides one.
+
+    DSH tool-result blocks carry an explicit ``isError`` marker (mapped to
+    ``is_error`` by ``dsh_source``); the content heuristic misfires on text
+    that merely *mentions* errors (stack traces in test output, agentloop's
+    own source code being read, PASS logs). Sources without the flag (e.g.
+    xuanjian sessions) keep the heuristic.
+    """
+    flag = message.get("is_error")
+    if isinstance(flag, bool):
+        return flag
+    return _looks_like_tool_error(content)
+
+
 def _tool_results_by_id(messages: Iterable[Dict]) -> Dict[str, Dict]:
     results = {}
     for msg in messages:
@@ -242,7 +257,7 @@ def _tool_result_status(result: Optional[Dict]) -> Tuple[str, str]:
     if not result:
         return "missing", ""
     content = str(result.get("content") or "")
-    if _looks_like_tool_error(content):
+    if _is_tool_error(result, content):
         return "error", _preview(content)
     return "ok", _preview(content)
 

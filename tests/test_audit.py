@@ -107,3 +107,46 @@ def test_audit_flags_nested_delegate_timeout():
     assert audit["tool_calls"][0]["status"] == "error"
     codes = {finding["code"] for finding in audit["findings"]}
     assert "tool_error" in codes
+
+
+def test_audit_prefers_structured_is_error_flag():
+    # DSH tool results carry an explicit is_error flag; the content heuristic
+    # must not override it in either direction.
+    audit = audit_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "x",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "bash", "arguments": "{}"}},
+                    {"id": "c2", "function": {"name": "write", "arguments": "{}"}},
+                ],
+            },
+            # content mentions a traceback but the call succeeded (test output)
+            {"role": "tool", "tool_call_id": "c1", "tool_name": "bash", "content": "[PASS] all green\nTraceback in fixture text", "is_error": False},
+            # benign-looking content but the call failed
+            {"role": "tool", "tool_call_id": "c2", "tool_name": "write", "content": "denied", "is_error": True},
+            {"role": "assistant", "content": "done"},
+        ]
+    )
+    by_tool = {call["tool"]: call["status"] for call in audit["tool_calls"]}
+    assert by_tool == {"bash": "ok", "write": "error"}
+    codes = {finding["code"] for finding in audit["findings"]}
+    assert "tool_error" in codes
+    errors = [f for f in audit["findings"] if f["code"] == "tool_error"]
+    assert len(errors) == 1 and "write" in errors[0]["message"]
+
+
+def test_audit_falls_back_to_heuristic_without_is_error():
+    audit = audit_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "x",
+                "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "tool_name": "bash", "content": "Traceback (most recent call last): ..."},
+            {"role": "assistant", "content": "done"},
+        ]
+    )
+    assert audit["tool_calls"][0]["status"] == "error"
