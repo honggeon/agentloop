@@ -1,4 +1,6 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:18080").replace(/\/$/, "");
+// 默认同源请求（由 Vite dev server 的 /api 代理转发到后端，避免跨域）；
+// 需要直连远程后端时，显式设置 VITE_API_BASE_URL（会重新引入跨域，需在 CORS_ORIGINS 放行）。
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
 export interface RunItem {
   name: string;
@@ -420,6 +422,34 @@ export async function apiGet<T>(path: string): Promise<T> {
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
+}
+
+// 本地一键启动能力仅在 dev server 同源模式下可用：
+// 直连远程后端（设置了 VITE_API_BASE_URL）时，/api 不走本机 Vite 代理，
+// 页面上启动本地服务也无法让远程后端恢复，因此隐藏启动入口。
+export const canLaunchLocally = API_BASE_URL === "";
+
+export interface LauncherResult {
+  ok: boolean;
+  output?: string;
+  error?: string;
+}
+
+export async function checkBackendHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function startLocalServices(): Promise<LauncherResult> {
+  const response = await fetch("/__launcher/start", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json() as Promise<LauncherResult>;
 }
 
 export async function apiDownload(path: string): Promise<Blob> {

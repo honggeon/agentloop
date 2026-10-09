@@ -3,6 +3,8 @@ from pathlib import Path
 
 APP_VUE = Path("frontend/src/App.vue")
 ROUTER = Path("frontend/src/router.ts")
+API_TS = Path("frontend/src/api.ts")
+VITE_CONFIG = Path("frontend/vite.config.ts")
 BATCH_VIEW = Path("frontend/src/views/BatchView.vue")
 RUN_VIEW = Path("frontend/src/views/RunView.vue")
 LIVE_VIEW = Path("frontend/src/views/LiveEvalView.vue")
@@ -139,3 +141,21 @@ def test_live_eval_route_and_sidebar_entry_exist():
     assert "LiveEvalView" in router_source
     assert "运行时评测" in app_source
     assert 'to="/live"' in app_source
+
+
+def test_backend_down_shows_launcher_prompt():
+    app_source = APP_VUE.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+    vite_source = VITE_CONFIG.read_text(encoding="utf-8")
+
+    assert "后端服务未启动" in app_source
+    assert "一键启动服务" in app_source
+    assert "backendDown" in app_source
+    assert "startServices" in app_source
+    assert "canLaunchLocally" in api_source
+    assert "checkBackendHealth" in api_source
+    assert "startLocalServices" in api_source
+    assert "/api/health" in api_source
+    assert "/__launcher/start" in api_source
+    assert "/__launcher/start" in vite_source
+    assert "./start.sh" in vite_source

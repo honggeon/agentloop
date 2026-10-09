@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { apiDelete, apiGet, type RunItem } from "./api";
+import {
+  apiDelete,
+  apiGet,
+  canLaunchLocally,
+  checkBackendHealth,
+  startLocalServices,
+  type RunItem
+} from "./api";
 
 interface RunGroup {
   host: string;
@@ -17,6 +24,9 @@ const loadingRuns = ref(false);
 const deletingRun = ref("");
 const error = ref("");
 const collapsedHosts = ref<Record<string, boolean>>({});
+const backendDown = ref(false);
+const launcherBusy = ref(false);
+const launcherMessage = ref("");
 
 const activeRunId = computed(() => (route.name === "run" ? String(route.params.runId || "") : ""));
 const analyzedCount = computed(() => runs.value.filter((item) => item.has_judge).length);
@@ -98,11 +108,44 @@ async function deleteRun(run: RunItem, event: Event) {
   await removeRun(run.name);
 }
 
+async function checkBackend() {
+  if (!canLaunchLocally) return;
+  backendDown.value = !(await checkBackendHealth());
+}
+
+async function startServices() {
+  if (launcherBusy.value) return;
+  launcherBusy.value = true;
+  launcherMessage.value = "";
+  try {
+    const result = await startLocalServices();
+    if (!result.ok) {
+      launcherMessage.value = `启动失败：${result.error || "未知错误"}${result.output ? `\n${result.output}` : ""}`;
+      return;
+    }
+    // start.sh 已内置健康等待，这里再轮询确认后端真正就绪后再放开页面
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (await checkBackendHealth()) {
+        backendDown.value = false;
+        await loadRuns();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    launcherMessage.value = "启动命令已执行，但后端健康检查超时，请查看 .logs/backend.log";
+  } catch (err) {
+    launcherMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    launcherBusy.value = false;
+  }
+}
+
 provide("runs", runs);
 provide("reloadRuns", loadRuns);
 provide("deleteRunById", removeRun);
 
 onMounted(loadRuns);
+onMounted(checkBackend);
 </script>
 
 <template>
@@ -208,5 +251,16 @@ onMounted(loadRuns);
     <section class="workspace">
       <RouterView />
     </section>
+
+    <div v-if="backendDown" class="launcher-overlay" role="alertdialog" aria-label="后端服务未启动">
+      <div class="launcher-card">
+        <h2>后端服务未启动</h2>
+        <p>看板后端（/api/health）当前不可达，页面数据无法加载。点击下方按钮将执行项目根目录的 ./start.sh 拉起本地服务。</p>
+        <button type="button" class="launcher-start" :disabled="launcherBusy" @click="startServices">
+          {{ launcherBusy ? "启动中…" : "一键启动服务" }}
+        </button>
+        <p v-if="launcherMessage" class="launcher-message">{{ launcherMessage }}</p>
+      </div>
+    </div>
   </main>
 </template>

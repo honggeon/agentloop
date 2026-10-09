@@ -2922,3 +2922,66 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+.launcher-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 32, 51, 0.45);
+  backdrop-filter: blur(3px);
+}
+
+.launcher-card {
+  width: min(420px, calc(100vw - 48px));
+  padding: 28px 28px 24px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.launcher-card h2 {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+}
+
+.launcher-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.launcher-start {
+  min-height: 42px;
+  padding: 0 26px;
+  border-radius: 999px;
+  border: none;
+  color: #102033;
+  background: #7de2d1;
+  font-weight: 650;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.launcher-start:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.launcher-start:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.launcher-card .launcher-message {
+  margin: 14px 0 0;
+  color: var(--ember);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
