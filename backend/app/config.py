@@ -7,6 +7,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from auditrail.dsh_runtime import DshRuntimeConfig
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -20,6 +22,13 @@ class Settings:
     frontend_port: int = 5111
     cors_origins: list[str] | None = None
     dsh_home: Path = Path("~/.dsh").expanduser()
+    dsh_runtime_enabled: bool = False
+    dsh_binary: Path | None = None
+    dsh_allowed_profiles: tuple[str, ...] = ()
+    dsh_allowed_workspace_roots: tuple[Path, ...] = ()
+    dsh_default_timeout_seconds: int = 300
+    dsh_max_timeout_seconds: int = 900
+    dsh_max_concurrency: int = 1
 
 
 @lru_cache(maxsize=1)
@@ -35,7 +44,62 @@ def get_settings() -> Settings:
         frontend_port=int(os.getenv("FRONTEND_PORT", "5111")),
         cors_origins=[item.strip() for item in origins.split(",") if item.strip()],
         dsh_home=Path(os.getenv("DSH_HOME", "~/.dsh")).expanduser(),
+        dsh_runtime_enabled=_env_bool("DSH_RUNTIME_ENABLED", False),
+        dsh_binary=_optional_path(os.getenv("DSH_BINARY")),
+        dsh_allowed_profiles=_csv_values(os.getenv("DSH_ALLOWED_PROFILES", "")),
+        dsh_allowed_workspace_roots=tuple(
+            Path(value).expanduser() for value in _csv_values(os.getenv("DSH_ALLOWED_WORKSPACE_ROOTS", ""))
+        ),
+        dsh_default_timeout_seconds=_positive_int("DSH_DEFAULT_TIMEOUT_SECONDS", 300),
+        dsh_max_timeout_seconds=_positive_int("DSH_MAX_TIMEOUT_SECONDS", 900),
+        dsh_max_concurrency=_positive_int("DSH_MAX_CONCURRENCY", 1),
     )
+
+
+def build_dsh_runtime_config(settings: Settings | None = None) -> DshRuntimeConfig:
+    """Build the core policy only when local DSH execution is explicitly enabled."""
+    current = settings or get_settings()
+    if not current.dsh_runtime_enabled:
+        raise ValueError("local DSH runtime is disabled")
+    if current.dsh_binary is None:
+        raise ValueError("DSH_BINARY is required when local DSH runtime is enabled")
+    if current.dsh_default_timeout_seconds > current.dsh_max_timeout_seconds:
+        raise ValueError("DSH default timeout cannot exceed the maximum")
+    return DshRuntimeConfig(
+        binary=current.dsh_binary,
+        allowed_profiles=current.dsh_allowed_profiles,
+        allowed_workspace_roots=current.dsh_allowed_workspace_roots,
+        default_timeout_seconds=current.dsh_default_timeout_seconds,
+        max_timeout_seconds=current.dsh_max_timeout_seconds,
+    )
+
+
+def _csv_values(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _optional_path(value: str | None) -> Path | None:
+    text = str(value or "").strip()
+    return Path(text).expanduser() if text else None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("%s must be a boolean" % name)
+
+
+def _positive_int(name: str, default: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value <= 0:
+        raise ValueError("%s must be positive" % name)
+    return value
 
 
 def resolve_run_path(run_id: str, settings: Settings | None = None) -> Path:
