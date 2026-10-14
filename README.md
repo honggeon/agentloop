@@ -4,10 +4,13 @@
 
 It does not require instrumentation in the agent service. The first version talks to the deployed HTTP API, exports normalized trajectory files, and runs deterministic checks over tool usage.
 
+> 项目名是 `auditrail`（Python 包、CLI 模块、环境变量前缀）；本地 checkout 目录沿用历史的 `/Users/chen/agentloop`，下文的绝对路径都指这个目录。
+> 运行时环境变量统一使用 `AUDITRAIL_` 前缀：`AUDITRAIL_RUNS_DIR`、`AUDITRAIL_LLM_PROXY_LOG`。
+
 ## Install
 
 ```bash
-cd /Users/chen/auditrail
+cd /Users/chen/agentloop
 python3 -m pip install -e .
 ```
 
@@ -52,6 +55,16 @@ Backend routes (used by the DSH plugin):
 
 A DSH web plugin that embeds this flow into the DSH settings page (设置 →
 Agent 评测) lives in `dsh-plugin/`; see `dsh-plugin/README.md`.
+
+Phase-one local Headless execution is disabled by default and has no public HTTP
+route yet. Its server-owned policy is configured with `DSH_RUNTIME_ENABLED`,
+`DSH_BINARY`, `DSH_ALLOWED_PROFILES`, `DSH_ALLOWED_WORKSPACE_ROOTS`,
+`DSH_DEFAULT_TIMEOUT_SECONDS`, `DSH_MAX_TIMEOUT_SECONDS`, and
+`DSH_MAX_CONCURRENCY`. Enabling it requires an absolute fixed binary path plus
+non-empty profile and workspace-root allowlists; callers cannot supply raw argv,
+`--patch`, or environment overrides. Phase-one local execution requires POSIX
+process-group isolation so timeout and cancellation also terminate spawned tool
+processes. See `.env.example` for safe defaults.
 
 ## Run a Deterministic Case Suite
 
