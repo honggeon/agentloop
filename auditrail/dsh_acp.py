@@ -1,0 +1,1706 @@
+"""Low-level Agent Client Protocol transport for the local DSH runtime.
+
+This module implements the ACP v1 stdio transport verified against DSH
+0.2.0-rc.2 (see ``docs/reports/2026-10-14-dsh-acp-protocol-spike.md``). It owns
+exactly three things:
+
+1. NDJSON framing over a *process-like* object;
+2. JSON-RPC 2.0 request/response/notification correlation, including inbound
+   agent-to-client requests; and
+3. A session-oriented client that normalizes ACP traffic into the same
+   transport-neutral events Headless produces.
+
+It deliberately depends on nothing outside the standard library and the core
+package: no FastAPI, no backend, no SSE, no session manager. Process ownership,
+operation registries, permission policy, and HTTP surfaces are M6B concerns.
+
+The single structural constraint worth stating up front: DSH asks for tool
+permission with a *request* while ``session/prompt`` is still in flight. An
+implementation that can only answer after the prompt returns deadlocks. This
+transport therefore dispatches inbound requests from the reader thread and lets
+a handler claim them, and ``AcpClient`` queues permission requests for the
+caller to answer at any time.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+
+from .dsh_headless import _redact_sensitive, _redact_structure
+from .dsh_runtime import (
+    DshProtocolError,
+    DshRuntimeConfig,
+    DshRuntimeEvent,
+    DshValidationError,
+)
+
+
+# --- Protocol constants -----------------------------------------------------
+
+#: The only ACP protocol version DSH 0.2.0-rc.2 negotiates.
+ACP_PROTOCOL_VERSION = 1
+
+#: ``clientInfo.name`` reported during ``initialize``.
+ACP_CLIENT_NAME = "auditrail"
+
+#: ``clientInfo.version`` reported during ``initialize``.
+ACP_CLIENT_VERSION = "0.1.0"
+
+#: Maximum characters retained when reporting an unmodeled ``sessionUpdate``.
+ACP_MAX_SOURCE_TYPE_CHARS = 64
+
+#: Permission option ids DSH always offers. ``allow_always`` and
+#: ``reject_always`` are valid ACP kinds that DSH never sends.
+ACP_ALLOW_ONCE_OPTION_ID = "allow-once"
+ACP_REJECT_ONCE_OPTION_ID = "reject-once"
+
+
+class AgentMethod:
+    """Agent-side ACP methods (client -> agent)."""
+
+    INITIALIZE = "initialize"
+    AUTHENTICATE = "authenticate"
+    SESSION_NEW = "session/new"
+    SESSION_LIST = "session/list"
+    SESSION_RESUME = "session/resume"
+    SESSION_CLOSE = "session/close"
+    SESSION_SET_CONFIG_OPTION = "session/set_config_option"
+    SESSION_PROMPT = "session/prompt"
+    SESSION_CANCEL = "session/cancel"
+
+
+class ClientMethod:
+    """Client-side ACP methods (agent -> client)."""
+
+    SESSION_UPDATE = "session/update"
+    SESSION_REQUEST_PERMISSION = "session/request_permission"
+
+
+class ProtocolMethod:
+    """Protocol-level ($-prefixed) JSON-RPC methods."""
+
+    CANCEL_REQUEST = "$/cancel_request"
+
+
+class AcpStopReason:
+    """ACP ``PromptResponse.stopReason`` vocabulary.
+
+    ``end_turn`` covers both success and failure in DSH's mapping, so it is not
+    a success signal.
+    """
+
+    END_TURN = "end_turn"
+    MAX_TOKENS = "max_tokens"
+    MAX_TURN_REQUESTS = "max_turn_requests"
+    REFUSAL = "refusal"
+    CANCELLED = "cancelled"
+
+
+class SessionUpdateKind:
+    """``session/update`` discriminators DSH and the wider ACP surface define."""
+
+    # Emitted by DSH 0.2.0-rc.2.
+    AGENT_MESSAGE_CHUNK = "agent_message_chunk"
+    AGENT_THOUGHT_CHUNK = "agent_thought_chunk"
+    TOOL_CALL = "tool_call"
+    TOOL_CALL_UPDATE = "tool_call_update"
+    USAGE_UPDATE = "usage_update"
+    CONFIG_OPTION_UPDATE = "config_option_update"
+    # Defined by ACP but not mounted in DSH; tolerated as unknown.
+    USER_MESSAGE_CHUNK = "user_message_chunk"
+    PLAN = "plan"
+    PLAN_UPDATE = "plan_update"
+    PLAN_REMOVED = "plan_removed"
+    AVAILABLE_COMMANDS_UPDATE = "available_commands_update"
+    CURRENT_MODE_UPDATE = "current_mode_update"
+    SESSION_INFO_UPDATE = "session_info_update"
+    COMPACTION_UPDATE = "compaction_update"
+    COMPACTION_SUMMARY_CHUNK = "compaction_summary_chunk"
+
+
+#: JSON-RPC error codes shared with the reference ACP SDK.
+JSONRPC_PARSE_ERROR = -32700
+JSONRPC_INVALID_REQUEST = -32600
+JSONRPC_METHOD_NOT_FOUND = -32601
+JSONRPC_INVALID_PARAMS = -32602
+JSONRPC_INTERNAL_ERROR = -32603
+JSONRPC_REQUEST_CANCELLED = -32800
+
+
+# --- Framing ----------------------------------------------------------------
+
+
+def encode_frame(message: Mapping[str, Any]) -> bytes:
+    """Encode one NDJSON frame exactly as the ACP transport requires."""
+    return json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+@dataclass(frozen=True)
+class AcpPeerError:
+    """A JSON-RPC error object received from the peer."""
+
+    code: int
+    message: str
+    data: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": self.code, "message": self.message}
+        if self.data is not None:
+            payload["data"] = self.data
+        return payload
+
+
+class AcpError(DshProtocolError):
+    """An ACP-level failure with a stable machine-readable code.
+
+    The detail is always bounded and redacted; it never carries raw stderr or
+    credentials.
+    """
+
+    def __init__(self, code: str, message: str, *, data: Any = None):
+        super().__init__(code, message)
+        self.message = message
+        if data is not None:
+            self.data = data
+
+
+class AcpRemoteError(AcpError):
+    """The peer answered a request with a JSON-RPC error response."""
+
+    def __init__(self, peer_error: AcpPeerError, *, method: str = ""):
+        detail = peer_error.message or "ACP peer reported an error"
+        if method:
+            detail = "%s (%s)" % (detail, method)
+        super().__init__("remote_error", _redact_sensitive(detail), data=peer_error.data)
+        self.peer_error = peer_error
+        self.method = method
+
+    @property
+    def code_number(self) -> int:
+        return self.peer_error.code
+
+
+@dataclass(frozen=True)
+class AcpMessage:
+    """One decoded JSON-RPC frame, classified but otherwise untouched."""
+
+    raw: Mapping[str, Any]
+
+    @property
+    def method(self) -> Optional[str]:
+        value = self.raw.get("method")
+        return value if isinstance(value, str) else None
+
+    @property
+    def request_id(self) -> Any:
+        return self.raw.get("id")
+
+    @property
+    def params(self) -> Any:
+        return self.raw.get("params")
+
+    @property
+    def has_id(self) -> bool:
+        return "id" in self.raw
+
+    @property
+    def is_request(self) -> bool:
+        return self.has_id and isinstance(self.raw.get("method"), str)
+
+    @property
+    def is_notification(self) -> bool:
+        return not self.has_id and isinstance(self.raw.get("method"), str)
+
+    @property
+    def is_response(self) -> bool:
+        return self.has_id and "method" not in self.raw
+
+    @property
+    def is_error(self) -> bool:
+        return self.is_response and "error" in self.raw
+
+    @property
+    def result(self) -> Any:
+        return self.raw.get("result")
+
+    @property
+    def peer_error(self) -> Optional[AcpPeerError]:
+        value = self.raw.get("error")
+        if not isinstance(value, Mapping):
+            return None
+        code = value.get("code")
+        return AcpPeerError(
+            code=code if isinstance(code, int) else JSONRPC_INTERNAL_ERROR,
+            message=str(value.get("message") or ""),
+            data=value.get("data"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.raw)
+
+
+def decode_frame(data: bytes) -> AcpMessage:
+    """Decode one complete NDJSON frame.
+
+    Blank lines are rejected: the caller already decided a line is present, so an
+    empty payload is a peer framing violation rather than padding.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AcpError("malformed_frame", "ACP frame was not valid UTF-8") from exc
+    stripped = text.strip()
+    if not stripped:
+        raise AcpError("malformed_frame", "ACP frame was empty")
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise AcpError("malformed_frame", "ACP frame was not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise AcpError("malformed_frame", "ACP frame was not a JSON object")
+    if payload.get("jsonrpc") != "2.0":
+        raise AcpError("malformed_frame", "ACP frame did not declare JSON-RPC 2.0")
+    return AcpMessage(payload)
+
+
+@dataclass(frozen=True)
+class AcpFrameRead:
+    """Outcome of reading one NDJSON frame."""
+
+    frame: Optional[bytes] = None
+    too_large: bool = False
+    discarded_bytes: int = 0
+
+    @property
+    def end_of_stream(self) -> bool:
+        return self.frame is None and not self.too_large
+
+
+class AcpFrameReader:
+    """Bounded NDJSON frame reader over a byte stream.
+
+    Bytes are buffered across calls, so a stream implementation that returns more
+    than the requested size (or a blocking pipe that returns a partial frame) is
+    handled without losing data. An oversize frame is drained to its newline so
+    the stream stays framed, then reported as ``too_large`` rather than silently
+    truncated.
+    """
+
+    def __init__(self, stream: Any, *, max_bytes: int, chunk_size: int = 4096):
+        if max_bytes <= 0:
+            raise DshValidationError("ACP frame limit must be positive")
+        if chunk_size <= 0:
+            raise DshValidationError("ACP read chunk size must be positive")
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._chunk_size = chunk_size
+        self._read_chunk = getattr(stream, "read1", None) or stream.read
+        self._buffer = bytearray()
+
+    @property
+    def buffered_bytes(self) -> int:
+        return len(self._buffer)
+
+    def read(self) -> AcpFrameRead:
+        """Read the next frame, blocking only until data is available."""
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                frame = bytes(self._buffer[:newline])
+                del self._buffer[: newline + 1]
+                if len(frame) > self._max_bytes:
+                    return AcpFrameRead(too_large=True, discarded_bytes=len(frame))
+                return AcpFrameRead(frame=frame)
+            if len(self._buffer) > self._max_bytes:
+                return self._drain_oversize()
+            chunk = self._read_chunk(self._chunk_size)
+            if not chunk:
+                if not self._buffer:
+                    return AcpFrameRead()
+                frame = bytes(self._buffer)
+                self._buffer.clear()
+                if len(frame) > self._max_bytes:
+                    return AcpFrameRead(too_large=True, discarded_bytes=len(frame))
+                return AcpFrameRead(frame=frame)
+            self._buffer.extend(chunk)
+
+    def _drain_oversize(self) -> AcpFrameRead:
+        """Discard an over-limit frame through its terminating newline.
+
+        ``discarded`` counts only bytes that belong to the rejected frame, so a
+        newline that also carried the start of the next frame is not overcounted.
+        """
+        discarded = 0
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                discarded += newline
+                del self._buffer[: newline + 1]
+                return AcpFrameRead(too_large=True, discarded_bytes=discarded)
+            discarded += len(self._buffer)
+            self._buffer.clear()
+            chunk = self._read_chunk(self._chunk_size)
+            if not chunk:
+                return AcpFrameRead(too_large=True, discarded_bytes=discarded)
+            self._buffer.extend(chunk)
+
+
+def read_frame_bytes(stream: Any, *, max_bytes: int) -> AcpFrameRead:
+    """Read one frame from a fresh reader over ``stream``.
+
+    Convenient for finite streams and tests. Long-lived transports keep an
+    :class:`AcpFrameReader` so partial frames are not lost between calls.
+    """
+    return AcpFrameReader(stream, max_bytes=max_bytes).read()
+
+
+# --- Process boundary -------------------------------------------------------
+
+
+class AcpProcess:
+    """A started ACP server process.
+
+    The transport only needs this narrow surface, which lets deterministic tests
+    inject in-memory pipes instead of spawning anything.
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        process: Any,
+        *,
+        owns_process: bool = True,
+    ):
+        self.argv = tuple(argv)
+        self._process = process
+        self._owns_process = owns_process
+
+    @property
+    def pid(self) -> int:
+        return int(getattr(self._process, "pid", 0) or 0)
+
+    @property
+    def stdin(self) -> Any:
+        return self._process.stdin
+
+    @property
+    def stdout(self) -> Any:
+        return self._process.stdout
+
+    @property
+    def stderr(self) -> Any:
+        return self._process.stderr
+
+    @property
+    def owns_process(self) -> bool:
+        return self._owns_process
+
+    def poll(self) -> Optional[int]:
+        return self._process.poll()
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        return self._process.wait(timeout=timeout)
+
+    def close_stdin(self) -> None:
+        """Close stdin. DSH treats this as the supported shutdown request."""
+        stdin = self._process.stdin
+        if stdin is None:
+            return
+        try:
+            stdin.close()
+        except OSError:
+            pass
+
+    def terminate(self, *, force: bool = False) -> None:
+        """Stop the process group. Tool subprocesses share the group."""
+        if not self._owns_process:
+            self.close_stdin()
+            return
+        if os.name == "posix":
+            import signal
+
+            try:
+                os.killpg(os.getpgid(self.pid), signal.SIGKILL if force else signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                if self.poll() is None:
+                    (self._process.kill if force else self._process.terminate)()
+        elif self.poll() is None:
+            (self._process.kill if force else self._process.terminate)()
+        try:
+            self._process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            if not force:
+                self.terminate(force=True)
+        except OSError:
+            pass
+
+
+AcpProcessFactory = Callable[..., AcpProcess]
+
+
+def spawn_acp_process(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    env: Optional[Mapping[str, str]] = None,
+    extra_env: Optional[Mapping[str, str]] = None,
+) -> AcpProcess:
+    """Start ``dsh --profile acp`` with an argv array and no shell.
+
+    ``extra_env`` is merged over ``env``/``os.environ`` so a caller can force a
+    non-networking telemetry mode without dropping credentials the profile needs.
+    """
+    if os.name != "posix":
+        raise OSError("local DSH ACP runtime requires POSIX process-group isolation")
+    merged = dict(os.environ if env is None else env)
+    if extra_env:
+        merged.update({str(key): str(value) for key, value in extra_env.items()})
+    process = subprocess.Popen(
+        list(argv),
+        cwd=str(cwd),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        start_new_session=True,
+        env=merged,
+    )
+    return AcpProcess(argv, process)
+
+
+def build_acp_argv(config: DshRuntimeConfig, profile: str) -> tuple[str, ...]:
+    """Build the only supported ACP argv: ``dsh --profile <acp>`` and nothing else.
+
+    The ACP app accepts no arguments, so unlike Headless there is no task text
+    to place, and no caller-supplied flag can reach the process.
+    """
+    validated = config.validate_profile(profile)
+    if config.judge_profile and validated == config.judge_profile:
+        raise DshValidationError("the DSH judge profile cannot run an interactive ACP session")
+    return (str(config.binary), "--profile", validated)
+
+
+# --- Transport --------------------------------------------------------------
+
+
+@dataclass
+class _PendingRequest:
+    request_id: Any
+    method: str
+    deadline: Optional[float]
+    cancellable: bool
+    event: threading.Event = field(default_factory=threading.Event)
+    result: Any = None
+    error: Optional[AcpError] = None
+    cancel_requested: bool = False
+
+
+#: Inbound request handler: return ``True`` when it claims the request.
+AcpRequestHandler = Callable[[AcpMessage, Callable[[Any], None]], bool]
+
+
+class AcpTransport:
+    """Bidirectional NDJSON JSON-RPC transport over one ACP process.
+
+    Threading model: one reader thread consumes stdout and dispatches
+    classified frames; any number of caller threads may call
+    :meth:`send_request`. Writes are serialized so frames never interleave.
+    """
+
+    def __init__(
+        self,
+        process: Any,
+        *,
+        max_frame_bytes: int = 4 * 1024 * 1024,
+        write_timeout_seconds: float = 10.0,
+    ):
+        if max_frame_bytes <= 0:
+            raise DshValidationError("ACP frame limit must be positive")
+        if write_timeout_seconds <= 0:
+            raise DshValidationError("ACP write timeout must be positive")
+        self._process = process
+        self._max_frame_bytes = max_frame_bytes
+        self._write_timeout = write_timeout_seconds
+
+        self._state = threading.Condition()
+        self._inbox: list[AcpMessage] = []
+        self._pending: dict[Any, _PendingRequest] = {}
+        self._handlers: dict[str, AcpRequestHandler] = {}
+        self._responded: set[Any] = set()
+        self._framing_errors: list[AcpError] = []
+        self._next_id = 1
+        self._stdout_exhausted = False
+        self._closed = False
+        self._close_error: Optional[AcpError] = None
+        self._write_lock = threading.Lock()
+        self._write_failed: Optional[AcpError] = None
+        self._stderr_bytes = bytearray()
+        self._stderr_capped = False
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._reader_thread: Optional[threading.Thread] = None
+
+    # -- lifecycle --
+
+    @property
+    def process(self) -> Any:
+        return self._process
+
+    @property
+    def is_closed(self) -> bool:
+        with self._state:
+            return self._closed
+
+    @property
+    def close_error(self) -> Optional[AcpError]:
+        with self._state:
+            return self._close_error
+
+    @property
+    def framing_errors(self) -> tuple[AcpError, ...]:
+        with self._state:
+            return tuple(self._framing_errors)
+
+    @property
+    def stderr_diagnostics(self) -> str:
+        with self._state:
+            data = bytes(self._stderr_bytes)
+            capped = self._stderr_capped
+        text = _redact_sensitive(data.decode("utf-8", errors="replace"))
+        if capped:
+            text = text.rstrip() + "\n...[stderr truncated]"
+        return text
+
+    def start(self) -> AcpTransport:
+        """Start the reader (and bounded stderr drain) threads."""
+        with self._state:
+            if self._reader_thread is not None:
+                return self
+            self._reader_thread = threading.Thread(
+                target=self._read_loop,
+                name="dsh-acp-reader",
+                daemon=True,
+            )
+            self._reader_thread.start()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name="dsh-acp-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+        return self
+
+    def is_alive(self) -> bool:
+        return self._process.poll() is None
+
+    def close_stdin(self) -> None:
+        self._process.close_stdin()
+
+    def close(self, *, terminate: bool = True, force: bool = False) -> None:
+        """Close stdin, stop the process, and fail every in-flight request."""
+        self._process.close_stdin()
+        if terminate:
+            self._process.terminate(force=force)
+        with self._state:
+            if not self._closed:
+                self._closed = True
+                if self._close_error is None:
+                    self._close_error = AcpError("closed", "ACP transport was closed")
+                self._fail_locked(self._close_error)
+                self._state.notify_all()
+
+    def terminate(self, *, force: bool = True) -> None:
+        self._process.terminate(force=force)
+
+    # -- handlers --
+
+    def handle_request(self, method: str, handler: AcpRequestHandler) -> None:
+        """Register the handler for an inbound agent-to-client request method."""
+        if not isinstance(method, str) or not method:
+            raise DshValidationError("ACP request method must be a non-empty string")
+        with self._state:
+            self._handlers[method] = handler
+
+    # -- sending --
+
+    def send_notification(self, method: str, params: Any = None) -> None:
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def send_response(self, request_id: Any, result: Any) -> bool:
+        """Answer an inbound request exactly once."""
+        with self._state:
+            if request_id in self._responded:
+                return False
+            self._responded.add(request_id)
+        self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
+        return True
+
+    def send_error_response(self, request_id: Any, code: int, message: str) -> bool:
+        """Refuse an inbound request exactly once with a JSON-RPC error."""
+        detail = _redact_sensitive(str(message or "ACP request failed"))[:512]
+        with self._state:
+            if request_id in self._responded:
+                return False
+            self._responded.add(request_id)
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": int(code), "message": detail},
+            }
+        )
+        return True
+
+    def send_request(
+        self,
+        method: str,
+        params: Any = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+        deadline: Optional[float] = None,
+        cancellable: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Any:
+        """Send a request and block until its response arrives.
+
+        Args:
+            method: ACP method name.
+            params: JSON-serializable parameters.
+            timeout_seconds: relative timeout; converted to an absolute deadline.
+            deadline: absolute ``time.monotonic()`` deadline; wins over
+                ``timeout_seconds`` and lets several calls share one budget.
+            cancellable: send ``$/cancel_request`` when a cancel is observed, and
+                report a cancelled outcome rather than hanging.
+            cancel_event: cooperative cancellation signal.
+
+        Returns:
+            The JSON-RPC ``result`` payload.
+
+        Raises:
+            AcpError: on timeout, cancellation, transport close, or write failure.
+            AcpRemoteError: when the peer answered with a JSON-RPC error.
+        """
+        if not isinstance(method, str) or not method:
+            raise DshValidationError("ACP method must be a non-empty string")
+        now = time.monotonic()
+        if deadline is None and timeout_seconds is not None:
+            if timeout_seconds <= 0:
+                raise DshValidationError("ACP request timeout must be positive")
+            deadline = now + float(timeout_seconds)
+
+        with self._state:
+            if self._closed:
+                raise self._close_error or AcpError("closed", "ACP transport is closed")
+            request_id = self._next_id
+            self._next_id += 1
+            pending = _PendingRequest(
+                request_id=request_id,
+                method=method,
+                deadline=deadline,
+                cancellable=cancellable,
+            )
+            self._pending[request_id] = pending
+
+        try:
+            self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        except AcpError:
+            with self._state:
+                self._pending.pop(request_id, None)
+            raise
+        return self._await_response(pending, cancel_event=cancel_event)
+
+    def _await_response(
+        self,
+        pending: _PendingRequest,
+        *,
+        cancel_event: Optional[threading.Event],
+    ) -> Any:
+        while True:
+            if cancel_event is not None and cancel_event.is_set() and not pending.cancel_requested:
+                pending.cancel_requested = True
+                if pending.cancellable:
+                    self._try_send_cancel_request(pending.request_id)
+            with self._state:
+                if pending.event.is_set():
+                    break
+                if self._closed:
+                    if pending.error is None and pending.result is None:
+                        pending.error = self._close_error or AcpError("closed", "ACP transport is closed")
+                    pending.event.set()
+                    break
+                # Wait only as long as the earliest relevant condition: this
+                # request's deadline, or one heartbeat when a cancel signal or
+                # peer exit must be observed promptly.
+                wait_for: Optional[float] = 0.05 if pending.deadline is None else max(
+                    pending.deadline - time.monotonic(), 0.0
+                )
+                if cancel_event is not None or pending.cancellable:
+                    # Bound the wait so a cancel signal is observed promptly
+                    # even when the request's own deadline is far away.
+                    wait_for = min(wait_for, 0.05)
+                self._state.wait(timeout=wait_for)
+                if pending.event.is_set():
+                    break
+                if self._stdout_exhausted:
+                    pending.error = AcpError(
+                        "closed",
+                        "ACP peer closed the stream during %s" % pending.method,
+                    )
+                    pending.event.set()
+                    break
+                if pending.deadline is not None and time.monotonic() >= pending.deadline:
+                    pending.error = AcpError(
+                        "timeout",
+                        "ACP request %s exceeded its deadline" % pending.method,
+                    )
+                    pending.event.set()
+                    break
+        with self._state:
+            self._pending.pop(pending.request_id, None)
+            error = pending.error
+            result = pending.result
+            cancel_requested = pending.cancel_requested
+        if error is not None:
+            if error.code == "timeout" and pending.cancellable:
+                self._try_send_cancel_request(pending.request_id)
+            if error.code == "cancelled" and cancel_requested:
+                raise AcpError(
+                    "cancelled",
+                    "ACP request %s was cancelled" % pending.method,
+                )
+            raise error
+        return result
+
+    def _try_send_cancel_request(self, request_id: Any) -> None:
+        try:
+            self.send_notification(ProtocolMethod.CANCEL_REQUEST, {"requestId": request_id})
+        except AcpError:
+            pass
+
+    # -- receiving --
+
+    def take_notification(self, *, timeout: Optional[float] = None) -> Optional[AcpMessage]:
+        """Pop the next queued inbound notification, or ``None``."""
+        deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+        with self._state:
+            while True:
+                for index, message in enumerate(self._inbox):
+                    if message.is_notification:
+                        del self._inbox[index]
+                        return message
+                if self._closed or self._stdout_exhausted:
+                    return None
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None
+                self._state.wait(timeout=remaining)
+
+    def drain_inbox(self) -> tuple[AcpMessage, ...]:
+        """Remove and return every queued inbound message."""
+        with self._state:
+            queued = tuple(self._inbox)
+            self._inbox.clear()
+        return queued
+
+    def requeue(self, message: AcpMessage) -> None:
+        """Put a message back at the head of the inbox."""
+        with self._state:
+            self._inbox.insert(0, message)
+            self._state.notify_all()
+
+    # -- internals --
+
+    def _write(self, message: Mapping[str, Any]) -> None:
+        with self._state:
+            if self._write_failed is not None:
+                raise self._write_failed
+        data = encode_frame(message)
+        with self._write_lock:
+            with self._state:
+                if self._write_failed is not None:
+                    raise self._write_failed
+            stdin = self._process.stdin
+            if stdin is None:
+                error = AcpError("write_failed", "ACP process stdin is unavailable")
+                with self._state:
+                    self._write_failed = error
+                raise error
+            try:
+                stdin.write(data)
+                stdin.flush()
+            except (OSError, ValueError) as exc:
+                error = AcpError("write_failed", "failed to write an ACP frame: %s" % type(exc).__name__)
+                with self._state:
+                    self._write_failed = error
+                    self._closed = True
+                    if self._close_error is None:
+                        self._close_error = error
+                    self._fail_locked(error)
+                    self._state.notify_all()
+                raise error
+
+    def _read_loop(self) -> None:
+        stream = self._process.stdout
+        close_error: Optional[AcpError] = None
+        try:
+            if stream is None:
+                close_error = AcpError("closed", "ACP process stdout is unavailable")
+            else:
+                reader = AcpFrameReader(stream, max_bytes=self._max_frame_bytes)
+                while True:
+                    read_result = reader.read()
+                    if read_result.too_large:
+                        self._record_framing_error(
+                            AcpError(
+                                "frame_too_large",
+                                "ACP frame exceeded the configured limit",
+                            )
+                        )
+                        close_error = AcpError(
+                            "frame_too_large",
+                            "ACP peer sent a frame beyond the configured limit",
+                        )
+                        break
+                    frame = read_result.frame
+                    if frame is None:
+                        break
+                    message = self._decode(frame)
+                    if message is None:
+                        continue
+                    if not self._dispatch(message):
+                        break
+        except Exception:  # pragma: no cover - defensive reader guard
+            close_error = AcpError("reader_failed", "ACP reader failed")
+        finally:
+            exit_code = None
+            try:
+                exit_code = self._process.poll()
+            except Exception:  # pragma: no cover - defensive
+                exit_code = None
+            with self._state:
+                self._stdout_exhausted = True
+                self._closed = True
+                if close_error is None:
+                    detail = "ACP stream closed"
+                    if exit_code is not None:
+                        detail = "ACP process exited (exit code %s)" % exit_code
+                    close_error = AcpError("closed", detail)
+                if self._close_error is None:
+                    self._close_error = close_error
+                self._fail_locked(self._close_error)
+                self._state.notify_all()
+
+    def _decode(self, frame: bytes) -> Optional[AcpMessage]:
+        try:
+            return decode_frame(frame)
+        except AcpError as exc:
+            self._record_framing_error(exc)
+            return None
+
+    def _record_framing_error(self, error: AcpError) -> None:
+        with self._state:
+            if len(self._framing_errors) < 16:
+                self._framing_errors.append(error)
+
+    def _dispatch(self, message: AcpMessage) -> bool:
+        """Route one decoded frame. Returns ``False`` to stop reading."""
+        if message.is_request:
+            self._handle_inbound_request(message)
+            return True
+        with self._state:
+            if message.is_response:
+                pending = self._pending.get(message.request_id)
+                if pending is None:
+                    # Response to an unknown or already-settled request.
+                    self._inbox.append(message)
+                    self._state.notify_all()
+                    return True
+                if message.is_error:
+                    peer_error = message.peer_error or AcpPeerError(
+                        JSONRPC_INTERNAL_ERROR,
+                        "ACP peer returned a malformed error object",
+                    )
+                    pending.error = AcpRemoteError(peer_error, method=pending.method)
+                else:
+                    pending.result = message.result
+                pending.event.set()
+                self._state.notify_all()
+                return True
+            self._inbox.append(message)
+            self._state.notify_all()
+        return True
+
+    def _handle_inbound_request(self, message: AcpMessage) -> None:
+        method = message.method or ""
+        responder = self._responder_for(message.request_id)
+        if responder is None:
+            return
+        with self._state:
+            handler = self._handlers.get(method)
+        if handler is None:
+            responder.refuse(JSONRPC_METHOD_NOT_FOUND, "unsupported ACP method: %s" % method)
+            return
+        try:
+            claimed = bool(handler(message, responder.respond))
+        except Exception:
+            responder.refuse(JSONRPC_INTERNAL_ERROR, "ACP request handler failed")
+            return
+        if not claimed:
+            responder.refuse(JSONRPC_METHOD_NOT_FOUND, "unsupported ACP method: %s" % method)
+
+    def _responder_for(self, request_id: Any) -> Optional["_InboundResponder"]:
+        with self._state:
+            if request_id in self._responded or self._closed:
+                return None
+            return _InboundResponder(self, request_id)
+
+    def _fail_locked(self, error: AcpError) -> None:
+        for pending in self._pending.values():
+            if not pending.event.is_set():
+                pending.error = error
+                pending.event.set()
+
+    # -- stderr --
+
+    def _drain_stderr(self, limit: int = 16 * 1024) -> None:
+        stream = self._process.stderr
+        if stream is None:
+            return
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    return
+                with self._state:
+                    remaining = limit - len(self._stderr_bytes)
+                    if remaining > 0:
+                        self._stderr_bytes.extend(chunk[:remaining])
+                    elif not self._stderr_capped:
+                        self._stderr_capped = True
+        except (OSError, ValueError):  # pragma: no cover - pipe closed under us
+            return
+
+
+class _InboundResponder:
+    """Answers exactly one inbound agent-to-client request."""
+
+    def __init__(self, transport: AcpTransport, request_id: Any):
+        self._transport = transport
+        self._request_id = request_id
+
+    @property
+    def request_id(self) -> Any:
+        return self._request_id
+
+    def respond(self, result: Any) -> bool:
+        return self._transport.send_response(self._request_id, result)
+
+    def refuse(self, code: int, message: str) -> bool:
+        return self._transport.send_error_response(self._request_id, code, message)
+
+
+# --- Typed protocol payloads ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AcpInitializeResult:
+    """The negotiated result of ``initialize``."""
+
+    protocol_version: int
+    agent_name: str = ""
+    agent_version: str = ""
+    prompt_capabilities: Mapping[str, Any] = field(default_factory=dict)
+    session_capabilities: Mapping[str, Any] = field(default_factory=dict)
+    mcp_capabilities: Mapping[str, Any] = field(default_factory=dict)
+    auth_methods: tuple[Any, ...] = ()
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def supports_images(self) -> bool:
+        return self.prompt_capabilities.get("image") is True
+
+    @property
+    def supports_session_list(self) -> bool:
+        return "list" in self.session_capabilities
+
+    @property
+    def supports_session_resume(self) -> bool:
+        return "resume" in self.session_capabilities
+
+    @property
+    def supports_session_close(self) -> bool:
+        return "close" in self.session_capabilities
+
+
+@dataclass(frozen=True)
+class AcpSession:
+    """A live in-memory ACP session handle."""
+
+    session_id: str
+    workspace: Path
+    config_options: tuple[Mapping[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class AcpSessionSummary:
+    """One entry of a ``session/list`` page."""
+
+    session_id: str
+    cwd: str
+    title: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class AcpSessionPage:
+    """One page of persisted, resumable sessions."""
+
+    sessions: tuple[AcpSessionSummary, ...] = ()
+    next_cursor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AcpPermissionRequest:
+    """An inbound ``session/request_permission`` awaiting a decision.
+
+    The request is claimed by the client immediately; DSH stays blocked until
+    :meth:`AcpClient.respond_permission` or
+    :meth:`AcpClient.cancel_permission` sends the matching response.
+    """
+
+    request_id: Any
+    session_id: str
+    tool_call_id: str
+    options: tuple[Mapping[str, Any], ...] = ()
+    raw_params: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def option_ids(self) -> tuple[str, ...]:
+        return tuple(
+            str(option.get("optionId"))
+            for option in self.options
+            if isinstance(option, Mapping) and option.get("optionId") is not None
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "tool_call_id": self.tool_call_id,
+            "options": [dict(option) for option in self.options],
+        }
+
+
+@dataclass(frozen=True)
+class AcpPromptOutcome:
+    """Settled result of one ``session/prompt`` call."""
+
+    session_id: str
+    stop_reason: str
+    cancelled: bool
+    usage: Optional[Mapping[str, Any]] = None
+    updates: tuple[DshRuntimeEvent, ...] = ()
+    text: str = ""
+    truncated: bool = False
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def end_turn(self) -> bool:
+        return self.stop_reason == AcpStopReason.END_TURN
+
+
+# --- Normalization ----------------------------------------------------------
+
+
+def _content_block_text(block: Any) -> str:
+    if not isinstance(block, Mapping):
+        return ""
+    if block.get("type") == "text":
+        return str(block.get("text") or "")
+    if block.get("type") == "resource_link":
+        return "[resource_link name=%s uri=%s]" % (block.get("name"), block.get("uri"))
+    return ""
+
+
+def _tool_call_content_text(content: Any) -> str:
+    """Extract text from a ``tool_call_update.content`` list.
+
+    DSH only produces ``type: "content"`` entries wrapping a standard content
+    block; the other ACP variants (diff, terminal) are reported as a marker
+    rather than dropped silently.
+    """
+    if not isinstance(content, Iterable) or isinstance(content, (str, bytes, Mapping)):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("type")
+        if kind == "content":
+            text = _content_block_text(item.get("content"))
+            if text:
+                parts.append(text)
+        elif kind == "diff":
+            parts.append("[diff %s]" % item.get("path"))
+        elif kind == "terminal":
+            parts.append("[terminal %s]" % item.get("terminalId"))
+    return "".join(parts)
+
+
+def normalize_session_update(
+    params: Any,
+    *,
+    max_text_bytes: int,
+) -> Optional[DshRuntimeEvent]:
+    """Normalize one ``session/update`` payload into a ``DshRuntimeEvent``.
+
+    Returns ``None`` when the payload cannot be attributed to an update at all.
+    Unknown variants are preserved as ``unknown`` with a redacted payload so a
+    newer DSH cannot silently terminate the stream.
+    """
+    if not isinstance(params, Mapping):
+        return None
+    update = params.get("update")
+    if not isinstance(update, Mapping):
+        return None
+    kind = update.get("sessionUpdate")
+    if not isinstance(kind, str) or not kind:
+        return None
+
+    truncated = False
+    if kind in (SessionUpdateKind.AGENT_MESSAGE_CHUNK, SessionUpdateKind.AGENT_THOUGHT_CHUNK):
+        text = _content_block_text(update.get("content"))
+        encoded = text.encode("utf-8")
+        if len(encoded) > max_text_bytes:
+            text = encoded[:max_text_bytes].decode("utf-8", errors="replace")
+            truncated = True
+        event_type = "text" if kind == SessionUpdateKind.AGENT_MESSAGE_CHUNK else "thinking"
+        data: dict[str, Any] = {"text": _redact_sensitive(text)}
+        if update.get("messageId") is not None:
+            data["message_id"] = str(update.get("messageId"))
+        return DshRuntimeEvent(event_type, data, truncated=truncated)
+
+    if kind == SessionUpdateKind.TOOL_CALL:
+        # DSH uses `title` as the tool name and always sends kind="other".
+        name = update.get("name") or update.get("title") or ""
+        raw_input = update.get("rawInput")
+        if raw_input is not None and not isinstance(raw_input, (dict, list, str)):
+            raw_input = str(raw_input)
+        data = {
+            "call_id": _bounded_id(update.get("toolCallId")),
+            "tool": _redact_sensitive(str(name))[:256],
+            "input": _redact_structure(raw_input) if raw_input is not None else None,
+            "kind": str(update.get("kind") or "")[:64],
+            "status": str(update.get("status") or "")[:64],
+        }
+        return DshRuntimeEvent("tool_call", data)
+
+    if kind == SessionUpdateKind.TOOL_CALL_UPDATE:
+        status = str(update.get("status") or "")
+        result = _redact_sensitive(_tool_call_content_text(update.get("content")))
+        data = {
+            "call_id": _bounded_id(update.get("toolCallId")),
+            "status": "error" if status == "failed" else status or "unknown",
+            "result": result,
+            "title": _redact_sensitive(str(update.get("title") or ""))[:256],
+        }
+        return DshRuntimeEvent("tool_result", data)
+
+    if kind == SessionUpdateKind.USAGE_UPDATE:
+        return DshRuntimeEvent(
+            "status",
+            {
+                "turn": None,
+                "usage": {"used": update.get("used"), "size": update.get("size")},
+            },
+            phase="usage",
+        )
+
+    if kind == SessionUpdateKind.CONFIG_OPTION_UPDATE:
+        options = update.get("configOptions")
+        normalized = [_redact_structure(option) for option in options] if isinstance(options, list) else []
+        return DshRuntimeEvent("status", {"config_options": normalized}, phase="config")
+
+    source_type = _redact_sensitive(kind)[:ACP_MAX_SOURCE_TYPE_CHARS]
+    payload = {key: value for key, value in update.items() if key != "sessionUpdate"}
+    data = {}
+    if params.get("sessionId") is not None:
+        data["session_id"] = str(params.get("sessionId"))
+    data["payload"] = _redact_structure(payload)
+    return DshRuntimeEvent("unknown", data, source_type=source_type)
+
+
+def _bounded_id(value: Any) -> str:
+    return _redact_sensitive(str(value if value is not None else ""))[:256]
+
+
+# --- Client -----------------------------------------------------------------
+
+
+class AcpClient:
+    """Session-oriented ACP client over an :class:`AcpTransport`.
+
+    The client owns protocol semantics that DSH verifies (workspace, profile,
+    one prompt per session) and converts ACP traffic into the shared
+    ``DshRuntimeEvent`` vocabulary. It owns no process registry and no policy
+    decision: permission requests are surfaced and answered by the caller.
+    """
+
+    def __init__(
+        self,
+        transport: AcpTransport,
+        config: DshRuntimeConfig,
+        *,
+        profile: str = "acp",
+        client_name: str = ACP_CLIENT_NAME,
+        client_version: str = ACP_CLIENT_VERSION,
+    ):
+        self.transport = transport
+        self.config = config
+        self.profile = config.validate_profile(profile)
+        self.client_name = client_name
+        self.client_version = client_version
+        self._lock = threading.Lock()
+        self._sessions: dict[str, AcpSession] = {}
+        self._inflight: set[str] = set()
+        self._permissions: dict[Any, AcpPermissionRequest] = {}
+        self._initialize_result: Optional[AcpInitializeResult] = None
+        self.transport.handle_request(
+            ClientMethod.SESSION_REQUEST_PERMISSION,
+            self._claim_permission_request,
+        )
+
+    # -- handshake --
+
+    @property
+    def initialize_result(self) -> Optional[AcpInitializeResult]:
+        return self._initialize_result
+
+    def initialize(self, *, timeout_seconds: Optional[float] = None) -> AcpInitializeResult:
+        """Perform the ``initialize`` handshake and verify the version."""
+        result = self.transport.send_request(
+            AgentMethod.INITIALIZE,
+            {
+                "protocolVersion": ACP_PROTOCOL_VERSION,
+                # The transport implements no ACP client extension, so it must
+                # not claim one.
+                "clientCapabilities": {},
+                "clientInfo": {"name": self.client_name, "version": self.client_version},
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        normalized = self._parse_initialize(result)
+        if normalized.protocol_version != ACP_PROTOCOL_VERSION:
+            raise AcpError(
+                "unsupported_protocol_version",
+                "ACP peer negotiated protocol version %s, expected %s"
+                % (normalized.protocol_version, ACP_PROTOCOL_VERSION),
+            )
+        self._initialize_result = normalized
+        return normalized
+
+    @staticmethod
+    def _parse_initialize(result: Any) -> AcpInitializeResult:
+        if not isinstance(result, Mapping):
+            raise AcpError("malformed_result", "ACP initialize returned a non-object result")
+        version = result.get("protocolVersion")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise AcpError("malformed_result", "ACP initialize omitted protocolVersion")
+        agent_info = result.get("agentInfo") if isinstance(result.get("agentInfo"), Mapping) else {}
+        capabilities = result.get("agentCapabilities")
+        capabilities = capabilities if isinstance(capabilities, Mapping) else {}
+        prompt_capabilities = capabilities.get("promptCapabilities")
+        session_capabilities = capabilities.get("sessionCapabilities")
+        mcp_capabilities = capabilities.get("mcpCapabilities")
+        auth_methods = result.get("authMethods")
+        return AcpInitializeResult(
+            protocol_version=version,
+            agent_name=str(agent_info.get("name") or ""),
+            agent_version=str(agent_info.get("version") or ""),
+            prompt_capabilities=dict(prompt_capabilities) if isinstance(prompt_capabilities, Mapping) else {},
+            session_capabilities=dict(session_capabilities) if isinstance(session_capabilities, Mapping) else {},
+            mcp_capabilities=dict(mcp_capabilities) if isinstance(mcp_capabilities, Mapping) else {},
+            auth_methods=tuple(auth_methods) if isinstance(auth_methods, list) else (),
+            raw=dict(result),
+        )
+
+    # -- sessions --
+
+    def new_session(
+        self,
+        workspace: str | Path,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> AcpSession:
+        """Create a session in a validated workspace."""
+        resolved = self.config.validate_workspace(workspace)
+        result = self.transport.send_request(
+            AgentMethod.SESSION_NEW,
+            {"cwd": str(resolved), "mcpServers": []},
+            timeout_seconds=timeout_seconds,
+        )
+        if not isinstance(result, Mapping):
+            raise AcpError("malformed_result", "ACP session/new returned a non-object result")
+        session_id = self._validate_remote_session_id(result.get("sessionId"))
+        session = AcpSession(
+            session_id=session_id,
+            workspace=resolved,
+            config_options=_config_options_tuple(result.get("configOptions")),
+        )
+        with self._lock:
+            self._sessions[session_id] = session
+        return session
+
+    def resume_session(
+        self,
+        session_id: str,
+        workspace: str | Path,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> AcpSession:
+        """Resume a persisted session, verifying the canonical workspace."""
+        remote_id = self._validate_remote_session_id(session_id)
+        resolved = self.config.validate_workspace(workspace)
+        result = self.transport.send_request(
+            AgentMethod.SESSION_RESUME,
+            {"sessionId": remote_id, "cwd": str(resolved), "mcpServers": []},
+            timeout_seconds=timeout_seconds,
+        )
+        if result is not None and not isinstance(result, Mapping):
+            raise AcpError("malformed_result", "ACP session/resume returned a non-object result")
+        payload = result if isinstance(result, Mapping) else {}
+        # DSH does not echo sessionId on resume; the request id is authoritative.
+        session = AcpSession(
+            session_id=remote_id,
+            workspace=resolved,
+            config_options=_config_options_tuple(payload.get("configOptions")),
+        )
+        with self._lock:
+            self._sessions[remote_id] = session
+        return session
+
+    def list_sessions(
+        self,
+        *,
+        cwd: str | Path | None = None,
+        cursor: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> AcpSessionPage:
+        """List persisted, resumable root sessions."""
+        self._require_capability("supports_session_list", "session/list")
+        params: dict[str, Any] = {}
+        if cwd is not None:
+            params["cwd"] = str(self.config.validate_workspace(cwd))
+        if cursor:
+            params["cursor"] = str(cursor)
+        result = self.transport.send_request(
+            AgentMethod.SESSION_LIST,
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        if not isinstance(result, Mapping):
+            raise AcpError("malformed_result", "ACP session/list returned a non-object result")
+        raw_sessions = result.get("sessions")
+        summaries: list[AcpSessionSummary] = []
+        if isinstance(raw_sessions, list):
+            for item in raw_sessions:
+                if not isinstance(item, Mapping):
+                    continue
+                raw_id = item.get("sessionId")
+                if not isinstance(raw_id, str) or not raw_id:
+                    continue
+                summaries.append(
+                    AcpSessionSummary(
+                        session_id=raw_id,
+                        cwd=str(item.get("cwd") or ""),
+                        title=str(item.get("title") or ""),
+                        updated_at=str(item.get("updatedAt") or ""),
+                    )
+                )
+        next_cursor = result.get("nextCursor")
+        return AcpSessionPage(
+            sessions=tuple(summaries),
+            next_cursor=str(next_cursor) if isinstance(next_cursor, str) and next_cursor else None,
+        )
+
+    def set_config_option(
+        self,
+        session_id: str,
+        config_id: str,
+        value: Any,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Set an advertised model or reasoning-effort option."""
+        remote_id = self._require_local_session(session_id)
+        result = self.transport.send_request(
+            AgentMethod.SESSION_SET_CONFIG_OPTION,
+            {"sessionId": remote_id, "configId": str(config_id), "value": value},
+            timeout_seconds=timeout_seconds,
+        )
+        if not isinstance(result, Mapping):
+            raise AcpError("malformed_result", "ACP session/set_config_option returned a non-object result")
+        options = _config_options_tuple(result.get("configOptions"))
+        with self._lock:
+            current = self._sessions.get(remote_id)
+            if current is not None:
+                self._sessions[remote_id] = AcpSession(
+                    session_id=current.session_id,
+                    workspace=current.workspace,
+                    config_options=options,
+                )
+        return options
+
+    def close_session(
+        self,
+        session_id: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> None:
+        """Quiescently close one session without touching the others."""
+        self._require_capability("supports_session_close", "session/close")
+        remote_id = self._require_local_session(session_id)
+        self.transport.send_request(
+            AgentMethod.SESSION_CLOSE,
+            {"sessionId": remote_id},
+            timeout_seconds=timeout_seconds,
+        )
+        self._forget_session(remote_id)
+
+    # -- prompt turn --
+
+    def prompt(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> AcpPromptOutcome:
+        """Send one prompt turn and collect its ordered updates.
+
+        Only one prompt may be in flight per session; a second concurrent call
+        fails locally rather than producing an ambiguous server response.
+        """
+        remote_id = self._require_local_session(session_id)
+        message = self.config.validate_message(text)
+        with self._lock:
+            if remote_id in self._inflight:
+                raise AcpError(
+                    "prompt_in_flight",
+                    "ACP session already has an in-flight prompt",
+                )
+            self._inflight.add(remote_id)
+        try:
+            result = self.transport.send_request(
+                AgentMethod.SESSION_PROMPT,
+                {"sessionId": remote_id, "prompt": [{"type": "text", "text": message}]},
+                timeout_seconds=timeout_seconds,
+                cancellable=True,
+                cancel_event=cancel_event,
+            )
+        except AcpError as exc:
+            if exc.code == "cancelled":
+                return AcpPromptOutcome(
+                    session_id=remote_id,
+                    stop_reason=AcpStopReason.CANCELLED,
+                    cancelled=True,
+                    updates=self._collect_updates(remote_id),
+                )
+            raise
+        finally:
+            with self._lock:
+                self._inflight.discard(remote_id)
+
+        payload = result if isinstance(result, Mapping) else {}
+        stop_reason = payload.get("stopReason")
+        if not isinstance(stop_reason, str) or not stop_reason:
+            raise AcpError("malformed_result", "ACP session/prompt omitted stopReason")
+        usage = payload.get("usage")
+        updates = self._collect_updates(remote_id)
+        text_parts = [
+            str(event.data.get("text") or "")
+            for event in updates
+            if event.type == "text"
+        ]
+        # The prompt response is the settlement signal, so it is also surfaced as
+        # a terminal event for projection layers that only consume events.
+        final_event = DshRuntimeEvent(
+            "final",
+            {"text": "".join(text_parts), "stop_reason": stop_reason},
+        )
+        return AcpPromptOutcome(
+            session_id=remote_id,
+            stop_reason=stop_reason,
+            cancelled=stop_reason == AcpStopReason.CANCELLED,
+            usage=dict(usage) if isinstance(usage, Mapping) else None,
+            updates=updates + (final_event,),
+            text=final_event.data["text"],
+            truncated=any(event.truncated for event in updates),
+            raw=dict(payload),
+        )
+
+    def cancel(self, session_id: str) -> None:
+        """Send ``session/cancel``. Unknown session ids are no-ops by contract."""
+        remote_id = str(session_id)
+        if not remote_id:
+            return
+        self.transport.send_notification(AgentMethod.SESSION_CANCEL, {"sessionId": remote_id})
+
+    def _collect_updates(self, session_id: str) -> tuple[DshRuntimeEvent, ...]:
+        """Drain queued ``session/update`` notifications for one session.
+
+        Unrelated inbound messages (for example a response that arrived after its
+        caller had already timed out) are put back so they are not lost.
+        """
+        collected: list[DshRuntimeEvent] = []
+        for message in self.transport.drain_inbox():
+            if message.method != ClientMethod.SESSION_UPDATE:
+                self.transport.requeue(message)
+                continue
+            params = message.params
+            if isinstance(params, Mapping) and params.get("sessionId") not in (None, session_id):
+                continue
+            event = normalize_session_update(params, max_text_bytes=self.config.max_event_bytes)
+            if event is not None:
+                collected.append(event)
+        return tuple(collected)
+
+    def take_notifications(self, *, timeout: Optional[float] = None) -> tuple[DshRuntimeEvent, ...]:
+        """Drain queued ``session/update`` notifications outside a prompt call."""
+        message = self.transport.take_notification(timeout=timeout)
+        if message is None:
+            return ()
+        return self._normalize_notification(message)
+
+    def _normalize_notification(self, message: AcpMessage) -> tuple[DshRuntimeEvent, ...]:
+        if message.method != ClientMethod.SESSION_UPDATE:
+            return ()
+        event = normalize_session_update(message.params, max_text_bytes=self.config.max_event_bytes)
+        return () if event is None else (event,)
+
+    # -- permissions --
+
+    def pending_permissions(self) -> tuple[AcpPermissionRequest, ...]:
+        """Permission requests awaiting a decision, in arrival order."""
+        with self._lock:
+            return tuple(self._permissions.values())
+
+    def respond_permission(self, request_id: Any, option_id: str) -> bool:
+        """Select one advertised permission option exactly once."""
+        with self._lock:
+            request = self._permissions.get(request_id)
+        if request is None:
+            raise AcpError("unknown_permission_request", "no such pending permission request")
+        if option_id not in request.option_ids:
+            raise DshValidationError("permission option was not offered by the peer")
+        sent = self.transport.send_response(
+            request_id,
+            {"outcome": {"outcome": "selected", "optionId": option_id}},
+        )
+        if sent:
+            self._forget_permission(request_id)
+        return sent
+
+    def cancel_permission(self, request_id: Any) -> bool:
+        """Answer ``cancelled``, which DSH folds into its cancelled outcome."""
+        with self._lock:
+            request = self._permissions.get(request_id)
+        if request is None:
+            raise AcpError("unknown_permission_request", "no such pending permission request")
+        sent = self.transport.send_response(request_id, {"outcome": {"outcome": "cancelled"}})
+        if sent:
+            self._forget_permission(request_id)
+        return sent
+
+    def _claim_permission_request(
+        self,
+        message: AcpMessage,
+        respond: Callable[[Any], None],
+    ) -> bool:
+        del respond  # The request is answered later, via respond_permission.
+        params = message.params
+        if not isinstance(params, Mapping):
+            return False
+        tool_call = params.get("toolCall")
+        tool_call_id = ""
+        if isinstance(tool_call, Mapping):
+            tool_call_id = str(tool_call.get("toolCallId") or "")
+        options = params.get("options")
+        request = AcpPermissionRequest(
+            request_id=message.request_id,
+            session_id=str(params.get("sessionId") or ""),
+            tool_call_id=tool_call_id,
+            options=tuple(dict(option) for option in options if isinstance(option, Mapping))
+            if isinstance(options, list)
+            else (),
+            raw_params=dict(params),
+        )
+        with self._lock:
+            self._permissions[message.request_id] = request
+        return True
+
+    def _forget_permission(self, request_id: Any) -> None:
+        with self._lock:
+            self._permissions.pop(request_id, None)
+
+    # -- helpers --
+
+    def session(self, session_id: str) -> Optional[AcpSession]:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def _require_local_session(self, session_id: str) -> str:
+        remote_id = self._validate_remote_session_id(session_id)
+        with self._lock:
+            known = remote_id in self._sessions
+        if not known:
+            raise AcpError("unknown_session", "ACP session is not open on this connection")
+        return remote_id
+
+    def _forget_session(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+            self._inflight.discard(session_id)
+
+    def _require_capability(self, attribute: str, method: str) -> None:
+        if self._initialize_result is None:
+            raise AcpError("not_initialized", "ACP initialize has not completed")
+        if not getattr(self._initialize_result, attribute):
+            raise AcpError(
+                "unsupported_capability",
+                "ACP peer did not advertise %s" % method,
+            )
+
+    @staticmethod
+    def _validate_remote_session_id(value: Any) -> str:
+        """Validate an opaque remote session id.
+
+        ACP session ids are random UUIDs, not Headless ``session-...`` ids, so
+        this enforces only the properties that matter: non-empty, bounded, and
+        free of path separators and control characters.
+        """
+        if not isinstance(value, str):
+            raise AcpError("invalid_session_id", "ACP session id must be a string")
+        if (
+            not value.strip()
+            or value in {".", ".."}
+            or len(value.encode("utf-8")) > 256
+            or "/" in value
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise AcpError("invalid_session_id", "ACP session id is not a usable opaque identifier")
+        return value
+
+
+def _config_options_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(dict(option) for option in value if isinstance(option, Mapping))
