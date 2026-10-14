@@ -587,6 +587,7 @@ def test_dsh_options_lists_approved_profiles_and_workspaces(tmp_path, monkeypatc
         dsh_default_timeout_seconds=120,
         dsh_max_timeout_seconds=600,
         dsh_max_concurrency=2,
+        dsh_acp_enabled=True,
     )
     monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
 
@@ -614,6 +615,32 @@ def test_dsh_options_lists_approved_profiles_and_workspaces(tmp_path, monkeypatc
         "capabilities_route": "/api/dsh/acp/options",
     }
     assert str(settings.dsh_binary) not in response.text
+
+
+def test_dsh_options_master_switch_alone_does_not_enable_acp(tmp_path, monkeypatch):
+    """The master switch enables Headless; ACP stays off until opted in."""
+    root = tmp_path / "allowed"
+    (root / "project").mkdir(parents=True)
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        dsh_runtime_enabled=True,
+        dsh_binary=tmp_path / "bin" / "dsh",
+        dsh_allowed_profiles=("headless",),
+        dsh_allowed_workspace_roots=(root,),
+    )
+    monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
+
+    data = TestClient(app).get("/api/dsh/options").json()
+
+    assert data["dsh"]["enabled"] is True
+    assert data["dsh"]["disabled_reason"] is None
+    assert data["dsh"]["acp"]["enabled"] is False
+    # The rest of the ACP manifest is still advertised, so the workbench can
+    # render an accurate "disabled" state rather than guessing.
+    assert data["dsh"]["acp"]["profile"] == "acp"
+    assert data["dsh"]["acp"]["permission_options"] == ["allow-once", "reject-once"]
+    assert data["dsh"]["acp"]["allow_always"] is False
+    assert data["dsh"]["acp"]["capabilities_route"] == "/api/dsh/acp/options"
 
 
 def test_dsh_options_reports_invalid_runtime_configuration(tmp_path, monkeypatch):

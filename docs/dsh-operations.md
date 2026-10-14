@@ -33,15 +33,17 @@
 | 功能 | master | 专属开关 | 其它必填 |
 |---|---|---|---|
 | Headless 单轮执行 | `DSH_RUNTIME_ENABLED=true` | 无 | `DSH_BINARY`、`DSH_ALLOWED_PROFILES`、`DSH_ALLOWED_WORKSPACE_ROOTS` |
-| ACP 交互运行时 | `DSH_RUNTIME_ENABLED=true` | `DSH_ACP_ENABLED=true`（默认开） | 同上（profile 固定为 `acp`） |
+| ACP 交互运行时 | `DSH_RUNTIME_ENABLED=true` | `DSH_ACP_ENABLED=true`（默认关） | 同上（profile 固定为 `acp`） |
 | DSH 裁判 | `DSH_RUNTIME_ENABLED=true` | 无 | 上面全部 + `DSH_JUDGE_PROFILE` + `DSH_JUDGE_WORKSPACE` |
 
 要点：
 
 - **默认全关。** `DSH_RUNTIME_ENABLED` 未设置时，任何 DSH 路由都返回「未启用」，
   不会启动任何进程。
-- ACP 的 `DSH_ACP_ENABLED` 默认是 `true`，但它无法单独打开 ACP —— 必须先有
-  master 开关和白名单，所以「默认开」不等于「默认可用」。
+- **ACP 需要同时满足两个开关。** `DSH_ACP_ENABLED` 默认是 `false`，必须显式设为
+  `true`；而单靠它无法打开 ACP，因为 master 开关和白名单也必须就位。反过来，
+  只打开 `DSH_RUNTIME_ENABLED` 也**不会**隐式启用 ACP —— Headless 可用，ACP 仍保持
+  关闭，`/api/dsh/options` 会如实返回 `dsh.acp.enabled=false`。
 - 白名单为空会让配置校验失败并映射成 503，而不是回退到「允许一切」。
 - `DSH_JUDGE_PROFILE` 会被并入可信策略，因此它同时被用作「evaluand 不得使用
   裁判 profile」的判据。
@@ -151,7 +153,7 @@ SSE 里出现 event: error    → 流中途问题（看 code 与 stage）
 
 | 现象 | 常见原因 | 处理 |
 |---|---|---|
-| 所有 DSH 路由 503「ACP runtime is disabled」 | master 开关未开，或 `DSH_ACP_ENABLED=0` | 检查 `DSH_RUNTIME_ENABLED`；`/api/dsh/options` 会给出 `disabled_reason` |
+| 所有 DSH 路由 503「ACP runtime is disabled」 | master 开关未开，或 `DSH_ACP_ENABLED` 未设为 `true`（默认关） | 先确认 `DSH_RUNTIME_ENABLED=true`，再显式设置 `DSH_ACP_ENABLED=true`；`/api/dsh/options` 的 `dsh.acp.enabled` 会给出结论 |
 | 503「DSH_BINARY is required…」 | 开了 master 但没给二进制 | 设置 `DSH_BINARY` 为绝对路径 |
 | 403/503「workspace is outside the allowed roots」 | workspace 不在允许根下 | 检查 `DSH_ALLOWED_WORKSPACE_ROOTS`；注意解析后会比较真实路径 |
 | `error{stage:"register", code:"runtime_busy"}` | 达到 `DSH_MAX_CONCURRENCY` | 等当前回合结束，或显式提高上限（单 worker 共享进程仍不被支持） |

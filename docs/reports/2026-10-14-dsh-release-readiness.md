@@ -147,6 +147,9 @@ Residual risks, accepted for this release:
    without `DSH_RUNTIME_ENABLED=true` and a full binary/profile/workspace
    allowlist, so there is no accidental exposure — but the default is permissive
    and relies on the master switch.
+   *Closed by the follow-up security-default patch: the default is now `false`, so
+   ACP must be opted into explicitly and the master switch alone never enables it.
+   See `2026-10-14-dsh-release-candidate.md`.*
 2. **Real-model behaviour is only sampled.** The integration tests prove the
    adapters drive a real process; they are not a model-quality or quota test.
 3. **`AcpClient.cancel()` alone cannot settle a peer that ignores

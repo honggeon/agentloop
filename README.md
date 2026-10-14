@@ -123,11 +123,14 @@ The ACP transport (ACP v1 over stdio: NDJSON framing plus JSON-RPC 2.0) powers
 interactive sessions: one long-lived `dsh --profile acp` process owned by the
 backend, with session creation/resume, prompts, streamed updates, one-shot
 permission answers, cancellation, and close. It is disabled by default and needs
-`DSH_RUNTIME_ENABLED=true` plus `DSH_ACP_ENABLED=true` (the ACP switch only, since
-binary/profile/workspace policy is the same server-owned allowlist as Headless).
-The profile is fixed to `acp`; callers never pass argv or environment. Local
-execution stays single-worker: one active prompt per session, and
-`DSH_MAX_CONCURRENCY` bounds the whole runtime.
+**both** switches: `DSH_RUNTIME_ENABLED=true` (the master switch, which also
+enables Headless) **and** `DSH_ACP_ENABLED=true` (the ACP opt-in, whose default is
+`false`). Either switch alone leaves ACP off — turning on the master switch does
+not implicitly expose it, and the ACP switch cannot work without the master switch
+and the server-owned binary/profile/workspace allowlist. `/api/dsh/options`
+reports the effective state as `dsh.acp.enabled`. The profile is fixed to `acp`;
+callers never pass argv or environment. Local execution stays single-worker: one
+active prompt per session, and `DSH_MAX_CONCURRENCY` bounds the whole runtime.
 
 | Route | Purpose |
 |---|---|
@@ -204,7 +207,9 @@ Enabling the runtime, startup/shutdown order, capacity and backpressure bounds,
 the opt-in real-DSH smoke tests, and a symptom-to-cause troubleshooting table are
 documented in [`docs/dsh-operations.md`](docs/dsh-operations.md). The security and
 reliability audit behind the current hardening, with its residual risks, is in
-[`docs/reports/2026-10-14-dsh-release-readiness.md`](docs/reports/2026-10-14-dsh-release-readiness.md).
+[`docs/reports/2026-10-14-dsh-release-readiness.md`](docs/reports/2026-10-14-dsh-release-readiness.md);
+the secure-default patch that makes ACP opt-in, with its acceptance evidence, is in
+[`docs/reports/2026-10-14-dsh-release-candidate.md`](docs/reports/2026-10-14-dsh-release-candidate.md).
 
 `AUDITRAIL_LOAD_DOTENV=0` disables reading the project `.env`. The test suite sets
 it (forced) so a developer's local `.env` cannot steer a test run or make it reach

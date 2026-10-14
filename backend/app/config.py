@@ -58,7 +58,10 @@ class Settings:
     dsh_max_concurrency: int = 1
     dsh_judge_profile: str = ""
     dsh_judge_workspace: Path | None = None
-    dsh_acp_enabled: bool = True
+    #: The ACP interactive runtime is a separate, opt-in capability layered on
+    #: top of ``dsh_runtime_enabled``. Both must be true for any ACP route to be
+    #: reachable, so enabling the master switch alone never exposes ACP.
+    dsh_acp_enabled: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -88,7 +91,7 @@ def get_settings() -> Settings:
         dsh_max_concurrency=_positive_int("DSH_MAX_CONCURRENCY", 1),
         dsh_judge_profile=os.getenv("DSH_JUDGE_PROFILE", "").strip(),
         dsh_judge_workspace=_optional_path(os.getenv("DSH_JUDGE_WORKSPACE")),
-        dsh_acp_enabled=_env_bool("DSH_ACP_ENABLED", True),
+        dsh_acp_enabled=_env_bool("DSH_ACP_ENABLED", False),
     )
 
 

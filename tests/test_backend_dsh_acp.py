@@ -292,6 +292,9 @@ def _settings(tmp_path, **overrides):
         "dsh_default_timeout_seconds": 5,
         "dsh_max_timeout_seconds": 5,
         "dsh_max_concurrency": 2,
+        # ACP is opt-in, so the ACP tests must opt in explicitly; leaving this
+        # out of the defaults would silently test the disabled path.
+        "dsh_acp_enabled": True,
     }
     values.update(overrides)
     return Settings(**values)
@@ -853,6 +856,28 @@ def test_acp_options_and_routes_report_disabled_runtime(monkeypatch, tmp_path):
     }
     assert client.get("/api/dsh/acp/sessions").status_code == 503
     assert client.post("/api/dsh/acp/session/new", json={"workspace": str(tmp_path)}).status_code == 503
+
+
+def test_acp_routes_stay_disabled_when_only_the_master_switch_is_on(monkeypatch, tmp_path):
+    """Master on + ACP off must not expose ACP, even with a valid allowlist."""
+    settings = _settings(tmp_path, dsh_acp_enabled=False)
+    _client_settings(monkeypatch, settings)
+    # Guard against the test passing for the wrong reason: the config is valid.
+    assert settings.dsh_runtime_enabled is True
+    assert settings.dsh_acp_enabled is False
+    client = TestClient(app)
+
+    options = client.get("/api/dsh/acp/options")
+    assert options.status_code == 200
+    assert options.json() == {
+        "enabled": False,
+        "disabled_reason": "ACP runtime is disabled",
+        "capabilities": {},
+    }
+    assert client.get("/api/dsh/acp/sessions").status_code == 503
+    assert client.post("/api/dsh/acp/session/new", json={"workspace": str(tmp_path)}).status_code == 503
+    assert client.get("/api/dsh/acp/operation/missing").status_code == 503
+    assert client.post("/api/dsh/acp/cancel", json={"operation_id": "missing"}).status_code == 503
 
 
 def test_acp_route_validation_and_error_mapping(monkeypatch, tmp_path, injected_manager):
