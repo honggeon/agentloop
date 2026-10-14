@@ -281,8 +281,10 @@ class DshHeadlessClient:
         *,
         cancel_event: Optional[threading.Event] = None,
         on_event: Optional[Callable[[DshRuntimeEvent], None]] = None,
+        invocation: Optional[DshInvocation] = None,
     ) -> DshExecutionResult:
-        invocation = validate_request(self.config, request)
+        if invocation is None:
+            invocation = validate_request(self.config, request)
         argv = _argv_for_invocation(self.config, invocation)
         events: list[DshRuntimeEvent] = []
         session_id: Optional[str] = None

@@ -9,8 +9,10 @@ import { CanvasRenderer } from "echarts/renderers";
 import {
   apiDownload,
   apiGet,
-  apiPost,
+  apiPostJson,
+  fetchJudgeEngines,
   type Finding,
+  type JudgeEngineInfo,
   type JudgeReport,
   type LlmCallDetail,
   type RunItem,
@@ -40,6 +42,17 @@ const error = ref("");
 const selectedTraceNode = ref("");
 const selectedLlmCallId = ref("");
 const expandedLlmCallIds = ref<string[]>([]);
+const judgeEngines = ref<JudgeEngineInfo[]>([]);
+const judgeEngine = ref("deepagent");
+
+// 后端授权清单决定可选裁判引擎；DSH 裁判未配置时禁用，前端不自行猜测。
+const judgeEngineChoices = computed(() => {
+  const engines = judgeEngines.value.filter((item) => item.id === "deepagent" || item.available);
+  return engines.length ? engines : [{ id: "deepagent", label: "DeepAgent 裁判", available: true, disabled_reason: null }];
+});
+const judgeEngineLabel = computed(
+  () => judgeEngineChoices.value.find((item) => item.id === judgeEngine.value)?.label || "裁判"
+);
 
 const runId = computed(() => String(route.params.runId || ""));
 const selectedMeta = computed(() => runs.value.find((item) => item.name === runId.value));
@@ -465,12 +478,29 @@ async function loadRun(id: string) {
   }
 }
 
+async function loadJudgeEngines() {
+  try {
+    const options = await fetchJudgeEngines();
+    judgeEngines.value = options.engines;
+    const preferred = options.selected || options.default_engine || "deepagent";
+    const usable = options.engines.filter((item) => item.id === "deepagent" || item.available);
+    judgeEngine.value = usable.some((item) => item.id === preferred)
+      ? preferred
+      : usable[0]?.id || "deepagent";
+  } catch {
+    judgeEngines.value = [{ id: "deepagent", label: "DeepAgent 裁判", available: true, disabled_reason: null }];
+    judgeEngine.value = "deepagent";
+  }
+}
+
 async function runJudge() {
   if (!runId.value) return;
   judging.value = true;
   error.value = "";
   try {
-    const result = await apiPost<{ report: JudgeReport }>(`/api/runs/${runId.value}/judge`);
+    const result = await apiPostJson<{ report: JudgeReport }>(`/api/runs/${runId.value}/judge`, {
+      engine: judgeEngine.value
+    });
     judge.value = result.report;
     charts.value = (result.report.charts as Record<string, any>) || charts.value;
     runtime.value = await apiGet<RuntimeMetrics>(`/api/runs/${runId.value}/runtime-metrics`);
@@ -578,6 +608,7 @@ watch(
 
 onMounted(() => {
   if (!runs.value.length) void reloadRuns();
+  void loadJudgeEngines();
 });
 </script>
 
@@ -591,7 +622,7 @@ onMounted(() => {
         <p class="eyebrow">Run inspection · {{ serverHost }}</p>
         <h2 class="run-title">{{ runId || "暂无运行" }}</h2>
         <p class="lede">
-          {{ selectedMeta?.has_judge ? "已生成 DeepAgent 分析" : "尚未分析 · 可运行 DeepAgent 评测" }}
+          {{ selectedMeta?.has_judge ? "已生成裁判分析" : "尚未分析 · 可运行裁判评测" }}
         </p>
       </div>
       <div class="hero-actions">
@@ -607,8 +638,16 @@ onMounted(() => {
         <button class="ghost" type="button" :disabled="!runId || exporting" @click="exportMarkdown">
           {{ exporting ? "导出中" : "导出 Markdown" }}
         </button>
+        <label class="judge-engine-picker">
+          <span class="judge-engine-label">裁判引擎</span>
+          <select v-model="judgeEngine" class="judge-engine-select" :disabled="!runId || judging" aria-label="裁判引擎">
+            <option v-for="item in judgeEngineChoices" :key="item.id" :value="item.id">
+              {{ item.label }}
+            </option>
+          </select>
+        </label>
         <button class="primary" type="button" :disabled="!runId || judging" @click="runJudge">
-          {{ judging ? "分析中" : "运行 DeepAgent 分析" }}
+          {{ judging ? "分析中" : `运行 ${judgeEngineLabel} 分析` }}
         </button>
       </div>
     </header>
@@ -1141,7 +1180,7 @@ onMounted(() => {
           <div class="panel-head">
             <h3>Agent 判断</h3>
           </div>
-          <p class="report">{{ judge?.summary || "尚未生成 DeepAgent 分析报告。" }}</p>
+          <p class="report">{{ judge?.summary || "尚未生成裁判分析报告。" }}</p>
           <dl v-if="judge" class="judge-meta">
             <div>
               <dt>状态</dt>
@@ -1150,6 +1189,10 @@ onMounted(() => {
             <div>
               <dt>置信度</dt>
               <dd>{{ judge.confidence }}</dd>
+            </div>
+            <div v-if="judge.judge?.engine">
+              <dt>裁判引擎</dt>
+              <dd>{{ judge.judge.engine }}</dd>
             </div>
           </dl>
         </div>
@@ -1204,5 +1247,35 @@ onMounted(() => {
 .dimension-row em[data-status="unknown"] {
   color: #5a6b7d;
   font-style: normal;
+}
+
+.judge-engine-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid rgba(20, 32, 51, 0.14);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.judge-engine-label {
+  color: #5a6b7d;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.judge-engine-select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.judge-engine-select:disabled {
+  cursor: not-allowed;
+  color: #8a97a6;
 }
 </style>

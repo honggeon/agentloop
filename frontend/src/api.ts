@@ -52,6 +52,16 @@ export interface JudgeReliability {
   invalid_evidence?: JudgeEvidence[];
 }
 
+// 引擎来源信息，记录在 agent_judge.json 的 judge 字段中；旧报告没有该字段。
+export interface JudgeProvenance {
+  engine?: string;
+  runtime?: string;
+  profile?: string;
+  workspace?: string;
+  model?: string;
+  [key: string]: unknown;
+}
+
 export interface JudgeReport {
   status?: string;
   overall_status?: string;
@@ -61,6 +71,7 @@ export interface JudgeReport {
   findings?: Finding[];
   dimensions?: Record<string, JudgeDimension>;
   judge_reliability?: JudgeReliability;
+  judge?: JudgeProvenance;
   metrics?: Record<string, unknown>;
   charts?: Record<string, unknown>;
 }
@@ -425,6 +436,22 @@ export interface DshProviderInfo {
   disabled_reason?: string | null;
 }
 
+// 裁判引擎：DeepAgent 本地裁判，或使用专用 profile 的 DSH 裁判。
+export type JudgeEngineId = "deepagent" | "dsh";
+
+export interface JudgeEngineInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  disabled_reason?: string | null;
+}
+
+export interface JudgeEngineOptions {
+  default_engine: string;
+  engines: JudgeEngineInfo[];
+  selected: string;
+}
+
 // GET /api/dsh/options 返回的后端授权清单：只有这里列出的 profile / workspace
 // 才会被后端接受，前端不得自行拼出其它取值。
 export interface DshOptions {
@@ -439,6 +466,7 @@ export interface DshOptions {
     max_timeout_seconds: number;
     max_concurrency: number;
   };
+  judge: JudgeEngineOptions;
 }
 
 export interface DshChatPayload {
@@ -495,6 +523,10 @@ export interface DshCancelResult {
 
 export function fetchDshOptions(): Promise<DshOptions> {
   return apiGet<DshOptions>("/api/dsh/options");
+}
+
+export function fetchJudgeEngines(): Promise<JudgeEngineOptions> {
+  return apiGet<JudgeEngineOptions>("/api/judge/engines");
 }
 
 export function streamDshChat(payload: DshChatPayload, onEvent: (event: LiveEvent) => void): Promise<void> {

@@ -8,6 +8,7 @@ from auditrail.dsh_runtime import (
     DshRuntimeConfig,
     DshRuntimeError,
     DshValidationError,
+    validate_judge_request,
     validate_request,
     validate_session_id,
 )
@@ -108,3 +109,63 @@ def test_execution_result_success_requires_all_terminal_signals():
     assert DshExecutionResult(**{**base, "turn_end_reason": "error"}).succeeded is False
     assert DshExecutionResult(**{**base, "final_text": None}).succeeded is False
     assert DshExecutionResult(**{**base, "error": DshRuntimeError("failure", "failed")}).succeeded is False
+
+
+def test_runtime_config_accepts_a_dedicated_judge_profile(tmp_path):
+    config, workspace = make_config(tmp_path, judge_profile="agentloop-judge")
+
+    assert config.judge_profile == "agentloop-judge"
+    assert config.validate_judge_profile("agentloop-judge") == "agentloop-judge"
+
+
+def test_runtime_config_rejects_judge_profile_overlapping_evaluand_profiles(tmp_path):
+    with pytest.raises(DshValidationError, match="judge profile"):
+        make_config(tmp_path, judge_profile="headless")
+
+
+def test_runtime_config_rejects_invalid_judge_profile_shape(tmp_path):
+    with pytest.raises(DshValidationError, match="judge profile"):
+        DshRuntimeConfig(Path("/opt/dsh"), ("headless",), (tmp_path,), judge_profile="--patch")
+
+
+def test_validate_request_never_runs_an_evaluand_turn_as_the_judge(tmp_path):
+    config, workspace = make_config(tmp_path, judge_profile="agentloop-judge")
+
+    with pytest.raises(DshValidationError, match="judge"):
+        validate_request(config, DshRunRequest("judge this", "agentloop-judge", workspace))
+
+
+def test_validate_judge_request_enforces_the_configured_judge_profile(tmp_path):
+    config, workspace = make_config(tmp_path, judge_profile="agentloop-judge")
+
+    invocation = validate_judge_request(
+        config,
+        DshRunRequest("judge this", "agentloop-judge", workspace, None, 45),
+        judge_profile="agentloop-judge",
+    )
+    assert invocation.profile == "agentloop-judge"
+    assert invocation.timeout_seconds == 45
+
+    with pytest.raises(DshValidationError, match="judge"):
+        validate_judge_request(
+            config,
+            DshRunRequest("judge this", "headless", workspace),
+            judge_profile="agentloop-judge",
+        )
+    with pytest.raises(DshValidationError, match="judge"):
+        validate_judge_request(
+            config,
+            DshRunRequest("judge this", "agentloop-judge", workspace),
+            judge_profile="other-judge",
+        )
+
+
+def test_validate_judge_request_requires_a_configured_judge_profile(tmp_path):
+    config, workspace = make_config(tmp_path)
+
+    with pytest.raises(DshValidationError, match="judge"):
+        validate_judge_request(
+            config,
+            DshRunRequest("judge this", "agentloop-judge", workspace),
+            judge_profile="agentloop-judge",
+        )

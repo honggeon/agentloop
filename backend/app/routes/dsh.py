@@ -15,10 +15,11 @@ from fastapi import APIRouter, HTTPException
 from auditrail.cli import _run_dir, _write_run_outputs
 from auditrail.dsh_source import (
     find_session_file,
-    list_sessions,
+    list_evaluand_sessions,
     load_session_response,
     source_meta,
 )
+from auditrail.judges.base import describe_engines
 from backend.app.config import build_dsh_runtime_config, get_settings
 
 
@@ -41,6 +42,7 @@ def get_dsh_options() -> dict[str, Any]:
     disabled_reason: str | None = "local DSH runtime is disabled"
     profiles: tuple[str, ...] = ()
     roots: tuple[Path, ...] = ()
+    judge_engines = describe_engines(None)
     if settings.dsh_runtime_enabled:
         try:
             config = build_dsh_runtime_config(settings)
@@ -67,6 +69,7 @@ def get_dsh_options() -> dict[str, Any]:
             "max_timeout_seconds": settings.dsh_max_timeout_seconds,
             "max_concurrency": settings.dsh_max_concurrency,
         },
+        "judge": judge_engines,
     }
 
 
@@ -99,7 +102,12 @@ def _list_workspaces(roots: tuple[Path, ...]) -> list[str]:
 @router.get("/sessions")
 def get_dsh_sessions(limit: int = 50) -> dict[str, Any]:
     settings = get_settings()
-    sessions = list_sessions(settings.dsh_home, limit=limit)
+    sessions = list_evaluand_sessions(
+        settings.dsh_home,
+        limit=limit,
+        judge_profiles=(settings.dsh_judge_profile,) if settings.dsh_judge_profile else (),
+        judge_workspaces=(settings.dsh_judge_workspace,) if settings.dsh_judge_workspace else (),
+    )
     return {"dsh_home": str(settings.dsh_home), "sessions": sessions}
 
 

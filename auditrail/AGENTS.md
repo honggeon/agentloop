@@ -11,6 +11,8 @@
 - `llm_proxy.py`：OpenAI 兼容 LLM 指标代理。运行时可用 FastAPI/Uvicorn，但缺少这些依赖时必须保留 stdlib fallback。
 - `cli.py`：CLI 入口（`fetch-session`、`smoke-chat`、`render-run`、`judge-run`、`metrics-proxy`、`import-llm-calls`）。写 run 产物走 `_write_run_outputs`。
 - `agents/`：DeepAgent 裁判。`schemas.py` / `evidence.py` / `dimensions.py` / `tools.py` 是确定性契约；`agent.py` 才加载 `.[agent]`。
+- `judges/`：可选择的裁判引擎边界。`base.py` 是协议与注册表，`deepagent_engine.py` / `dsh_engine.py` 只产出未经信任的 proposal；`proposals.py` 是 DSH 的严格 JSON 校验，`prompting.py` 组装有界证据提示词。
+- `dsh_runtime.py` / `dsh_headless.py` / `dsh_source.py`：本地 DSH 执行策略、Headless NDJSON 归一化和会话录制导入。
 
 `runs/<run_id>/` 文件是跨 CLI、后端、前端和裁判的共享契约。新增字段必须向后兼容已有报告。
 

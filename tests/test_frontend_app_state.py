@@ -120,6 +120,23 @@ def test_run_view_shows_evaluation_dimensions_and_judge_reliability():
     assert "意图识别" in source
 
 
+def test_run_view_can_select_the_judge_engine():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "export interface JudgeEngineInfo" in api_source
+    assert "export interface JudgeEngineOptions" in api_source
+    assert "export interface JudgeProvenance" in api_source
+    assert "fetchJudgeEngines" in api_source
+    assert "/api/judge/engines" in api_source
+    assert "裁判引擎" in source
+    assert "judgeEngineChoices" in source
+    assert "judgeEngineLabel" in source
+    assert "engine: judgeEngine.value" in source
+    assert "apiPostJson" in source
+    assert "judge?.judge?.engine" in source or "judge.judge?.engine" in source
+
+
 def test_live_eval_can_auto_continue_confirmations():
     source = LIVE_VIEW.read_text(encoding="utf-8")
     api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")

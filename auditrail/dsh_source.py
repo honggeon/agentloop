@@ -128,6 +128,40 @@ def list_sessions(dsh_home: Path, limit: Optional[int] = None) -> List[Dict]:
     return items
 
 
+def list_evaluand_sessions(
+    dsh_home: Path,
+    limit: Optional[int] = None,
+    *,
+    judge_profiles: Iterable[str] = (),
+    judge_workspaces: Iterable[str | Path] = (),
+) -> List[Dict]:
+    """List recorded DSH sessions that can be evaluated.
+
+    Judge sessions share the local DSH home but must never appear as evaluands:
+    they are identified by the dedicated judge profile and/or the dedicated
+    judge workspace. Both are server-owned settings, so this filter cannot be
+    steered by a browser request.
+    """
+    profiles = {str(value).strip() for value in judge_profiles if str(value).strip()}
+    workspaces = {
+        str(Path(value).expanduser().resolve(strict=False))
+        for value in judge_workspaces
+        if str(value).strip()
+    }
+    evaluands: List[Dict] = []
+    for item in list_sessions(dsh_home):
+        if profiles and str(item.get("agent_preset") or "").strip() in profiles:
+            continue
+        if workspaces and str(item.get("workspace") or "").strip():
+            workspace = str(Path(str(item["workspace"])).expanduser().resolve(strict=False))
+            if workspace in workspaces:
+                continue
+        evaluands.append(item)
+    if limit is not None:
+        evaluands = evaluands[: max(0, int(limit))]
+    return evaluands
+
+
 def session_info(events: List[Dict]) -> Dict:
     """Lightweight identity and counts for one parsed event log."""
     info: Dict = {

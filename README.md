@@ -49,12 +49,24 @@ python3 -m auditrail.cli judge-run --run runs/<run-dir>
 
 Backend routes (used by the DSH plugin):
 
-- `GET /api/dsh/sessions?limit=50` — list recorded DSH sessions.
+- `GET /api/dsh/sessions?limit=50` — list recorded DSH sessions. Sessions that
+  belong to the configured judge profile/workspace are hidden from this list.
 - `POST /api/dsh/import` `{ "session_id": "session-<uuid>" }` — import + audit,
   returns `{ "run_id": ... }`. `DSH_HOME` env var overrides the default `~/.dsh`.
 
 A DSH web plugin that embeds this flow into the DSH settings page (设置 →
 Agent 评测) lives in `dsh-plugin/`; see `dsh-plugin/README.md`.
+
+### Judge engines
+
+`POST /api/runs/{run_id}/judge` accepts an optional
+`{ "engine": "deepagent" | "dsh" }` body and defaults to `deepagent`.
+`GET /api/judge/engines` (mirrored in `GET /api/dsh/options` as `judge`) lists the
+registered engines and whether each one is ready. Both engines return an
+untrusted proposal; normalization, evidence validation, deterministic dimension
+caps, and report writing always go through `write_judge_report`, so a semantic
+judge can never override a deterministic failure. `agent_judge.json` records the
+producing engine under the additive `judge` key.
 
 Phase-one local Headless execution is disabled by default and has no public HTTP
 route yet. Its server-owned policy is configured with `DSH_RUNTIME_ENABLED`,
@@ -65,6 +77,13 @@ non-empty profile and workspace-root allowlists; callers cannot supply raw argv,
 `--patch`, or environment overrides. Phase-one local execution requires POSIX
 process-group isolation so timeout and cancellation also terminate spawned tool
 processes. See `.env.example` for safe defaults.
+
+The DSH judge stays disabled until it is configured separately with
+`DSH_JUDGE_PROFILE` (a dedicated profile name that must differ from every
+evaluand profile) and `DSH_JUDGE_WORKSPACE` (a dedicated directory strictly
+beneath an allowed workspace root). The judge turn receives bounded run evidence
+in its prompt, gets no shell or report-writing tools, and its sessions are hidden
+from evaluand discovery.
 
 ## Run a Deterministic Case Suite
 

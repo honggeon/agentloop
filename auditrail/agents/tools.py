@@ -239,10 +239,27 @@ def _downgrade_unsupported_facts(normalized: Dict[str, Any], reliability: Dict[s
     return count
 
 
-def write_judge_report(run_path: str, report: object) -> Dict[str, str]:
-    """Normalize and write agent_judge.json, agent_judge.md, and chart_data.json."""
+def write_judge_report(
+    run_path: str,
+    report: object,
+    *,
+    judge_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """Normalize and write agent_judge.json, agent_judge.md, and chart_data.json.
+
+    ``judge_metadata`` records which engine produced the proposal (engine id,
+    runtime, model, profile). It is additive provenance only: normalization,
+    evidence validation, deterministic caps, and quality assessment below are
+    the same for every engine.
+    """
     run_dir = _resolve_run_dir(run_path)
     normalized = normalize_judge_report(report)
+    if judge_metadata:
+        existing = dict(normalized.get("judge") or {})
+        merged_metadata = {key: value for key, value in judge_metadata.items() if value is not None}
+        existing.update(merged_metadata)
+        normalized["judge"] = existing
+        normalized = normalize_judge_report(normalized)
     reliability = validate_judge_evidence(str(run_dir), normalized)
     existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
     merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]

@@ -3,21 +3,24 @@ import json
 import zstandard
 from fastapi.testclient import TestClient
 
+from auditrail.dsh_source import list_evaluand_sessions
 from backend.app.config import Settings
 from backend.app.main import app
 
 SESSION_ID = "session-11111111-2222-4333-8444-555555555555"
+JUDGE_SESSION_ID = "session-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+JUDGE_PROFILE = "agentloop-judge"
 
 
-def _write_dsh_session(dsh_home, session_id=SESSION_ID):
+def _write_dsh_session(dsh_home, session_id=SESSION_ID, agent_preset="standard", cwd="/Users/test/project"):
     events = [
         {
             "type": "session",
             "version": 0,
             "id": session_id,
             "createdAt": 1787000000000,
-            "cwd": "/Users/test/project",
-            "agentPreset": "standard",
+            "cwd": cwd,
+            "agentPreset": agent_preset,
         },
         {
             "type": "user/message",
@@ -43,8 +46,10 @@ def _write_dsh_session(dsh_home, session_id=SESSION_ID):
     return path
 
 
-def _settings(tmp_path, dsh_home):
-    return Settings(runs_dir=tmp_path / "runs", dsh_home=dsh_home)
+def _settings(tmp_path, dsh_home, **overrides):
+    values = dict(runs_dir=tmp_path / "runs", dsh_home=dsh_home)
+    values.update(overrides)
+    return Settings(**values)
 
 
 def test_list_dsh_sessions(tmp_path, monkeypatch):
@@ -78,3 +83,44 @@ def test_import_dsh_session_rejects_bad_id(tmp_path, monkeypatch):
     assert client.post("/api/dsh/import", json={}).status_code == 400
     assert client.post("/api/dsh/import", json={"session_id": "../etc"}).status_code == 400
     assert client.post("/api/dsh/import", json={"session_id": "session-99999999-9999-4999-8999-999999999999"}).status_code == 404
+
+
+def test_list_evaluand_sessions_hides_judge_profile_sessions(tmp_path):
+    dsh_home = tmp_path / "dsh"
+    _write_dsh_session(dsh_home)
+    _write_dsh_session(dsh_home, session_id=JUDGE_SESSION_ID, agent_preset=JUDGE_PROFILE)
+
+    sessions = list_evaluand_sessions(dsh_home, judge_profiles=(JUDGE_PROFILE,))
+
+    assert [item["session_id"] for item in sessions] == [SESSION_ID]
+
+
+def test_list_evaluand_sessions_hides_judge_workspace_sessions(tmp_path):
+    dsh_home = tmp_path / "dsh"
+    judge_workspace = tmp_path / "judge-workspace"
+    _write_dsh_session(dsh_home)
+    _write_dsh_session(dsh_home, session_id=JUDGE_SESSION_ID, agent_preset="standard", cwd=str(judge_workspace))
+
+    sessions = list_evaluand_sessions(dsh_home, judge_workspaces=(judge_workspace,))
+
+    assert [item["session_id"] for item in sessions] == [SESSION_ID]
+
+
+def test_dsh_sessions_route_hides_judge_sessions(tmp_path, monkeypatch):
+    dsh_home = tmp_path / "dsh"
+    judge_workspace = tmp_path / "judge-workspace"
+    judge_workspace.mkdir()
+    _write_dsh_session(dsh_home)
+    _write_dsh_session(dsh_home, session_id=JUDGE_SESSION_ID, agent_preset=JUDGE_PROFILE, cwd=str(judge_workspace))
+    settings = _settings(
+        tmp_path,
+        dsh_home,
+        dsh_judge_profile=JUDGE_PROFILE,
+        dsh_judge_workspace=judge_workspace,
+    )
+    monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    data = client.get("/api/dsh/sessions").json()
+
+    assert [item["session_id"] for item in data["sessions"]] == [SESSION_ID]

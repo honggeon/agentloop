@@ -56,6 +56,7 @@ class DshRuntimeConfig:
     binary: Path
     allowed_profiles: tuple[str, ...]
     allowed_workspace_roots: tuple[Path, ...]
+    judge_profile: str = ""
     default_timeout_seconds: float = 300.0
     max_timeout_seconds: float = 900.0
     max_message_bytes: int = 64 * 1024
@@ -75,6 +76,14 @@ class DshRuntimeConfig:
         if len(set(profiles)) != len(profiles) or any(not _PROFILE_RE.fullmatch(value) for value in profiles):
             raise DshValidationError("DSH profile allowlist contains an invalid value")
         object.__setattr__(self, "allowed_profiles", profiles)
+
+        judge = str(self.judge_profile or "").strip()
+        if judge:
+            if not _PROFILE_RE.fullmatch(judge):
+                raise DshValidationError("DSH judge profile is invalid")
+            if judge in profiles:
+                raise DshValidationError("DSH judge profile must differ from every evaluand profile")
+        object.__setattr__(self, "judge_profile", judge)
 
         roots: list[Path] = []
         for value in self.allowed_workspace_roots:
@@ -105,9 +114,22 @@ class DshRuntimeConfig:
                 raise DshValidationError("DSH output and message limits must be positive")
 
     def validate_profile(self, profile: str) -> str:
+        """Validate any server-owned profile: an evaluand or the judge profile."""
         value = str(profile or "").strip()
-        if not _PROFILE_RE.fullmatch(value) or value not in self.allowed_profiles:
+        allowed = set(self.allowed_profiles)
+        if self.judge_profile:
+            allowed.add(self.judge_profile)
+        if not _PROFILE_RE.fullmatch(value) or value not in allowed:
             raise DshValidationError("DSH profile is not allowed")
+        return value
+
+    def validate_judge_profile(self, profile: str) -> str:
+        """Validate the dedicated judge profile; it is not an evaluand profile."""
+        value = str(profile or "").strip()
+        if not self.judge_profile:
+            raise DshValidationError("no DSH judge profile is configured")
+        if not _PROFILE_RE.fullmatch(value) or value != self.judge_profile:
+            raise DshValidationError("DSH judge profile is not allowed")
         return value
 
     def validate_workspace(self, workspace: str | Path) -> Path:
@@ -181,9 +203,37 @@ def validate_session_id(session_id: str) -> str:
 
 
 def validate_request(config: DshRuntimeConfig, request: DshRunRequest) -> DshInvocation:
+    """Validate an evaluand turn; the judge profile is never an evaluand."""
+    profile = config.validate_profile(request.profile)
+    if config.judge_profile and profile == config.judge_profile:
+        raise DshValidationError("the DSH judge profile cannot run an evaluand turn")
     return DshInvocation(
         message=config.validate_message(request.message),
-        profile=config.validate_profile(request.profile),
+        profile=profile,
+        workspace=config.validate_workspace(request.workspace),
+        session_id=validate_session_id(request.session_id) if request.session_id is not None else None,
+        timeout_seconds=config.validate_timeout(request.timeout_seconds),
+    )
+
+
+def validate_judge_request(
+    config: DshRuntimeConfig,
+    request: DshRunRequest,
+    *,
+    judge_profile: str,
+) -> DshInvocation:
+    """Validate a dedicated judge turn against the same trusted DSH policy.
+
+    The judge profile is server-owned and deliberately absent from the evaluand
+    profile allowlist, so it is validated by its own identity while the message,
+    workspace, session id, and timeout reuse the evaluand rules.
+    """
+    profile = str(judge_profile or "").strip()
+    if request.profile != profile:
+        raise DshValidationError("DSH judge request must use the configured judge profile")
+    return DshInvocation(
+        message=config.validate_message(request.message),
+        profile=config.validate_judge_profile(profile),
         workspace=config.validate_workspace(request.workspace),
         session_id=validate_session_id(request.session_id) if request.session_id is not None else None,
         timeout_seconds=config.validate_timeout(request.timeout_seconds),

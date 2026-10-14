@@ -290,7 +290,7 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
         }
         for key, row in dimensions.items()
     ]
-    return {
+    normalized = {
         "overall_status": status,
         "completion_score": score,
         "confidence": confidence,
@@ -301,6 +301,31 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
         "dimensions": dimensions,
         "judge_reliability": judge_reliability,
     }
+    judge_metadata = _normalize_judge_metadata(report.get("judge"))
+    if judge_metadata is not None:
+        normalized["judge"] = judge_metadata
+    return normalized
+
+
+def _normalize_judge_metadata(value: object) -> Dict[str, Any] | None:
+    """Keep the additive engine provenance block when a report carries one."""
+    if not isinstance(value, dict):
+        return None
+    metadata: Dict[str, Any] = {}
+    for key, item in value.items():
+        name = str(key)
+        if item is None:
+            continue
+        if isinstance(item, bool) or isinstance(item, int) or isinstance(item, float):
+            metadata[name] = item
+        elif isinstance(item, str):
+            metadata[name] = item[:500]
+        else:
+            continue
+    engine = metadata.get("engine")
+    if isinstance(engine, str) and engine.strip():
+        metadata["engine"] = engine.strip().lower()
+    return metadata or None
 
 
 def render_judge_markdown(report: Dict[str, Any]) -> str:

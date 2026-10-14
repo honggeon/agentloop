@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from auditrail.dsh_runtime import DshRuntimeConfig
+from auditrail.dsh_runtime import DshRuntimeConfig, DshValidationError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +29,8 @@ class Settings:
     dsh_default_timeout_seconds: int = 300
     dsh_max_timeout_seconds: int = 900
     dsh_max_concurrency: int = 1
+    dsh_judge_profile: str = ""
+    dsh_judge_workspace: Path | None = None
 
 
 @lru_cache(maxsize=1)
@@ -53,11 +55,17 @@ def get_settings() -> Settings:
         dsh_default_timeout_seconds=_positive_int("DSH_DEFAULT_TIMEOUT_SECONDS", 300),
         dsh_max_timeout_seconds=_positive_int("DSH_MAX_TIMEOUT_SECONDS", 900),
         dsh_max_concurrency=_positive_int("DSH_MAX_CONCURRENCY", 1),
+        dsh_judge_profile=os.getenv("DSH_JUDGE_PROFILE", "").strip(),
+        dsh_judge_workspace=_optional_path(os.getenv("DSH_JUDGE_WORKSPACE")),
     )
 
 
 def build_dsh_runtime_config(settings: Settings | None = None) -> DshRuntimeConfig:
-    """Build the core policy only when local DSH execution is explicitly enabled."""
+    """Build the core policy only when local DSH execution is explicitly enabled.
+
+    ``DSH_JUDGE_PROFILE`` is included as the dedicated judge profile so the
+    trusted policy itself rejects judges that reuse an evaluand profile.
+    """
     current = settings or get_settings()
     if not current.dsh_runtime_enabled:
         raise ValueError("local DSH runtime is disabled")
@@ -65,13 +73,42 @@ def build_dsh_runtime_config(settings: Settings | None = None) -> DshRuntimeConf
         raise ValueError("DSH_BINARY is required when local DSH runtime is enabled")
     if current.dsh_default_timeout_seconds > current.dsh_max_timeout_seconds:
         raise ValueError("DSH default timeout cannot exceed the maximum")
-    return DshRuntimeConfig(
-        binary=current.dsh_binary,
-        allowed_profiles=current.dsh_allowed_profiles,
-        allowed_workspace_roots=current.dsh_allowed_workspace_roots,
-        default_timeout_seconds=current.dsh_default_timeout_seconds,
-        max_timeout_seconds=current.dsh_max_timeout_seconds,
-    )
+    try:
+        return DshRuntimeConfig(
+            binary=current.dsh_binary,
+            allowed_profiles=current.dsh_allowed_profiles,
+            allowed_workspace_roots=current.dsh_allowed_workspace_roots,
+            judge_profile=current.dsh_judge_profile,
+            default_timeout_seconds=current.dsh_default_timeout_seconds,
+            max_timeout_seconds=current.dsh_max_timeout_seconds,
+        )
+    except DshValidationError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def build_dsh_judge_settings(settings: Settings | None = None) -> Settings:
+    """Validate the server-owned DSH judge policy before any judge work starts.
+
+    The judge needs an explicitly configured, dedicated profile and workspace so
+    a judge session can never resume an evaluated session. Validation is
+    centralized here; the engine re-checks the same invariants defensively.
+    """
+    current = settings or get_settings()
+    build_dsh_runtime_config(current)
+    if not current.dsh_judge_profile:
+        raise ValueError("DSH_JUDGE_PROFILE is required to run the DSH judge")
+    if current.dsh_judge_profile in current.dsh_allowed_profiles:
+        raise ValueError("DSH judge profile must differ from every evaluand profile")
+    if current.dsh_judge_workspace is None:
+        raise ValueError("DSH_JUDGE_WORKSPACE is required to run the DSH judge")
+    workspace = current.dsh_judge_workspace.expanduser()
+    if not workspace.exists() or not workspace.is_dir():
+        raise ValueError("configured DSH judge workspace does not exist")
+    try:
+        build_dsh_runtime_config(current).validate_workspace(workspace)
+    except DshValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    return current
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
