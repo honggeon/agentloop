@@ -74,6 +74,75 @@ export interface JudgeReport {
   judge?: JudgeProvenance;
   metrics?: Record<string, unknown>;
   charts?: Record<string, unknown>;
+  // GET /api/runs/:id/judges/:engine 标注该报告属于哪个引擎；根报告没有该字段。
+  judge_engine?: string;
+}
+
+// 一个 run 可以为每个裁判引擎保存一份报告。根目录 agent_judge.json|md 与
+// chart_data.json 始终是最近一次发布的 active 报告，旧客户端继续可用。
+export interface JudgeReportSummary {
+  engine: string;
+  available: boolean;
+  published_at?: string;
+  json_path: string;
+  markdown_path: string;
+  chart_path: string;
+}
+
+export interface JudgeReportList {
+  run_id?: string;
+  version?: number;
+  active_engine: string;
+  reports: JudgeReportSummary[];
+}
+
+// 单一取值 + 是否发生分歧；未知（unknown）低于真实判断，不算分歧也不算失败。
+export interface JudgeStatusComparison {
+  by_engine: Record<string, string>;
+  disagreement: boolean;
+}
+
+export interface JudgeDimensionComparison {
+  status: Record<string, string>;
+  score: Record<string, number | null>;
+  disagreement: boolean;
+  unknown_engines: string[];
+}
+
+export interface JudgeReliabilityComparison {
+  evidence_coverage: number;
+  invalid_evidence_count: number;
+  fact_inference_mismatch_count: number;
+  valid_evidence_count: number;
+  total_evidence_count: number;
+}
+
+export interface JudgeFactFinding {
+  severity: string;
+  category: string;
+  title: string;
+}
+
+export interface JudgeComparisonReport {
+  run_id?: string;
+  active_engine: string;
+  engines: string[];
+  overall_status: JudgeStatusComparison;
+  completion_score: {
+    by_engine: Record<string, number>;
+    spread: number;
+    disagreement: boolean;
+  };
+  reliability: Record<string, JudgeReliabilityComparison>;
+  dimensions: Record<string, JudgeDimensionComparison>;
+  // 跨引擎结论差异：只列事实，不自动挑选「最佳 Judge」。
+  disagreements: Array<{ kind: string; by_engine: Record<string, string | number> }>;
+  deterministic_findings: Record<
+    string,
+    { count: number; severity_counts: Array<{ severity: string; count: number }>; findings: JudgeFactFinding[] }
+  >;
+  judge_finding_counts: Record<string, { total: number; by_severity: Record<string, number> }>;
+  fact_inference_mismatch: Record<string, { count: number; notes: string[] }>;
 }
 
 export interface BatchRunItem {
@@ -527,6 +596,23 @@ export function fetchDshOptions(): Promise<DshOptions> {
 
 export function fetchJudgeEngines(): Promise<JudgeEngineOptions> {
   return apiGet<JudgeEngineOptions>("/api/judge/engines");
+}
+
+// 一个 run 的多 Judge 报告清单与对比（不自动选择「最佳 Judge」）。
+export function fetchJudgeReports(runId: string): Promise<JudgeReportList> {
+  return apiGet<JudgeReportList>(`/api/runs/${encodeURIComponent(runId)}/judges`);
+}
+
+export function fetchJudgeReport(runId: string, engine: string): Promise<JudgeReport> {
+  return apiGet<JudgeReport>(`/api/runs/${encodeURIComponent(runId)}/judges/${encodeURIComponent(engine)}`);
+}
+
+export function fetchJudgeComparison(runId: string): Promise<JudgeComparisonReport> {
+  return apiGet<JudgeComparisonReport>(`/api/runs/${encodeURIComponent(runId)}/judges/compare`);
+}
+
+export function activateJudgeReport(runId: string, engine: string): Promise<JudgeReportList> {
+  return apiPost<JudgeReportList>(`/api/runs/${encodeURIComponent(runId)}/judges/${encodeURIComponent(engine)}/active`);
 }
 
 export function streamDshChat(payload: DshChatPayload, onEvent: (event: LiveEvent) => void): Promise<void> {

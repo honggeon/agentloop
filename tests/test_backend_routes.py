@@ -723,3 +723,126 @@ def test_backend_judge_includes_acceptance_criteria(tmp_path, monkeypatch):
     response = client.post("/api/runs/run-1/judge")
     assert response.status_code == 200
     assert response.json()["report"]["completion_score"] == 88
+
+
+# -- multi-judge storage and comparison --------------------------------
+
+
+def _publish_judge_report(run, engine, status, score, *, published_at, findings=None):
+    from auditrail.agents.tools import write_judge_report
+
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": status,
+            "completion_score": score,
+            "confidence": "high",
+            "summary": "%s summary" % engine,
+            "findings": findings or [],
+        },
+        judge_metadata={"engine": engine, "runtime": engine},
+        judge_engine=engine,
+        published_at=published_at,
+    )
+
+
+def test_backend_judge_run_archives_report_per_engine(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+
+    async def fake_invoke(messages, config=None):
+        return {"overall_status": "success", "completion_score": 91, "confidence": "high", "summary": "d"}
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    client = TestClient(app)
+
+    response = client.post("/api/runs/run-1/judge")
+    assert response.status_code == 200
+    assert response.json()["engine"] == "deepagent"
+    # The real route archives under the engine directory, not only at the root.
+    assert (run / "judges" / "deepagent" / "agent_judge.json").exists()
+    assert (run / "judges" / "manifest.json").exists()
+
+    # A second engine writes through the same pipeline and both reports survive.
+    _publish_judge_report(run, "dsh", "partial", 55, published_at="2026-10-13T00:01:00+00:00")
+    _publish_judge_report(run, "deepagent", "success", 91, published_at="2026-10-13T00:02:00+00:00")
+
+    listed = client.get("/api/runs/run-1/judges").json()
+    assert [entry["engine"] for entry in listed["reports"]] == ["deepagent", "dsh"]
+    assert listed["active_engine"] == "deepagent"
+    assert client.get("/api/runs/run-1/judges/dsh").json()["overall_status"] == "partial"
+    # Old clients reading the root report still see the active engine.
+    root = client.get("/api/runs/run-1/judge").json()
+    assert root["overall_status"] == "success"
+    assert root["judge"]["engine"] == "deepagent"
+
+
+def test_backend_judge_report_routes_list_read_and_activate(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    _publish_judge_report(run, "deepagent", "success", 90, published_at="2026-10-13T00:00:00+00:00")
+    _publish_judge_report(run, "dsh", "failed", 24, published_at="2026-10-13T00:01:00+00:00")
+    client = TestClient(app)
+
+    listed = client.get("/api/runs/run-1/judges").json()
+    assert listed["active_engine"] == "dsh"
+    assert client.get("/api/runs/run-1/judges/deepagent").json()["overall_status"] == "success"
+    assert client.get("/api/runs/run-1/judges/nope").json() == {"status": "missing", "engine": "nope"}
+
+    response = client.post("/api/runs/run-1/judges/deepagent/active")
+    assert response.status_code == 200
+    assert response.json()["active_engine"] == "deepagent"
+    root = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    assert root["judge"]["engine"] == "deepagent"
+    # Both archived reports still exist after the switch.
+    assert (run / "judges" / "dsh" / "agent_judge.json").exists()
+    assert client.get("/api/runs/run-1/judges").json()["active_engine"] == "deepagent"
+
+    assert client.post("/api/runs/run-1/judges/nope/active").status_code == 404
+    assert client.post("/api/runs/run-1/judges/..%2F..%2Factive").status_code == 404
+    assert client.get("/api/runs/missing-run/judges").status_code == 404
+
+
+def test_backend_judge_compare_distinguishes_unknown_from_fail(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    _publish_judge_report(run, "deepagent", "success", 90, published_at="2026-10-13T00:00:00+00:00")
+    _publish_judge_report(run, "dsh", "partial", 50, published_at="2026-10-13T00:01:00+00:00")
+    client = TestClient(app)
+
+    comparison = client.get("/api/runs/run-1/judges/compare").json()
+
+    assert comparison["engines"] == ["deepagent", "dsh"]
+    assert comparison["overall_status"]["disagreement"] is True
+    assert comparison["completion_score"]["spread"] == 40
+    unknown = [row for row in comparison["dimensions"].values() if "deepagent" in row["unknown_engines"]]
+    assert unknown
+    assert all(row["status"]["deepagent"] != "fail" for row in unknown)
+    # The comparison never names a preferred judge.
+    assert "winner" not in json.dumps(comparison)
+    assert "best" not in json.dumps(comparison)
+
+
+def test_backend_judge_routes_keep_legacy_single_report_runs_readable(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    (run / "agent_judge.json").write_text(
+        json.dumps({"overall_status": "unknown", "completion_score": 0, "summary": "old"}),
+        encoding="utf-8",
+    )
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    listed = client.get("/api/runs/run-1/judges").json()
+    assert listed["active_engine"] == "deepagent"
+    assert listed["reports"][0]["json_path"] == "agent_judge.json"
+    assert client.get("/api/runs/run-1/judges/deepagent").json()["summary"] == "old"
+    # The legacy route is unchanged.
+    assert client.get("/api/runs/run-1/judge").json()["summary"] == "old"
+    # A run with no report at all still answers instead of failing.
+    assert client.get("/api/runs/run-1/judges/compare").status_code == 200

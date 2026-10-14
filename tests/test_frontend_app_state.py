@@ -137,6 +137,40 @@ def test_run_view_can_select_the_judge_engine():
     assert "judge?.judge?.engine" in source or "judge.judge?.engine" in source
 
 
+def test_run_view_lists_and_compares_multiple_judge_reports():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "export interface JudgeReportSummary" in api_source
+    assert "export interface JudgeReportList" in api_source
+    assert "export interface JudgeComparisonReport" in api_source
+    assert "judge_engine" in api_source
+    assert "fetchJudgeReports" in api_source
+    assert "fetchJudgeReport" in api_source
+    assert "fetchJudgeComparison" in api_source
+    assert "activateJudgeReport" in api_source
+    assert "/api/runs/" in api_source
+    assert "/judges" in api_source
+    assert "/judges/compare" in api_source
+    assert "/active" in api_source
+
+    # 面板、对比表与分歧标注，且不自动选择更优裁判
+    assert "多 Judge 对比" in source
+    assert "judgeOverallRows" in source
+    assert "judgeDimensionRows" in source
+    assert "judgeDisagreementDimensions" in source
+    assert "judgeDisagreementRows" in source
+    assert "judgeView" in source
+    assert "viewingJudgeEngine" in source
+    assert "selectJudgeView" in source
+    assert "activateJudgeView" in source
+    assert "设为当前报告" in source
+    assert "不自动选择更优裁判" in source
+    assert "未评估" in source
+    assert "unknown" in source
+
+
+
 def test_live_eval_can_auto_continue_confirmations():
     source = LIVE_VIEW.read_text(encoding="utf-8")
     api_source = Path("frontend/src/api.ts").read_text(encoding="utf-8")

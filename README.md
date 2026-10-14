@@ -68,6 +68,38 @@ caps, and report writing always go through `write_judge_report`, so a semantic
 judge can never override a deterministic failure. `agent_judge.json` records the
 producing engine under the additive `judge` key.
 
+### Multiple judge reports
+
+One run keeps one report per engine side by side:
+
+```text
+runs/<run_id>/
+  agent_judge.json|md, chart_data.json   # active report, unchanged contract
+  judges/
+    manifest.json
+    deepagent/agent_judge.json|md, chart_data.json
+    dsh/agent_judge.json|md, chart_data.json
+```
+
+The root files stay the active report, so old clients keep working. Switching the
+active report only makes another engine's stored report current; it does not
+re-run or re-normalize anything. Every stored report went through
+`write_judge_report`, files are published atomically, and a per-run lock keeps
+concurrent judges from interleaving. Runs judged before this layout still load:
+without `judges/manifest.json`, the root report is exposed as the single active
+`deepagent` report.
+
+- `GET /api/runs/{run_id}/judges` — manifest: active engine and every stored report.
+- `GET /api/runs/{run_id}/judges/{engine}` — one engine's stored report.
+- `GET /api/runs/{run_id}/judges/compare` — per-engine status, completion,
+  reliability, and dimension rows, plus the disagreements between engines.
+- `POST /api/runs/{run_id}/judges/{engine}/active` — make a stored report active again.
+
+Comparison never picks a winner: `unknown` ranks below a real judgment, so a
+dimension one engine never assessed is reported as an open question instead of a
+disagreement or a failure, and deterministic failures stay visible even when a
+semantic judge passes the run.
+
 Phase-one local Headless execution is disabled by default and has no public HTTP
 route yet. Its server-owned policy is configured with `DSH_RUNTIME_ENABLED`,
 `DSH_BINARY`, `DSH_ALLOWED_PROFILES`, `DSH_ALLOWED_WORKSPACE_ROOTS`,
@@ -190,6 +222,7 @@ The command writes:
 - `agent_judge.json`
 - `agent_judge.md`
 - `chart_data.json`
+- `judges/deepagent/` plus `judges/manifest.json` when the report carries engine metadata
 
 `agent_judge.json` includes two reliability-focused sections:
 

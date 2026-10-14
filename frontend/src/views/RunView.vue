@@ -7,13 +7,19 @@ import { BarChart, LineChart, PieChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import {
+  activateJudgeReport,
   apiDownload,
   apiGet,
   apiPostJson,
+  fetchJudgeComparison,
   fetchJudgeEngines,
+  fetchJudgeReport,
+  fetchJudgeReports,
   type Finding,
+  type JudgeComparisonReport,
   type JudgeEngineInfo,
   type JudgeReport,
+  type JudgeReportList,
   type LlmCallDetail,
   type RunItem,
   type RuntimeMetrics,
@@ -44,6 +50,23 @@ const selectedLlmCallId = ref("");
 const expandedLlmCallIds = ref<string[]>([]);
 const judgeEngines = ref<JudgeEngineInfo[]>([]);
 const judgeEngine = ref("deepagent");
+const judgeReports = ref<JudgeReportList>({ active_engine: "", reports: [] });
+const judgeComparison = ref<JudgeComparisonReport | null>(null);
+const judgeView = ref("");
+const activatingJudge = ref(false);
+
+const EMPTY_COMPARISON: JudgeComparisonReport = {
+  active_engine: "",
+  engines: [],
+  overall_status: { by_engine: {}, disagreement: false },
+  completion_score: { by_engine: {}, spread: 0, disagreement: false },
+  reliability: {},
+  dimensions: {},
+  disagreements: [],
+  deterministic_findings: {},
+  judge_finding_counts: {},
+  fact_inference_mismatch: {}
+};
 
 // 后端授权清单决定可选裁判引擎；DSH 裁判未配置时禁用，前端不自行猜测。
 const judgeEngineChoices = computed(() => {
@@ -53,6 +76,19 @@ const judgeEngineChoices = computed(() => {
 const judgeEngineLabel = computed(
   () => judgeEngineChoices.value.find((item) => item.id === judgeEngine.value)?.label || "裁判"
 );
+
+// 同一 run 可以为每个引擎保留一份报告；active 只是「当前查看」，不是「更优」。
+const judgeReportEngines = computed(() => judgeComparison.value?.engines || judgeReports.value.reports.map((item) => item.engine));
+const activeJudgeEngine = computed(
+  () => judgeComparison.value?.active_engine || judgeReports.value.active_engine || judgeReportEngines.value[0] || ""
+);
+const judgeViews = computed(() =>
+  judgeReportEngines.value.map((engine) => ({ engine, label: judgeEngineName(engine) }))
+);
+const viewingJudgeEngine = computed(() => {
+  if (judgeView.value && judgeReportEngines.value.includes(judgeView.value)) return judgeView.value;
+  return activeJudgeEngine.value;
+});
 
 const runId = computed(() => String(route.params.runId || ""));
 const selectedMeta = computed(() => runs.value.find((item) => item.name === runId.value));
@@ -205,6 +241,12 @@ const DIMENSION_LABELS: Record<string, string> = {
   efficiency: "成本与效率"
 };
 
+// 对比面板里跨引擎差异的中文标签；后端只给 kind，不替用户选优。
+const JUDGE_DISAGREEMENT_LABELS: Record<string, string> = {
+  overall_status: "整体结论",
+  completion_score: "完成度分数"
+};
+
 const dimensionRows = computed(() =>
   Object.entries(judge.value?.dimensions || {}).map(([key, item]) => ({
     key,
@@ -228,6 +270,66 @@ const reliabilityRows = computed(() => {
     { label: "Valid Evidence", value: formatNumber(reliability.valid_evidence_count) },
     { label: "Total Evidence", value: formatNumber(reliability.total_evidence_count) }
   ];
+});
+
+function judgeEngineName(engine: string) {
+  return judgeEngineChoices.value.find((item) => item.id === engine)?.label || engine;
+}
+
+function judgeReportEngine(report: JudgeReport | null) {
+  const engine = report?.judge?.engine || report?.judge_engine;
+  return typeof engine === "string" ? engine : "";
+}
+
+// 多 Judge 对比：按维度并列展示各引擎结论，并标出分歧。unknown 与 fail 明确区分，
+// 且不自动挑选「最佳 Judge」。
+const judgeComparisonData = computed(() => judgeComparison.value || EMPTY_COMPARISON);
+
+const judgeDimensionRows = computed(() =>
+  Object.entries(judgeComparisonData.value.dimensions)
+    .map(([key, item]) => ({
+      key,
+      label: DIMENSION_LABELS[key] || key,
+      status: item.status || {},
+      score: item.score || {},
+      disagreement: Boolean(item.disagreement),
+      unknownEngines: (item.unknown_engines || []).map(judgeEngineName)
+    }))
+    .sort((left, right) => Number(right.disagreement) - Number(left.disagreement) || left.label.localeCompare(right.label))
+);
+
+const judgeDisagreementDimensions = computed(() => judgeDimensionRows.value.filter((row) => row.disagreement));
+
+const judgeOverallRows = computed(() => {
+  const comparison = judgeComparisonData.value;
+  const scoreRows = comparison.completion_score?.by_engine || {};
+  const statusRows = comparison.overall_status?.by_engine || {};
+  const engines = judgeReportEngines.value;
+  const confidence = new Map<string, string>();
+  for (const engine of engines) {
+    const row = comparison.reliability?.[engine];
+    confidence.set(engine, row ? formatPercent(row.evidence_coverage) : "-");
+  }
+  return engines.map((engine) => ({
+    engine,
+    label: judgeEngineName(engine),
+    active: engine === activeJudgeEngine.value,
+    status: statusRows[engine] || "unknown",
+    score: scoreRows[engine],
+    evidence: confidence.get(engine) || "-"
+  }));
+});
+
+const judgeDisagreementRows = computed(() => {
+  const rows = judgeComparisonData.value.disagreements || [];
+  return rows.map((row) => ({
+    label: JUDGE_DISAGREEMENT_LABELS[row.kind] || row.kind,
+    values: judgeReportEngines.value.map((engine) => ({
+      engine,
+      label: judgeEngineName(engine),
+      value: row.by_engine[engine]
+    }))
+  }));
 });
 
 function sortMetricRows<T extends { rawValue: number; label: string; value: string }>(rows: T[]): T[] {
@@ -465,6 +567,7 @@ async function loadRun(id: string) {
     judge.value = judgeData.status === "missing" ? null : judgeData;
     runtime.value = runtimeData;
     runtimeTrends.value = trendData;
+    await loadJudgeReports(id);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     summary.value = null;
@@ -473,8 +576,63 @@ async function loadRun(id: string) {
     judge.value = null;
     runtime.value = null;
     runtimeTrends.value = null;
+    judgeReports.value = { active_engine: "", reports: [] };
+    judgeComparison.value = null;
   } finally {
     loading.value = false;
+  }
+}
+
+// 多 Judge 报告清单与对比：失败只降级对比面板，不影响主视图。
+async function loadJudgeReports(id: string) {
+  if (!id) {
+    judgeReports.value = { active_engine: "", reports: [] };
+    judgeComparison.value = null;
+    judgeView.value = "";
+    return;
+  }
+  try {
+    const [reports, comparison] = await Promise.all([fetchJudgeReports(id), fetchJudgeComparison(id)]);
+    judgeReports.value = reports;
+    judgeComparison.value = comparison;
+  } catch {
+    judgeReports.value = { active_engine: "", reports: [] };
+    judgeComparison.value = null;
+  }
+  const engines = judgeReportEngines.value;
+  if (!engines.includes(judgeView.value)) judgeView.value = activeJudgeEngine.value || engines[0] || "";
+}
+
+// 切换查看的报告：直接读取该引擎已保存的报告，不改写任何文件。
+async function selectJudgeView(engine: string) {
+  if (!runId.value || !engine) return;
+  judgeView.value = engine;
+  try {
+    const report = await fetchJudgeReport(runId.value, engine);
+    if (report.status === "missing") return;
+    judge.value = report;
+    if (report.charts) charts.value = report.charts as Record<string, any>;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+// 激活某个引擎报告 = 让根目录报告回到该引擎，旧客户端仍读根目录。
+async function activateJudgeView(engine: string) {
+  if (!runId.value || !engine || activatingJudge.value) return;
+  activatingJudge.value = true;
+  error.value = "";
+  try {
+    const result = await activateJudgeReport(runId.value, engine);
+    judgeReports.value = result;
+    judgeView.value = engine;
+    judge.value = await fetchJudgeReport(runId.value, engine);
+    judgeComparison.value = await fetchJudgeComparison(runId.value);
+    await reloadRuns();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    activatingJudge.value = false;
   }
 }
 
@@ -503,6 +661,8 @@ async function runJudge() {
     });
     judge.value = result.report;
     charts.value = (result.report.charts as Record<string, any>) || charts.value;
+    await loadJudgeReports(runId.value);
+    judgeView.value = judgeReportEngine(result.report) || judgeEngine.value;
     runtime.value = await apiGet<RuntimeMetrics>(`/api/runs/${runId.value}/runtime-metrics`);
     await reloadRuns();
   } catch (err) {
@@ -1179,6 +1339,21 @@ onMounted(() => {
         <div class="panel">
           <div class="panel-head">
             <h3>Agent 判断</h3>
+            <span v-if="judgeViews.length > 1" class="chip quiet">{{ judgeViews.length }} 位裁判</span>
+          </div>
+          <div v-if="judgeViews.length > 1" class="judge-view-switch" role="group" aria-label="裁判报告">
+            <button
+              v-for="item in judgeViews"
+              :key="item.engine"
+              type="button"
+              class="judge-view-option"
+              :class="{ active: item.engine === viewingJudgeEngine }"
+              :data-active="item.engine === activeJudgeEngine ? 'true' : 'false'"
+              :disabled="activatingJudge"
+              @click="selectJudgeView(item.engine)"
+            >
+              {{ item.label }}
+            </button>
           </div>
           <p class="report">{{ judge?.summary || "尚未生成裁判分析报告。" }}</p>
           <dl v-if="judge" class="judge-meta">
@@ -1195,6 +1370,73 @@ onMounted(() => {
               <dd>{{ judge.judge.engine }}</dd>
             </div>
           </dl>
+          <button
+            v-if="judgeViews.length > 1 && viewingJudgeEngine && viewingJudgeEngine !== activeJudgeEngine"
+            class="ghost judge-activate"
+            type="button"
+            :disabled="activatingJudge"
+            @click="activateJudgeView(viewingJudgeEngine)"
+          >
+            {{ activatingJudge ? "切换中" : "设为当前报告" }}
+          </button>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>多 Judge 对比</h3>
+            <span class="chip quiet">{{ judgeViews.length || 0 }} 位裁判</span>
+          </div>
+          <template v-if="judgeViews.length">
+            <table class="judge-compare-table" aria-label="多 Judge 对比">
+              <thead>
+                <tr>
+                  <th>引擎</th>
+                  <th>状态</th>
+                  <th>完成度</th>
+                  <th>证据覆盖率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in judgeOverallRows" :key="row.engine" :data-active="row.active ? 'true' : 'false'">
+                  <td>{{ row.label }}{{ row.active ? "（当前）" : "" }}</td>
+                  <td>{{ row.status === "unknown" ? "未评估" : row.status }}</td>
+                  <td>{{ row.score === undefined ? "—" : row.score }}</td>
+                  <td>{{ row.evidence }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="judgeDisagreementRows.length" class="judge-disagreement-note">
+              裁判结论存在分歧，仅列出差异，不自动选择更优裁判。
+            </p>
+            <ul v-if="judgeDisagreementRows.length" class="judge-disagreement-list">
+              <li v-for="row in judgeDisagreementRows" :key="row.label">
+                <strong>{{ row.label }}</strong>
+                <span v-for="item in row.values" :key="item.engine">{{ item.label }}：{{ item.value }}</span>
+              </li>
+            </ul>
+            <div v-if="judgeDisagreementDimensions.length" class="judge-dimension-compare">
+              <p class="judge-disagreement-note">
+                以下维度存在分歧（{{ judgeDisagreementDimensions.length }} 项）：
+              </p>
+              <div
+                v-for="row in judgeDisagreementDimensions"
+                :key="row.key"
+                class="dimension-row judge-dimension-row"
+              >
+                <span>{{ row.label }}</span>
+                <span
+                  v-for="engine in judgeReportEngines"
+                  :key="engine"
+                  class="judge-dimension-cell"
+                  :data-status="row.status[engine] || 'unknown'"
+                >
+                  {{ judgeEngineName(engine) }}：{{ row.status[engine] === "unknown" ? "未评估" : row.status[engine] }}
+                  <strong v-if="row.status[engine] !== 'unknown'">{{ row.score[engine] ?? "—" }}</strong>
+                </span>
+              </div>
+            </div>
+            <p v-else class="empty">各裁判在评测维度上结论一致（未知不计为分歧）。</p>
+          </template>
+          <p v-else class="empty">尚未生成裁判分析报告。</p>
         </div>
         <div class="panel">
           <div class="panel-head">
@@ -1277,5 +1519,103 @@ onMounted(() => {
 .judge-engine-select:disabled {
   cursor: not-allowed;
   color: #8a97a6;
+}
+
+.judge-view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.judge-view-option {
+  padding: 4px 10px;
+  border: 1px solid rgba(20, 32, 51, 0.14);
+  border-radius: 999px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.judge-view-option.active {
+  border-color: #1f6feb;
+  color: #1f6feb;
+}
+
+.judge-view-option[data-active="true"]::after {
+  content: " · 当前";
+  color: #5a6b7d;
+}
+
+.judge-activate {
+  margin-top: 10px;
+}
+
+.judge-compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.judge-compare-table th,
+.judge-compare-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(20, 32, 51, 0.08);
+  text-align: left;
+}
+
+.judge-compare-table tr[data-active="true"] td {
+  font-weight: 600;
+}
+
+.judge-disagreement-note {
+  margin: 10px 0 6px;
+  color: #b35309;
+  font-size: 12px;
+}
+
+.judge-disagreement-list {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.judge-disagreement-list span {
+  margin-left: 8px;
+  color: #5a6b7d;
+}
+
+.judge-dimension-compare {
+  display: grid;
+  gap: 6px;
+}
+
+.judge-dimension-row {
+  grid-template-columns: minmax(110px, 1fr) auto;
+  gap: 6px 12px;
+}
+
+.judge-dimension-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #5a6b7d;
+}
+
+.judge-dimension-cell[data-status="unknown"] {
+  color: #8a97a6;
+}
+
+.judge-dimension-cell[data-status="fail"] {
+  color: #b3261e;
+}
+
+.judge-dimension-cell[data-status="pass"] {
+  color: #0b7f74;
 }
 </style>

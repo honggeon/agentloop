@@ -628,3 +628,57 @@ def test_dsh_options_expose_judge_engine_catalog(base, monkeypatch):
 
     assert payload["judge"]["default_engine"] == "deepagent"
     assert {item["id"] for item in payload["judge"]["engines"]} == {"deepagent", "dsh"}
+
+
+# -- multi-judge storage through the shared pipeline -------------------
+
+
+def test_dsh_and_deepagent_reports_survive_subsequent_judge_runs(base, monkeypatch):
+    run = _write_run(base / "runs")
+    settings = _settings(base, runs_dir=run.parent)
+    _patch_settings(monkeypatch, settings)
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+    captured = []
+    monkeypatch.setattr(
+        "auditrail.judges.dsh_engine.DshJudgeEngine",
+        lambda _settings=None: DshJudgeEngine(settings, runner=_fake_runner_factory(_proposal(), captured)),
+    )
+
+    async def fake_invoke(messages, config=None):
+        return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "deepagent"}
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    client = TestClient(app)
+
+    assert client.post("/api/runs/run-1/judge", json={"engine": "dsh"}).status_code == 200
+    assert client.post("/api/runs/run-1/judge", json={"engine": "deepagent"}).status_code == 200
+    # Running DeepAgent after DSH must not delete the DSH report.
+    assert client.post("/api/runs/run-1/judge", json={"engine": "dsh"}).status_code == 200
+
+    listed = client.get("/api/runs/run-1/judges").json()
+    assert [entry["engine"] for entry in listed["reports"]] == ["deepagent", "dsh"]
+    assert listed["active_engine"] == "dsh"
+
+    dsh = client.get("/api/runs/run-1/judges/dsh").json()
+    assert dsh["judge"]["engine"] == "dsh"
+    assert dsh["judge"]["profile"] == JUDGE_PROFILE
+    deepagent = client.get("/api/runs/run-1/judges/deepagent").json()
+    assert deepagent["judge"]["engine"] == "deepagent"
+    assert deepagent["overall_status"] == "success"
+
+    # Every stored report came from the shared pipeline and can be re-normalized.
+    from auditrail.agents.schemas import normalize_judge_report
+
+    for engine in ("deepagent", "dsh"):
+        data = json.loads((run / "judges" / engine / "agent_judge.json").read_text(encoding="utf-8"))
+        assert len(normalize_judge_report(data)["dimensions"]) == 13
+        assert (run / "judges" / engine / "agent_judge.md").exists()
+        assert (run / "judges" / engine / "chart_data.json").exists()
+
+    comparison = client.get("/api/runs/run-1/judges/compare").json()
+    assert comparison["engines"] == ["deepagent", "dsh"]
+    assert comparison["overall_status"]["disagreement"] is True
+    # Deterministic dimensions stay deterministic for every engine, including the
+    # ones engine proposals disagree about.
+    assert comparison["dimensions"]["evidence_citation"]["status"]["deepagent"] in {"fail", "pass", "partial"}
+    assert comparison["disagreements"]

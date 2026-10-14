@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from .dimensions import assess_dimensions
 from .evidence import validate_judge_evidence
 from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report, render_judge_markdown
+from ..judges import reports as judge_reports
+from ..judges.reports import publish_judge_report
 
 
 def _runs_roots() -> List[Path]:
@@ -244,6 +246,8 @@ def write_judge_report(
     report: object,
     *,
     judge_metadata: Optional[Dict[str, Any]] = None,
+    judge_engine: Optional[str] = None,
+    published_at: Optional[str] = None,
 ) -> Dict[str, str]:
     """Normalize and write agent_judge.json, agent_judge.md, and chart_data.json.
 
@@ -251,6 +255,12 @@ def write_judge_report(
     runtime, model, profile). It is additive provenance only: normalization,
     evidence validation, deterministic caps, and quality assessment below are
     the same for every engine.
+
+    ``judge_engine`` additionally archives the same normalized report under
+    ``judges/<engine>/`` and records it in ``judges/manifest.json``. The root
+    files stay the active, backward-compatible report. When it is omitted the
+    engine is taken from the report's own ``judge.engine`` metadata, so a run
+    can hold one report per judge engine without a second normalization path.
     """
     run_dir = _resolve_run_dir(run_path)
     normalized = normalize_judge_report(report)
@@ -301,16 +311,32 @@ def write_judge_report(
     }
     normalized["charts"] = charts
 
-    json_path = run_dir / "agent_judge.json"
-    markdown_path = run_dir / "agent_judge.md"
-    chart_path = run_dir / "chart_data.json"
-    json_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    markdown_path.write_text(render_judge_markdown(normalized), encoding="utf-8")
-    chart_path.write_text(json.dumps(normalized["charts"], ensure_ascii=False, indent=2), encoding="utf-8")
+    engine_id = judge_engine or (normalized.get("judge") or {}).get("engine")
+    markdown = render_judge_markdown(normalized)
+    if engine_id:
+        pub = publish_judge_report(
+            run_dir,
+            normalized,
+            engine=engine_id,
+            markdown=markdown,
+            charts=normalized["charts"],
+            published_at=published_at,
+        )
+        return {
+            "json_path": pub["json_path"],
+            "markdown_path": pub["markdown_path"],
+            "chart_path": pub["chart_path"],
+        }
+
+    # No engine provenance: keep the single-report layout, still atomically.
+    root_files = judge_reports.REPORT_FILENAMES
+    judge_reports.replace_report_file(run_dir / root_files["json_path"], json.dumps(normalized, ensure_ascii=False, indent=2))
+    judge_reports.replace_report_file(run_dir / root_files["markdown_path"], markdown)
+    judge_reports.replace_report_file(run_dir / root_files["chart_path"], json.dumps(normalized["charts"], ensure_ascii=False, indent=2))
     return {
-        "json_path": str(json_path),
-        "markdown_path": str(markdown_path),
-        "chart_path": str(chart_path),
+        "json_path": str(run_dir / root_files["json_path"]),
+        "markdown_path": str(run_dir / root_files["markdown_path"]),
+        "chart_path": str(run_dir / root_files["chart_path"]),
     }
 
 
@@ -360,7 +386,8 @@ _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S
 
 # Auditrail's own run artifacts. ``_produced_deliverables`` scans the run
 # directory; without this exclusion every run would "produce" .md/.json
-# deliverables simply because auditrail wrote its reports there.
+# deliverables simply because auditrail wrote its reports there. Per-engine
+# judge archives live under ``judges/`` and are run artifacts too.
 _RUN_ARTIFACT_NAMES = {
     "session.json",
     "summary.json",
@@ -374,6 +401,7 @@ _RUN_ARTIFACT_NAMES = {
     "agent_judge.md",
     "chart_data.json",
 }
+_RUN_ARTIFACT_DIRS = {"judges"}
 
 
 def _requested_deliverables(summary: Dict[str, Any], trajectory: Any) -> List[str]:
@@ -401,7 +429,12 @@ def _produced_deliverables(run_dir: Path, requested: List[str]) -> List[str]:
         return []
     produced = set()
     for path in run_dir.rglob("*"):
-        if path.is_file() and path.name not in _RUN_ARTIFACT_NAMES and path.suffix.lower() in requested:
+        if not path.is_file() or path.name in _RUN_ARTIFACT_NAMES:
+            continue
+        relative_parts = path.relative_to(run_dir).parts[:-1]
+        if any(part in _RUN_ARTIFACT_DIRS for part in relative_parts):
+            continue
+        if path.suffix.lower() in requested:
             produced.add(path.suffix.lower())
     return sorted(produced)
 

@@ -5,10 +5,15 @@ validated run directory. Every engine returns an untrusted proposal; this
 module only maps HTTP input to the core engine registry and maps core failures
 to HTTP errors. Normalization, evidence validation, deterministic caps, and
 report writing always happen inside ``write_judge_report``.
+
+One run keeps one archived report per engine under ``judges/<engine>/`` with a
+``judges/manifest.json`` index. The root ``agent_judge.json``/``agent_judge.md``/
+``chart_data.json`` stay the active, backward-compatible report.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -23,6 +28,15 @@ from auditrail.judges.base import (
     resolve_judge_engine,
 )
 from auditrail.judges.proposals import JudgeProposalError
+from auditrail.judges.reports import (
+    JudgeReportLockTimeout,
+    JudgeReportSnapshotUnstable,
+    compare_judge_reports,
+    list_judge_reports,
+    normalize_engine_id,
+    read_judge_report,
+    set_active_judge_report,
+)
 from backend.app.config import build_dsh_judge_settings, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -57,7 +71,12 @@ def run_judge(run_id: str, payload: dict[str, Any] | None = None) -> dict[str, A
     try:
         report = resolve_judge_report(result.proposal, path)
         report_metadata = {**dict(result.metadata), "engine": result.engine}
-        paths = write_judge_report(str(path), report, judge_metadata=report_metadata)
+        paths = write_judge_report(
+            str(path),
+            report,
+            judge_metadata=report_metadata,
+            judge_engine=result.engine,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="%s: %s" % (type(exc).__name__, exc)) from exc
     return {
@@ -66,6 +85,39 @@ def run_judge(run_id: str, payload: dict[str, Any] | None = None) -> dict[str, A
         "paths": paths,
         "report": report,
     }
+
+
+@router.get("/runs/{run_id}/judges")
+def get_run_judges(run_id: str) -> dict[str, Any]:
+    """List every stored judge report for the run and which one is active."""
+    path = _run_path_or_404(run_id)
+    with _report_errors():
+        return {"run_id": run_id, **list_judge_reports(path)}
+
+
+@router.get("/runs/{run_id}/judges/compare")
+def get_run_judges_comparison(run_id: str) -> dict[str, Any]:
+    """Compare engine reports without picking a winner."""
+    path = _run_path_or_404(run_id)
+    with _report_errors():
+        return {"run_id": run_id, **compare_judge_reports(path)}
+
+
+@router.get("/runs/{run_id}/judges/{engine}")
+def get_run_judge_report(run_id: str, engine: str) -> dict[str, Any]:
+    """Read one engine's stored report."""
+    path = _run_path_or_404(run_id)
+    with _report_errors():
+        return read_judge_report(path, engine)
+
+
+@router.post("/runs/{run_id}/judges/{engine}/active")
+def activate_run_judge_report(run_id: str, engine: str) -> dict[str, Any]:
+    """Make one stored engine report the active root report again."""
+    path = _run_path_or_404(run_id)
+    with _report_errors():
+        manifest = set_active_judge_report(path, engine)
+        return {"run_id": run_id, **manifest}
 
 
 def _requested_engine(payload: dict[str, Any] | None) -> str | None:
@@ -100,6 +152,21 @@ def _engine_metadata(engine_id: str, settings: Any) -> dict[str, Any]:
     metadata["profile"] = judge_settings.dsh_judge_profile
     metadata["workspace"] = str(judge_settings.dsh_judge_workspace)
     return metadata
+
+
+@contextmanager
+def _report_errors():
+    """Map core judge-report failures to HTTP without leaking internals."""
+    try:
+        yield
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except JudgeReportLockTimeout as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except JudgeReportSnapshotUnstable as exc:
+        raise HTTPException(status_code=503, detail="judge report is being published; retry shortly") from exc
 
 
 def _run_path_or_404(run_id: str):
