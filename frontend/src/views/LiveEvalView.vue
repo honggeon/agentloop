@@ -4,10 +4,22 @@ import { useRouter } from "vue-router";
 import {
   apiPostJson,
   apiPost,
+  cancelDshAcpOperation,
   cancelDshChat,
+  closeDshAcpSession,
+  createDshAcpSession,
+  fetchDshAcpOptions,
+  fetchDshAcpSessions,
   fetchDshOptions,
+  respondDshAcpPermission,
+  resumeDshAcpSession,
+  streamDshAcpPrompt,
   streamDshChat,
   streamPostJson,
+  type DshAcpCompletedPayload,
+  type DshAcpOptions,
+  type DshAcpPermissionRequest,
+  type DshAcpSession,
   type DshChatErrorPayload,
   type DshOptions,
   type DshRuntimeEvent,
@@ -71,6 +83,20 @@ const DSH_KIND_LABELS: Record<DshStreamKind, string> = {
   error: "error"
 };
 
+// ACP 回合的结束状态：completed 只说明 session/prompt 已结束（stopReason 把
+// 成功与若干失败都折叠成 end_turn），不代表任务成功。
+type AcpPhase = "idle" | "running" | "stopping" | "settled" | "cancelled" | "failed" | "imported";
+
+const ACP_PHASE_LABELS: Record<AcpPhase, string> = {
+  idle: "未开始",
+  running: "回合进行中",
+  stopping: "正在取消",
+  settled: "回合已结束（未导入）",
+  cancelled: "已取消",
+  failed: "失败",
+  imported: "已导入运行"
+};
+
 const router = useRouter();
 const reloadRuns = inject<() => Promise<void>>("reloadRuns")!;
 
@@ -126,6 +152,26 @@ const dshSessionId = ref("");
 const dshPhase = ref<DshPhase>("idle");
 const dshStream = ref<DshStreamItem[]>([]);
 
+// 本机 DSH ACP 交互运行时：长驻进程 + 会话 + 一次性权限应答。
+const dshAcpOptions = ref<DshAcpOptions | null>(null);
+const dshAcpOptionsLoaded = ref(false);
+const dshAcpOptionsError = ref("");
+const dshAcpSessions = ref<DshAcpSession[]>([]);
+const dshAcpForm = ref({
+  workspace: "",
+  message: "",
+  acceptance_criteria: ""
+});
+const dshAcpSessionId = ref("");
+const dshAcpOperationId = ref("");
+const dshAcpPhase = ref<AcpPhase>("idle");
+const dshAcpStopReason = ref("");
+const dshAcpStatus = ref("");
+const dshAcpCompleted = ref<DshAcpCompletedPayload | null>(null);
+// 同一时刻只保留一个待回答的权限请求：DSH 在 prompt 阻塞期间等待它。
+const dshAcpPermission = ref<DshAcpPermissionRequest | null>(null);
+const dshAcpPermissionBusy = ref(false);
+
 const dshEnabled = computed(() => Boolean(dshOptions.value?.dsh.enabled));
 const dshDisabledReason = computed(() => dshOptions.value?.dsh.disabled_reason || "");
 const dshProfiles = computed(() => dshOptions.value?.dsh.profiles || []);
@@ -133,6 +179,34 @@ const dshWorkspaces = computed(() => dshOptions.value?.dsh.workspaces || []);
 const dshWorkspaceRoots = computed(() => dshOptions.value?.dsh.workspace_roots || []);
 const dshMaxTimeout = computed(() => Number(dshOptions.value?.dsh.max_timeout_seconds || 900));
 const dshPhaseLabel = computed(() => DSH_PHASE_LABELS[dshPhase.value]);
+const acpManifest = computed(() => dshOptions.value?.dsh.acp || null);
+const acpEnabled = computed(() => Boolean(dshEnabled.value && acpManifest.value?.enabled));
+const acpDisabledReason = computed(
+  () =>
+    acpManifest.value?.enabled === false
+      ? dshDisabledReason.value || "本地 DSH ACP 运行时未启用"
+      : dshDisabledReason.value
+);
+const acpCapabilities = computed(() => dshAcpOptions.value?.capabilities || {});
+const providerLabel = computed(() => {
+  if (provider.value === "acp") return "Local DSH ACP";
+  return provider.value === "dsh" ? "Local DSH" : "远程 Agent";
+});
+const dshAcpPhaseLabel = computed(() => ACP_PHASE_LABELS[dshAcpPhase.value]);
+const acpStatusLabel = computed(() => {
+  if (dshAcpPhase.value === "imported") return "已发布 Auditrail run";
+  if (dshAcpPhase.value === "running") return "回合进行中，尚未发布 run";
+  if (dshAcpPhase.value === "settled") return "回合已结束，未发布 run";
+  return dshAcpPhase.value === "idle" ? "尚未开始" : ACP_PHASE_LABELS[dshAcpPhase.value];
+});
+const canSubmitAcp = computed(() => {
+  return Boolean(
+    acpEnabled.value && dshAcpForm.value.workspace.trim() && dshAcpForm.value.message.trim() && !running.value
+  );
+});
+const canCreateAcpSession = computed(
+  () => acpEnabled.value && Boolean(dshAcpForm.value.workspace.trim()) && !running.value
+);
 const canSubmitRemote = computed(() => {
   return Boolean(form.value.base_url.trim() && form.value.user_id.trim() && form.value.message.trim() && !running.value);
 });
@@ -145,17 +219,33 @@ const canSubmitDsh = computed(() => {
       !running.value
   );
 });
-const canSubmit = computed(() => (provider.value === "dsh" ? canSubmitDsh.value : canSubmitRemote.value));
+const canSubmit = computed(() => {
+  if (provider.value === "acp") return canSubmitAcp.value;
+  return provider.value === "dsh" ? canSubmitDsh.value : canSubmitRemote.value;
+});
 const submitLabel = computed(() => {
+  if (provider.value === "acp") {
+    if (running.value) return "ACP 回合进行中";
+    return dshAcpSessionId.value ? "继续 ACP 会话" : "开始 ACP 会话";
+  }
   if (provider.value === "dsh") {
     if (running.value) return "DSH 运行中";
     return dshSessionId.value ? "继续 DSH 会话" : "开始 DSH 会话";
   }
   return running.value ? "运行中" : "开始评测";
 });
-const screenStatus = computed(() => (provider.value === "dsh" ? dshPhaseLabel.value : traceSummary.value.status));
-const traceAgentName = computed(() => (provider.value === "dsh" ? "DSH Runtime" : form.value.title || ""));
-const traceAgentVersion = computed(() => (provider.value === "dsh" ? dshForm.value.profile : form.value.model || ""));
+const screenStatus = computed(() => {
+  if (provider.value === "acp") return ACP_PHASE_LABELS[dshAcpPhase.value];
+  return provider.value === "dsh" ? dshPhaseLabel.value : traceSummary.value.status;
+});
+const traceAgentName = computed(() => {
+  if (provider.value === "acp") return "DSH ACP Runtime";
+  return provider.value === "dsh" ? "DSH Runtime" : form.value.title || "";
+});
+const traceAgentVersion = computed(() => {
+  if (provider.value === "acp") return acpManifest.value?.profile || "acp";
+  return provider.value === "dsh" ? dshForm.value.profile : form.value.model || "";
+});
 
 const findings = computed<Finding[]>(() => judge.value?.findings || []);
 const liveGraphTrace = computed<RuntimeTrace>(() =>
@@ -310,6 +400,7 @@ async function loadDshOptions() {
     dshForm.value.profile = options.dsh.profiles[0] || "";
     dshForm.value.workspace = options.dsh.workspaces[0] || "";
     dshForm.value.timeout = Number(options.dsh.default_timeout_seconds || 300);
+    dshAcpForm.value.workspace = options.dsh.workspaces[0] || "";
   } catch (err) {
     dshOptionsError.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -317,11 +408,229 @@ async function loadDshOptions() {
   }
 }
 
+// --- 本机 DSH ACP 交互运行时 ------------------------------------------------
+
+async function loadDshAcpOptions() {
+  try {
+    dshAcpOptions.value = await fetchDshAcpOptions();
+    dshAcpOptionsError.value = "";
+  } catch (err) {
+    dshAcpOptionsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    dshAcpOptionsLoaded.value = true;
+  }
+}
+
+async function refreshDshAcpSessions() {
+  try {
+    const payload = await fetchDshAcpSessions();
+    dshAcpSessions.value = payload.sessions || [];
+  } catch {
+    dshAcpSessions.value = [];
+  }
+}
+
+async function newAcpSession() {
+  if (!canCreateAcpSession.value) return;
+  try {
+    const session = await createDshAcpSession({ workspace: dshAcpForm.value.workspace.trim() });
+    applyAcpSession(session.session_id, session.workspace);
+    dshAcpPhase.value = "idle";
+    dshAcpCompleted.value = null;
+    dshAcpStopReason.value = "";
+    dshAcpPermission.value = null;
+    await refreshDshAcpSessions();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function resumeAcpSession(session: DshAcpSession) {
+  if (running.value) return;
+  try {
+    const resumed = await resumeDshAcpSession({
+      workspace: session.workspace || dshAcpForm.value.workspace.trim(),
+      session_id: session.session_id
+    });
+    applyAcpSession(resumed.session_id, resumed.workspace);
+    dshAcpPhase.value = "idle";
+    dshAcpCompleted.value = null;
+    dshAcpStopReason.value = "";
+    dshAcpPermission.value = null;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function closeAcpSession(sessionId: string) {
+  if (running.value) return;
+  try {
+    await closeDshAcpSession(sessionId);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+  if (dshAcpSessionId.value === sessionId) {
+    dshAcpSessionId.value = "";
+    currentSessionId.value = "";
+    dshAcpPhase.value = "idle";
+    dshAcpCompleted.value = null;
+    dshAcpStopReason.value = "";
+  }
+  await refreshDshAcpSessions();
+}
+
+function applyAcpSession(sessionId: string, workspace?: string) {
+  const next = String(sessionId || "").trim();
+  if (!next) return;
+  dshAcpSessionId.value = next;
+  currentSessionId.value = next;
+  if (workspace) dshAcpForm.value.workspace = String(workspace);
+}
+
+function resetAcpTurnPanels() {
+  dshStream.value = [];
+  resetRuntimePanels();
+  dshAcpCompleted.value = null;
+  dshAcpStopReason.value = "";
+  dshAcpStatus.value = "";
+  dshAcpPermission.value = null;
+}
+
+async function startAcpTurn() {
+  if (!canSubmitAcp.value) return;
+  if (!dshAcpSessionId.value) {
+    await newAcpSession();
+    if (!dshAcpSessionId.value) return;
+  }
+  resetAcpTurnPanels();
+  running.value = true;
+  error.value = "";
+  judge.value = null;
+  dshAcpPhase.value = "running";
+  dshAcpStatus.value = "started";
+  try {
+    await streamDshAcpPrompt(
+      {
+        session_id: dshAcpSessionId.value,
+        message: dshAcpForm.value.message.trim(),
+        acceptance_criteria: dshAcpForm.value.acceptance_criteria.trim()
+      },
+      handleAcpEvent
+    );
+    await reloadRuns();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    if (dshAcpPhase.value === "running") dshAcpPhase.value = "failed";
+  } finally {
+    running.value = false;
+    dshAcpOperationId.value = "";
+    dshAcpPermission.value = null;
+    await refreshDshAcpSessions();
+  }
+}
+
+async function stopAcpTurn() {
+  if (!dshAcpOperationId.value || !running.value) return;
+  dshAcpPhase.value = "stopping";
+  try {
+    await cancelDshAcpOperation(dshAcpOperationId.value);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function answerAcpPermission(optionId: string) {
+  const permission = dshAcpPermission.value;
+  if (!permission || !dshAcpOperationId.value || dshAcpPermissionBusy.value) return;
+  dshAcpPermissionBusy.value = true;
+  try {
+    await respondDshAcpPermission(dshAcpOperationId.value, permission.request_id, optionId);
+    dshAcpPermission.value = null;
+    pushDshStream({
+      kind: "status",
+      title: optionId === "allow-once" ? "已允许一次" : "已拒绝一次",
+      detail: `request: ${permission.request_id}\ntool_call: ${permission.tool_call_id}`
+    });
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    dshAcpPermissionBusy.value = false;
+  }
+}
+
+function handleAcpEvent(item: LiveEvent) {
+  appendLog(item.event, item.payload);
+  if (item.event === "started") {
+    dshAcpOperationId.value = String(item.payload.operation_id || "");
+    applyAcpSession(item.payload.session_id);
+    dshAcpStatus.value = "started";
+    dshAcpPhase.value = "running";
+    return;
+  }
+  if (item.event === "runtime_event") {
+    dshAcpStatus.value = "streaming";
+    const runtimeEvent = item.payload as DshRuntimeEvent | undefined;
+    if (runtimeEvent) appendDshRuntimeEvent(runtimeEvent);
+    return;
+  }
+  if (item.event === "permission_requested") {
+    const permission = item.payload as DshAcpPermissionRequest;
+    dshAcpPermission.value = permission;
+    dshAcpStatus.value = "waiting_permission";
+    pushDshStream({
+      kind: "status",
+      title: "等待一次性权限决定",
+      detail: `tool_call: ${permission.tool_call_id}\n选项: ${(permission.options || [])
+        .map((option) => option.optionId)
+        .join(", ")}`
+    });
+    return;
+  }
+  if (item.event === "completed") {
+    const completed = item.payload as DshAcpCompletedPayload;
+    dshAcpCompleted.value = completed;
+    dshAcpStopReason.value = completed.stop_reason || "";
+    dshAcpStatus.value = "completed";
+    // completed 只表示 ACP 回合已结束；standard run 是否发布由 run_imported 决定。
+    dshAcpPhase.value = completed.cancelled ? "cancelled" : "settled";
+    pushDshStream({
+      kind: "status",
+      title: "ACP 回合已结束",
+      detail: `stop_reason: ${completed.stop_reason}\ncancelled: ${completed.cancelled}\n（回合结束不等于任务成功，等待 run_imported 或 import 阶段的 error）`
+    });
+    return;
+  }
+  if (item.event === "run_imported") {
+    applyAcpSession(item.payload.session_id);
+    dshAcpPhase.value = "imported";
+    dshAcpStatus.value = "run_imported";
+    return;
+  }
+  if (item.event === "error") {
+    const payload = item.payload as DshChatErrorPayload;
+    dshAcpStatus.value = payload.stage === "import" ? "import_failed" : payload.code || "error";
+    dshAcpPhase.value = payload.cancelled ? "cancelled" : "failed";
+    error.value = payload.stage
+      ? `${payload.stage}: ${payload.detail || JSON.stringify(payload)}`
+      : payload.detail || JSON.stringify(payload);
+    pushDshStream({
+      kind: "error",
+      title: payload.stage === "import" ? "导入阶段失败" : "ACP 回合失败",
+      detail: payload.detail || JSON.stringify(payload)
+    });
+  }
+}
+
 function selectProvider(next: RuntimeProviderId) {
   if (running.value || provider.value === next) return;
   if (next === "dsh" && !dshEnabled.value) return;
+  if (next === "acp" && !acpEnabled.value) return;
   provider.value = next;
   resetRuntimePanels();
+  if (next === "acp") {
+    loadDshAcpOptions();
+    refreshDshAcpSessions();
+  }
 }
 
 function resetRuntimePanels() {
@@ -336,6 +645,10 @@ function resetRuntimePanels() {
 }
 
 async function submitActive() {
+  if (provider.value === "acp") {
+    await startAcpTurn();
+    return;
+  }
   if (provider.value === "dsh") {
     await startDshTurn();
     return;
@@ -543,6 +856,7 @@ function dshKindLabel(kind: DshStreamKind) {
 }
 
 function buildDshDiagnosis() {
+  if (provider.value === "acp") return buildAcpDiagnosis();
   if (dshPhase.value === "cancelled") {
     return {
       kind: "failed",
@@ -590,7 +904,68 @@ function buildDshDiagnosis() {
   };
 }
 
-onMounted(loadDshOptions);
+// ACP 诊断必须区分「回合结束」和「run 已发布」：只有 run_imported 才算成功。
+function buildAcpDiagnosis() {
+  if (dshAcpPhase.value === "cancelled") {
+    return {
+      kind: "failed",
+      title: "ACP 回合已取消",
+      message: "回合被取消，没有导入运行结果。未回答的权限请求已按 cancelled 回复 DSH。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (dshAcpPhase.value === "failed") {
+    return {
+      kind: "failed",
+      title: "ACP 回合未发布运行",
+      message: error.value || "ACP 回合失败或导入阶段失败，请查看对话流中的 error 事件。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (dshAcpPhase.value === "settled") {
+    return {
+      kind: "needs_input",
+      title: "回合已结束，但还没有发布运行",
+      message: `stop_reason=${dshAcpStopReason.value || "unknown"} 只说明 session/prompt 结束，不代表任务成功；请等待 run_imported 或 import 阶段的 error。`,
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (running.value || dshAcpPhase.value === "running" || dshAcpPhase.value === "stopping") {
+    return {
+      kind: "running",
+      title: "ACP 回合进行中",
+      message: "长驻 ACP 进程正在流式返回更新；权限请求会暂停回合，直到你选择 allow-once 或 reject-once。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (dshAcpPhase.value === "imported") {
+    return {
+      kind: "success",
+      title: "已发布 Auditrail run",
+      message: finalRun.value
+        ? `已从 ACP 会话导入运行 ${finalRun.value.name}，可打开运行查看确定性审计，或触发 Agent Judge。`
+        : "ACP 会话已导入运行。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  return {
+    kind: "idle",
+    title: "等待开始 ACP 交互会话",
+    message: "创建或恢复一个后端授权的工作目录下的 ACP 会话，然后发送 prompt；只有 run_imported 才表示标准 Auditrail run 已发布。",
+    recommendedResponse: "",
+    actionLabel: ""
+  };
+}
+
+onMounted(async () => {
+  await loadDshOptions();
+  await loadDshAcpOptions();
+});
 
 function selectSpan(span: RuntimeSpan) {
   selectedSpanId.value = span.spanId;
@@ -936,7 +1311,7 @@ function compact(payload: any): string {
 
 function buildRuntimeDiagnosis() {
   // 本地 DSH 是通用运行时：不使用远程 agent 的 PPT 续跑启发式。
-  if (provider.value === "dsh") return buildDshDiagnosis();
+  if (provider.value === "dsh" || provider.value === "acp") return buildDshDiagnosis();
   if (pendingChatInteraction.value) {
     const recommended = pendingChatInteraction.value.recommended_response || "继续";
     return {
@@ -1282,7 +1657,8 @@ function spanMetric(span: RuntimeSpan) {
       <div class="ops-left">
         <span class="filter-pill" :class="{ active: provider === 'remote' }">远程 Agent</span>
         <span class="filter-pill" :class="{ active: provider === 'dsh' }">Local DSH</span>
-        <span class="filter-pill active">{{ provider === "dsh" ? "本地事件流" : "Live trace" }}</span>
+        <span class="filter-pill" :class="{ active: provider === 'acp' }">Local DSH ACP</span>
+        <span class="filter-pill active">{{ provider === "remote" ? "Live trace" : "本地事件流" }}</span>
       </div>
       <div class="ops-right">
         <span class="context-token">session: {{ currentSessionId || "not started" }}</span>
@@ -1316,6 +1692,16 @@ function spanMetric(span: RuntimeSpan) {
             @click="selectProvider('dsh')"
           >
             Local DSH
+          </button>
+          <button
+            type="button"
+            class="provider-option"
+            :class="{ active: provider === 'acp' }"
+            :aria-pressed="provider === 'acp'"
+            :disabled="running || !acpEnabled"
+            @click="selectProvider('acp')"
+          >
+            Local DSH ACP
           </button>
         </div>
 
@@ -1394,7 +1780,7 @@ function spanMetric(span: RuntimeSpan) {
         </button>
         </template>
 
-        <template v-else>
+        <template v-else-if="provider === 'dsh'">
         <p v-if="!dshOptionsLoaded" class="dsh-hint">正在读取后端授权清单…</p>
         <p v-else-if="!dshEnabled" class="banner error">
           {{ dshDisabledReason || "本地 DSH 运行时未启用" }}
@@ -1452,6 +1838,98 @@ function spanMetric(span: RuntimeSpan) {
           </button>
         </div>
         <p class="dsh-hint">session: {{ dshSessionId || "新会话（发送后由 DSH 分配）" }}</p>
+        </template>
+
+        <template v-else>
+        <p v-if="!dshAcpOptionsLoaded" class="dsh-hint">正在读取 ACP 能力的协商结果…</p>
+        <p v-else-if="!acpEnabled" class="banner error">
+          {{ acpDisabledReason || "本地 DSH ACP 运行时未启用" }}
+        </p>
+        <p v-if="dshAcpOptionsError" class="banner error">{{ dshAcpOptionsError }}</p>
+
+        <div class="acp-capabilities">
+          <span class="context-token">ACP v{{ acpCapabilities.protocol_version ?? 1 }}</span>
+          <span class="context-token">{{ acpCapabilities.running ? "进程运行中" : "进程未启动" }}</span>
+          <span class="context-token">list: {{ acpCapabilities.supports_session_list ? "是" : "否" }}</span>
+          <span class="context-token">resume: {{ acpCapabilities.supports_session_resume ? "是" : "否" }}</span>
+          <span class="context-token">close: {{ acpCapabilities.supports_session_close ? "是" : "否" }}</span>
+          <span class="context-token">图片 prompt: {{ acpCapabilities.supports_images ? "支持" : "不支持" }}</span>
+        </div>
+        <p class="dsh-hint">
+          能力来自本次连接的真实协商结果；权限只提供 allow-once / reject-once，不提供 allow-always，也不自动批准。
+        </p>
+
+        <label v-if="dshWorkspaces.length">
+          <span>工作目录（后端授权）</span>
+          <select v-model="dshAcpForm.workspace" :disabled="running">
+            <option v-for="item in dshWorkspaces" :key="item" :value="item">{{ item }}</option>
+          </select>
+        </label>
+        <label v-else>
+          <span>工作目录（必须位于授权根目录内）</span>
+          <input v-model="dshAcpForm.workspace" type="text" list="dsh-workspace-roots" placeholder="/path/to/project" />
+          <datalist id="dsh-workspace-roots">
+            <option v-for="item in dshWorkspaceRoots" :key="item" :value="item" />
+          </datalist>
+        </label>
+        <label>
+          <span>Prompt</span>
+          <textarea
+            v-model="dshAcpForm.message"
+            rows="5"
+            placeholder="描述要 ACP 交互执行的任务，例如：运行相关测试并解释失败原因"
+            required
+          />
+        </label>
+        <label>
+          <span>Agent Judge 验收标准</span>
+          <textarea
+            v-model="dshAcpForm.acceptance_criteria"
+            rows="4"
+            placeholder="- 相关测试通过&#10;- 结论必须能回指证据"
+          />
+        </label>
+        <div class="dsh-actions">
+          <button class="primary wide" type="submit" :disabled="!canSubmit">
+            {{ running ? "ACP 回合进行中" : dshAcpSessionId ? "继续 ACP 会话" : "开始 ACP 会话" }}
+          </button>
+          <button class="ghost" type="button" :disabled="!canCreateAcpSession" @click="newAcpSession">
+            新建会话
+          </button>
+          <button class="ghost" type="button" :disabled="running || !dshAcpSessionId" @click="closeAcpSession(dshAcpSessionId)">
+            关闭会话
+          </button>
+          <button class="danger" type="button" :disabled="!running || !dshAcpOperationId" @click="stopAcpTurn">
+            取消回合
+          </button>
+        </div>
+        <p class="dsh-hint">
+          session: {{ dshAcpSessionId || "尚未创建（发送或点击新建会话时由后端分配）" }}；每个 session 同时只允许一个
+          active prompt。
+        </p>
+        <div v-if="dshAcpSessions.length" class="acp-session-list">
+          <div class="panel-head">
+            <h4>后端当前持有的 ACP 会话</h4>
+            <span class="chip quiet">{{ dshAcpSessions.length }}</span>
+          </div>
+          <ul>
+            <li v-for="session in dshAcpSessions" :key="session.session_id">
+              <div>
+                <strong>{{ session.session_id }}</strong>
+                <small>{{ session.workspace }}</small>
+                <small>state: {{ session.state }}{{ session.active_operation ? " · 回合进行中" : "" }}</small>
+              </div>
+              <div class="acp-session-actions">
+                <button class="ghost small" type="button" :disabled="running" @click="resumeAcpSession(session)">
+                  恢复
+                </button>
+                <button class="danger small" type="button" :disabled="running" @click="closeAcpSession(session.session_id)">
+                  关闭
+                </button>
+              </div>
+            </li>
+          </ul>
+        </div>
         </template>
       </form>
 
@@ -1655,6 +2133,96 @@ function spanMetric(span: RuntimeSpan) {
       <p v-else class="empty">发送 prompt 后，这里会按顺序显示 thinking、助手文本、工具调用 / 结果、状态与错误事件。</p>
     </section>
 
+    <section v-if="provider === 'acp'" class="panel dsh-panel reveal">
+      <div class="panel-head">
+        <h3>ACP 交互工作台</h3>
+        <div class="dsh-panel-actions">
+          <span class="chip" :data-status="dshAcpPhase">
+            {{ dshAcpStatus || dshAcpPhase }} · {{ dshAcpPhaseLabel }}
+          </span>
+          <button class="danger small" type="button" :disabled="!running || !dshAcpOperationId" @click="stopAcpTurn">
+            取消回合
+          </button>
+        </div>
+      </div>
+
+      <div class="acp-outcome">
+        <div>
+          <span>回合状态</span>
+          <strong :data-status="dshAcpPhase">{{ ACP_PHASE_LABELS[dshAcpPhase] }}</strong>
+        </div>
+        <div>
+          <span>stop reason</span>
+          <strong>{{ dshAcpStopReason || "-" }}</strong>
+        </div>
+        <div>
+          <span>Run</span>
+          <strong>{{ finalRun?.name || "未发布" }}</strong>
+        </div>
+        <p class="acp-outcome-note">{{ acpStatusLabel }}。completed 只表示 ACP prompt 已结束，只有 run_imported 表示标准 Auditrail run 已成功发布。</p>
+      </div>
+
+      <div v-if="dshAcpPermission" class="acp-permission" role="alert">
+        <div class="panel-head">
+          <h4>权限请求（等待决定）</h4>
+          <span class="chip warning">allow-once / reject-once</span>
+        </div>
+        <p class="report">
+          DSH 请求对工具调用 <code>{{ dshAcpPermission.tool_call_id }}</code> 授权。回合在得到答复前保持阻塞，断开连接会取消该请求。
+        </p>
+        <ul class="acp-permission-options">
+          <li v-for="option in dshAcpPermission.options" :key="option.optionId">
+            <code>{{ option.optionId }}</code>
+            <span>{{ option.name || option.kind || "" }}</span>
+          </li>
+        </ul>
+        <div class="approval-actions">
+          <button
+            class="primary"
+            type="button"
+            :disabled="dshAcpPermissionBusy"
+            @click="answerAcpPermission('allow-once')"
+          >
+            仅允许一次
+          </button>
+          <button
+            class="danger"
+            type="button"
+            :disabled="dshAcpPermissionBusy"
+            @click="answerAcpPermission('reject-once')"
+          >
+            仅拒绝一次
+          </button>
+        </div>
+        <small class="acp-permission-note">不提供 allow-always，也不会自动批准。</small>
+      </div>
+
+      <div v-if="dshStream.length" class="chat-stream">
+        <article v-for="item in dshStream" :key="item.index" class="chat-item" :class="item.kind">
+          <header class="chat-item-head">
+            <span class="chat-kind">{{ dshKindLabel(item.kind) }}</span>
+            <strong>{{ item.title }}</strong>
+            <span v-if="item.status" class="chat-status" :data-status="item.status">{{ item.status }}</span>
+            <span v-if="item.callId" class="chat-call">{{ item.callId }}</span>
+            <button
+              v-if="item.kind === 'thinking'"
+              class="ghost small"
+              type="button"
+              @click="toggleDshItem(item)"
+            >
+              {{ item.expanded ? "收起思考" : "展开思考" }}
+            </button>
+          </header>
+          <pre v-if="item.kind !== 'thinking' || item.expanded">{{ item.detail }}</pre>
+          <p v-else class="chat-collapsed">思考内容默认折叠（{{ item.detail.length }} 字符）</p>
+        </article>
+      </div>
+      <p v-else class="empty">
+        发送 prompt 后，这里会按顺序显示 started、runtime_event、permission_requested、completed，以及 run_imported 或
+        import 阶段的 error。
+      </p>
+    </section>
+
     <section
       v-if="provider === 'remote' && (pendingClarify || pendingApproval || pendingChatInteraction)"
       class="interaction-grid reveal"
@@ -1723,11 +2291,19 @@ function spanMetric(span: RuntimeSpan) {
         <dl class="judge-meta">
           <div>
             <dt>提供方</dt>
-            <dd>{{ provider === "dsh" ? "Local DSH" : "远程 Agent" }}</dd>
+            <dd>{{ providerLabel }}</dd>
           </div>
           <div v-if="provider === 'dsh'">
             <dt>DSH 状态</dt>
             <dd :data-status="dshPhase">{{ dshPhaseLabel }}</dd>
+          </div>
+          <div v-if="provider === 'acp'">
+            <dt>ACP 回合</dt>
+            <dd :data-status="dshAcpPhase">{{ dshAcpPhaseLabel }}</dd>
+          </div>
+          <div v-if="provider === 'acp'">
+            <dt>stop reason</dt>
+            <dd>{{ dshAcpStopReason || "-" }}</dd>
           </div>
           <div>
             <dt>Run</dt>

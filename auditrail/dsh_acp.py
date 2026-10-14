@@ -508,6 +508,51 @@ AcpRequestHandler = Callable[[AcpMessage, Callable[[Any], None]], bool]
 #: Permission listener: notified once per claimed ``session/request_permission``.
 AcpPermissionListener = Callable[["AcpPermissionRequest"], None]
 
+#: Bounded per-turn buffer of ``session/update`` frames.
+ACP_MAX_SUBSCRIBED_UPDATES = 4096
+
+
+class AcpSessionUpdates:
+    """The ``session/update`` notifications of one in-flight prompt turn.
+
+    A turn and a long-lived projection layer (one that streams live updates to a
+    UI) both need the same notifications.  Draining one shared inbox from both
+    sides instead splits every turn arbitrarily between them: whichever consumer
+    wins the race takes the chunk, so neither sees the whole turn and the
+    settled outcome can come back incomplete.
+
+    A subscription removes the race instead of tolerating it.  While one is open
+    the transport delivers that session's updates *here and only here*, in wire
+    order, and the subscription owns them for the life of the turn.  Frames
+    already queued when the subscription opened are claimed too, so a turn never
+    starts with a hole.
+
+    The buffer is bounded: a turn that somehow produces more updates than
+    :data:`ACP_MAX_SUBSCRIBED_UPDATES` drops the newest and reports it through
+    :attr:`dropped`, rather than growing without limit.
+    """
+
+    def __init__(self, transport: "AcpTransport", session_id: str):
+        self._transport = transport
+        self.session_id = session_id
+        self._queue: list[AcpMessage] = []
+        self._seen: set[Any] = set()
+        self._dropped = 0
+        self._closed = False
+
+    @property
+    def dropped(self) -> int:
+        """Count of updates dropped because the bounded buffer was full."""
+        return self._dropped
+
+    def drain(self) -> list[AcpMessage]:
+        """Take the frames collected so far, leaving the subscription open."""
+        return self._transport._drain_session_updates(self)
+
+    def close(self) -> list[AcpMessage]:
+        """Detach and return every frame still owned by this subscription."""
+        return self._transport._close_session_updates(self)
+
 
 class AcpTransport:
     """Bidirectional NDJSON JSON-RPC transport over one ACP process.
@@ -534,6 +579,7 @@ class AcpTransport:
 
         self._state = threading.Condition()
         self._inbox: list[AcpMessage] = []
+        self._subscriptions: dict[str, AcpSessionUpdates] = {}
         self._pending: dict[Any, _PendingRequest] = {}
         self._handlers: dict[str, AcpRequestHandler] = {}
         self._responded: set[Any] = set()
@@ -805,17 +851,79 @@ class AcpTransport:
                 self._state.wait(timeout=remaining)
 
     def drain_inbox(self) -> tuple[AcpMessage, ...]:
-        """Remove and return every queued inbound message."""
+        """Remove and return every queued inbound message.
+
+        Subscribed turns deliver through :meth:`open_session_updates` instead,
+        so their updates never appear here.
+        """
         with self._state:
             queued = tuple(self._inbox)
             self._inbox.clear()
         return queued
 
-    def requeue(self, message: AcpMessage) -> None:
-        """Put a message back at the head of the inbox."""
+    # -- per-session update subscriptions --
+
+    def open_session_updates(self, session_id: str) -> AcpSessionUpdates:
+        """Claim one session's ``session/update`` stream for an in-flight turn.
+
+        Frames for that session already sitting in the inbox move to the
+        subscription, so opening one never drops an update that arrived just
+        before the prompt was written to the peer.
+        """
+        key = str(session_id)
+        if not key:
+            raise DshValidationError("ACP subscription needs a session id")
         with self._state:
-            self._inbox.insert(0, message)
-            self._state.notify_all()
+            if self._closed:
+                raise self._close_error or AcpError("closed", "ACP transport is closed")
+            subscription = self._subscriptions.get(key)
+            if subscription is not None and not subscription._closed:
+                raise AcpError(
+                    "session_subscribed",
+                    "ACP session already has a subscribed update stream",
+                )
+            claimed = [message for message in self._inbox if _is_session_update(message, key)]
+            if claimed:
+                self._inbox = [
+                    message for message in self._inbox if not _is_session_update(message, key)
+                ]
+            subscription = AcpSessionUpdates(self, key)
+            self._subscriptions[key] = subscription
+            for message in claimed:
+                self._claim_update_locked(subscription, message)
+        return subscription
+
+    def _drain_session_updates(self, subscription: AcpSessionUpdates) -> list[AcpMessage]:
+        with self._state:
+            claimed = subscription._queue
+            subscription._queue = []
+            return claimed
+
+    def _close_session_updates(self, subscription: AcpSessionUpdates) -> list[AcpMessage]:
+        with self._state:
+            subscription._closed = True
+            if self._subscriptions.get(subscription.session_id) is subscription:
+                del self._subscriptions[subscription.session_id]
+            claimed = subscription._queue
+            subscription._queue = []
+            return claimed
+
+    def _claim_update_locked(self, subscription: AcpSessionUpdates, message: AcpMessage) -> None:
+        request_id = message.request_id
+        key: Any = None
+        if request_id is not None:
+            key = request_id if isinstance(request_id, (str, int)) and not isinstance(request_id, bool) else str(request_id)
+            if key in subscription._seen:
+                return
+        if len(subscription._queue) >= ACP_MAX_SUBSCRIBED_UPDATES:
+            subscription._dropped += 1
+            return
+        if not subscription._queue:
+            # A fresh batch: per-id deduplication only ever spans one batch.
+            subscription._seen.clear()
+        if key is not None:
+            subscription._seen.add(key)
+        subscription._queue.append(message)
 
     # -- internals --
 
@@ -935,9 +1043,27 @@ class AcpTransport:
                 pending.event.set()
                 self._state.notify_all()
                 return True
-            self._inbox.append(message)
-            self._state.notify_all()
+            self._deliver_notification_locked(message)
         return True
+
+    def _deliver_notification_locked(self, message: AcpMessage) -> None:
+        """Route one inbound notification to a subscription, else to the inbox.
+
+        A subscribed session's updates reach the subscription only.  That is what
+        makes a turn's outcome complete instead of a race against every other
+        consumer of the shared inbox.
+        """
+        subscription: Optional[AcpSessionUpdates] = None
+        session_id = _notification_session_id(message)
+        if session_id is not None:
+            candidate = self._subscriptions.get(session_id)
+            if candidate is not None and not candidate._closed:
+                subscription = candidate
+        if subscription is not None:
+            self._claim_update_locked(subscription, message)
+        else:
+            self._inbox.append(message)
+        self._state.notify_all()
 
     def _handle_inbound_request(self, message: AcpMessage) -> None:
         method = message.method or ""
@@ -1488,11 +1614,37 @@ class AcpClient:
         *,
         timeout_seconds: Optional[float] = None,
         cancel_event: Optional[threading.Event] = None,
+        on_event: Optional[Callable[[DshRuntimeEvent], None]] = None,
     ) -> AcpPromptOutcome:
         """Send one prompt turn and collect its ordered updates.
 
         Only one prompt may be in flight per session; a second concurrent call
         fails locally rather than producing an ambiguous server response.
+
+        The turn owns its own ``session/update`` stream: while the prompt is in
+        flight the transport delivers this session's updates to a private
+        subscription instead of the shared inbox, so the returned
+        :attr:`AcpPromptOutcome.updates` is the complete, ordered turn even when
+        another thread is also consuming notifications.  Frame ids already queued
+        when the prompt starts are claimed, so the turn has no leading hole.
+
+        Args:
+            timeout_seconds: budget for the whole turn.
+            cancel_event: cooperative cancellation signal.
+            on_event: optional observer invoked once per event, in wire order,
+                as the turn progresses. A projection layer that wants to stream
+                live updates uses this instead of racing the same notifications
+                out of the inbox; the outcome still carries every event, so the
+                observer is a live view, not a substitute for the result.
+
+        Returns:
+            The settled outcome: ordered updates, accumulated text, stop reason,
+            and usage. A cancelled turn reports ``cancelled``, never success.
+
+        Raises:
+            AcpError: on timeout, transport close, protocol failure, or when
+                another prompt is already in flight for the session.
+            DshValidationError: when the message fails local validation.
         """
         remote_id = self._require_local_session(session_id)
         message = self.config.validate_message(text)
@@ -1503,6 +1655,77 @@ class AcpClient:
                     "ACP session already has an in-flight prompt",
                 )
             self._inflight.add(remote_id)
+        events: list[DshRuntimeEvent] = []
+        try:
+            subscription = self.transport.open_session_updates(remote_id)
+            pump = self._start_turn_pump(subscription, events, on_event)
+            try:
+                return self._run_prompt(
+                    remote_id,
+                    message,
+                    subscription,
+                    events,
+                    on_event=on_event,
+                    timeout_seconds=timeout_seconds,
+                    cancel_event=cancel_event,
+                )
+            finally:
+                if pump is not None:
+                    stop, watcher = pump
+                    stop.set()
+                    watcher.join(timeout=1)
+                # Claiming the subscription returns every frame still owned by
+                # the turn, including one that arrived while the response was
+                # being correlated.
+                for frame in subscription.close():
+                    self._append_turn_event(events, frame, on_event)
+        finally:
+            with self._lock:
+                self._inflight.discard(remote_id)
+
+    def _start_turn_pump(
+        self,
+        subscription: AcpSessionUpdates,
+        events: list[DshRuntimeEvent],
+        on_event: Optional[Callable[[DshRuntimeEvent], None]],
+    ) -> Optional[tuple[threading.Event, threading.Thread]]:
+        """Stream the turn's updates to ``on_event`` while it is still running.
+
+        The turn owns its subscription and the prompt call blocks until the
+        response arrives, so an observer would otherwise see the whole turn at
+        once at the end.  This pump drains the subscription on a short interval
+        and reports each event as it arrives; the outcome is still built from the
+        same events, so nothing is reported twice.
+        """
+        if on_event is None:
+            return None
+        stop = threading.Event()
+
+        def pump() -> None:
+            while not stop.is_set():
+                for frame in subscription.drain():
+                    self._append_turn_event(events, frame, on_event)
+                stop.wait(0.02)
+
+        watcher = threading.Thread(
+            target=pump,
+            daemon=True,
+            name="dsh-acp-turn-%s" % subscription.session_id[:8],
+        )
+        watcher.start()
+        return stop, watcher
+
+    def _run_prompt(
+        self,
+        remote_id: str,
+        message: str,
+        subscription: AcpSessionUpdates,
+        events: list[DshRuntimeEvent],
+        *,
+        on_event: Optional[Callable[[DshRuntimeEvent], None]],
+        timeout_seconds: Optional[float],
+        cancel_event: Optional[threading.Event],
+    ) -> AcpPromptOutcome:
         try:
             result = self.transport.send_request(
                 AgentMethod.SESSION_PROMPT,
@@ -1513,26 +1736,26 @@ class AcpClient:
             )
         except AcpError as exc:
             if exc.code == "cancelled":
+                for frame in subscription.drain():
+                    self._append_turn_event(events, frame, on_event)
                 return AcpPromptOutcome(
                     session_id=remote_id,
                     stop_reason=AcpStopReason.CANCELLED,
                     cancelled=True,
-                    updates=self._collect_updates(remote_id),
+                    updates=tuple(events),
                 )
             raise
-        finally:
-            with self._lock:
-                self._inflight.discard(remote_id)
+        for frame in subscription.drain():
+            self._append_turn_event(events, frame, on_event)
 
         payload = result if isinstance(result, Mapping) else {}
         stop_reason = payload.get("stopReason")
         if not isinstance(stop_reason, str) or not stop_reason:
             raise AcpError("malformed_result", "ACP session/prompt omitted stopReason")
         usage = payload.get("usage")
-        updates = self._collect_updates(remote_id)
         text_parts = [
             str(event.data.get("text") or "")
-            for event in updates
+            for event in events
             if event.type == "text"
         ]
         # The prompt response is the settlement signal, so it is also surfaced as
@@ -1541,16 +1764,33 @@ class AcpClient:
             "final",
             {"text": "".join(text_parts), "stop_reason": stop_reason},
         )
+        if on_event is not None:
+            on_event(final_event)
+        events.append(final_event)
         return AcpPromptOutcome(
             session_id=remote_id,
             stop_reason=stop_reason,
             cancelled=stop_reason == AcpStopReason.CANCELLED,
             usage=dict(usage) if isinstance(usage, Mapping) else None,
-            updates=updates + (final_event,),
+            updates=tuple(events),
             text=final_event.data["text"],
-            truncated=any(event.truncated for event in updates),
+            truncated=any(event.truncated for event in events),
             raw=dict(payload),
         )
+
+    def _append_turn_event(
+        self,
+        events: list[DshRuntimeEvent],
+        frame: AcpMessage,
+        on_event: Optional[Callable[[DshRuntimeEvent], None]],
+    ) -> None:
+        """Normalize one subscribed frame into the turn, notifying the observer."""
+        event = normalize_session_update(frame.params, max_text_bytes=self.config.max_event_bytes)
+        if event is None:
+            return
+        if on_event is not None:
+            on_event(event)
+        events.append(event)
 
     def cancel(self, session_id: str) -> None:
         """Send ``session/cancel``. Unknown session ids are no-ops by contract."""
@@ -1558,25 +1798,6 @@ class AcpClient:
         if not remote_id:
             return
         self.transport.send_notification(AgentMethod.SESSION_CANCEL, {"sessionId": remote_id})
-
-    def _collect_updates(self, session_id: str) -> tuple[DshRuntimeEvent, ...]:
-        """Drain queued ``session/update`` notifications for one session.
-
-        Unrelated inbound messages (for example a response that arrived after its
-        caller had already timed out) are put back so they are not lost.
-        """
-        collected: list[DshRuntimeEvent] = []
-        for message in self.transport.drain_inbox():
-            if message.method != ClientMethod.SESSION_UPDATE:
-                self.transport.requeue(message)
-                continue
-            params = message.params
-            if isinstance(params, Mapping) and params.get("sessionId") not in (None, session_id):
-                continue
-            event = normalize_session_update(params, max_text_bytes=self.config.max_event_bytes)
-            if event is not None:
-                collected.append(event)
-        return tuple(collected)
 
     def take_notifications(self, *, timeout: Optional[float] = None) -> tuple[DshRuntimeEvent, ...]:
         """Drain queued ``session/update`` notifications outside a prompt call."""
@@ -1714,6 +1935,21 @@ class AcpClient:
         ):
             raise AcpError("invalid_session_id", "ACP session id is not a usable opaque identifier")
         return value
+
+
+def _notification_session_id(message: AcpMessage) -> Optional[str]:
+    """The session a ``session/update`` notification belongs to, if any."""
+    if message.method != ClientMethod.SESSION_UPDATE:
+        return None
+    params = message.params
+    if not isinstance(params, Mapping):
+        return None
+    session_id = params.get("sessionId")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def _is_session_update(message: AcpMessage, session_id: str) -> bool:
+    return _notification_session_id(message) == session_id
 
 
 def _config_options_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:

@@ -3086,9 +3086,166 @@ body {
 }
 
 .chip[data-status="imported"],
-.chip[data-status="judged"] {
+.chip[data-status="judged"],
+.chip[data-status="run_imported"] {
   color: #0a5f57;
   background: var(--signal-soft);
+}
+
+/* ACP：回合结束但还没有发布 run，既不算成功也不算失败。 */
+.chip[data-status="settled"],
+.chip[data-status="waiting_permission"] {
+  color: #8a5a08;
+  background: rgba(176, 118, 20, 0.14);
+}
+
+/* ACP 交互工作台：能力清单、会话列表、一次性权限请求与回合结束状态。 */
+
+.acp-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.acp-session-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.acp-session-list .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.acp-session-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acp-session-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.acp-session-list li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.acp-session-list strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.acp-session-list small {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 0.72rem;
+}
+
+.acp-session-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.acp-outcome {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.acp-outcome span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.acp-outcome strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.84rem;
+}
+
+.acp-outcome p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.acp-outcome-note {
+  line-height: 1.5;
+}
+
+.acp-permission {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(176, 118, 20, 0.45);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.acp-permission .panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.acp-permission-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acp-permission-options li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.76rem;
+}
+
+.acp-permission-note {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.chip.warning {
+  color: #8a5a08;
+  background: rgba(176, 118, 20, 0.14);
 }
 
 .chat-stream {

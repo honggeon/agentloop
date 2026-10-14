@@ -299,19 +299,19 @@ class AcpRuntimeManager:
         operation.state = "running"
         operation.emit("started", {"operation_id": operation.operation_id, "session_id": session.session_id})
         monitor_stop = threading.Event()
-        # The monitor thread and ``AcpClient.prompt`` drain the same notification
-        # inbox, so neither one sees every chunk: text is accumulated from what
-        # this manager actually emitted rather than from the client's own (racy)
-        # ``outcome.text``.
-        text_parts: list[str] = []
         try:
             client = self._ensure_session_client(session)
 
             def emit_event(event: Any) -> None:
-                if event.type == "text":
-                    text_parts.append(str(event.data.get("text") or ""))
                 operation.emit("runtime_event", event.to_dict())
 
+            # Outside a prompt this picks up unsolicited updates (a resumed
+            # session, autonomous work).  Inside one it cannot steal the turn's
+            # chunks: ``AcpClient.prompt`` subscribes the session, so the
+            # transport routes that session's updates to the turn's own stream
+            # and never to this inbox.  The live view is the prompt's
+            # ``on_event`` callback, and ``outcome.updates`` is the complete
+            # turn, so text is no longer reassembled from both sides.
             def monitor() -> None:
                 while not monitor_stop.is_set() and not operation.done.is_set():
                     for event in client.take_notifications(timeout=0.05):
@@ -329,12 +329,11 @@ class AcpRuntimeManager:
                     operation.prompt,
                     timeout_seconds=self.config.max_timeout_seconds,
                     cancel_event=operation.cancel_event,
+                    on_event=emit_event,
                 )
             finally:
                 monitor_stop.set()
                 watcher.join(timeout=1)
-            for event in outcome.updates:
-                emit_event(event)
             operation.result = outcome
             operation.state = "cancelled" if outcome.cancelled else "completed"
             operation.emit(
@@ -342,7 +341,7 @@ class AcpRuntimeManager:
                 {
                     "session_id": session.session_id,
                     "stop_reason": outcome.stop_reason,
-                    "text": "".join(text_parts),
+                    "text": outcome.text,
                     "cancelled": outcome.cancelled,
                 },
             )

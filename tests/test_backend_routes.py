@@ -604,6 +604,15 @@ def test_dsh_options_lists_approved_profiles_and_workspaces(tmp_path, monkeypatc
     assert data["dsh"]["default_timeout_seconds"] == 120
     assert data["dsh"]["max_timeout_seconds"] == 600
     assert data["dsh"]["max_concurrency"] == 2
+    # The ACP manifest is what the interactive workbench reads; the live
+    # capabilities stay behind capabilities_route.
+    assert data["dsh"]["acp"] == {
+        "enabled": True,
+        "profile": "acp",
+        "permission_options": ["allow-once", "reject-once"],
+        "allow_always": False,
+        "capabilities_route": "/api/dsh/acp/options",
+    }
     assert str(settings.dsh_binary) not in response.text
 
 

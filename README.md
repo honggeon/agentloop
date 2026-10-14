@@ -168,6 +168,28 @@ Imported runs carry `interaction_mode=auditrail-chat`, `dsh_profile=acp`,
 `session_role=evaluand`, and `expectations.json` from the request's acceptance
 criteria.
 
+The runtime evaluation page (`/live`) offers three runtime providers: the remote
+agent HTTP service, Local DSH (Headless), and **Local DSH ACP**. The ACP provider
+is the interactive workbench for the long-lived process: it reads the negotiated
+capabilities from `/api/dsh/acp/options`, creates/resumes/closes sessions, streams
+one prompt turn per session, and surfaces each permission request as a two-button
+`allow-once` / `reject-once` decision instead of an automatic approval. The panel
+keeps the distinction the SSE contract makes: a settled turn (`completed`, with
+its `stop_reason`) is never rendered as success, and only `run_imported` shows as
+a published Auditrail run.
+
+### Turn-owned ACP updates
+
+A prompt turn and a long-lived projection layer need the same `session/update`
+notifications. Draining one shared inbox from both sides split a turn between
+whichever consumer won the race, so the settled outcome could come back
+incomplete. `AcpTransport.open_session_updates(session_id)` instead gives the turn
+its own bounded, ordered subscription: while it is open, that session's updates go
+to the subscription and only to the subscription, frames already queued are
+claimed, and `AcpClient.prompt(..., on_event=...)` reports each normalized event in
+wire order. `outcome.updates` is therefore the complete turn, and a projection
+layer cannot steal chunks from it.
+
 
 ## Run a Deterministic Case Suite
 

@@ -207,24 +207,30 @@ class FakeClient:
         self.sessions[session_id] = Path(workspace)
         return AcpSession(session_id, Path(workspace))
 
-    def prompt(self, session_id, text, timeout_seconds=None, cancel_event=None):
+    def prompt(self, session_id, text, timeout_seconds=None, cancel_event=None, on_event=None):
         self.prompt_calls.append((session_id, text))
         if self.release_prompt is not None:
             self.release_prompt.wait(2)
         if cancel_event is not None and cancel_event.is_set():
-            return AcpPromptOutcome(
+            outcome = AcpPromptOutcome(
                 session_id,
                 "cancelled",
                 True,
                 updates=(DshRuntimeEvent("final", {"text": "", "stop_reason": "cancelled"}),),
             )
-        return AcpPromptOutcome(
-            session_id,
-            "end_turn",
-            False,
-            updates=(DshRuntimeEvent("text", {"text": text}),),
-            text=text,
-        )
+        else:
+            outcome = AcpPromptOutcome(
+                session_id,
+                "end_turn",
+                False,
+                updates=(DshRuntimeEvent("text", {"text": text}),),
+                text=text,
+            )
+        # Mirror the real client: the observer sees every event of the turn.
+        if on_event is not None:
+            for event in outcome.updates:
+                on_event(event)
+        return outcome
 
     def take_notifications(self, timeout=None):
         return ()
@@ -1218,3 +1224,63 @@ def test_acp_prompt_route_reports_queue_conflicts_before_streaming(monkeypatch, 
     assert busy.json()["detail"]["code"] == "runtime_busy"
     session.client.release_prompt.set()
     assert first.done.wait(5)
+
+
+# --- manager: complete turn projection --------------------------------------
+
+
+def _streaming_chunk_responder(turn_id, chunk_count):
+    """Answer ``session/prompt`` with a burst of text chunks at full speed.
+
+    The whole burst is usually already on the wire when the response arrives,
+    which is exactly the shape that used to split a turn between the manager's
+    monitor thread and the client's own inbox drain.
+    """
+
+    def responder(method, params, request_id, peer):
+        if method == AgentMethod.SESSION_NEW:
+            peer.send_result(request_id, {"sessionId": turn_id, "configOptions": []})
+            return
+        if method != AgentMethod.SESSION_PROMPT:
+            peer.send_result(request_id, {})
+            return
+        for index in range(chunk_count):
+            peer.session_update(
+                turn_id,
+                {
+                    "sessionUpdate": SessionUpdateKind.AGENT_MESSAGE_CHUNK,
+                    "content": {"type": "text", "text": "c%d;" % index},
+                    "messageId": "m1",
+                },
+            )
+        peer.send_result(request_id, {"stopReason": "end_turn"})
+
+    return responder
+
+
+def test_acp_operation_streams_every_chunk_of_a_burst(tmp_path):
+    """The projection must deliver the whole turn, not a scheduling slice."""
+    chunk_count = 60
+    settings = _settings(tmp_path)
+    manager, peer, workspace = _real_transport_manager(
+        tmp_path, initialize_responder(_streaming_chunk_responder(SESSION_ID, chunk_count))
+    )
+    session = manager.create_session(workspace)
+    try:
+        operation = manager.prompt(session.session_id, "burst")
+        assert operation.done.wait(20)
+
+        items = []
+        while not operation.queue.empty():
+            items.append(operation.queue.get(timeout=1))
+    finally:
+        peer.close()
+
+    streamed = "".join(
+        str(item["data"].get("data", {}).get("text") or "")
+        for item in items
+        if item["event"] == "runtime_event" and item["data"].get("type") == "text"
+    )
+    assert streamed == "".join("c%d;" % index for index in range(chunk_count))
+    completed = next(item for item in items if item["event"] == "completed")
+    assert completed["data"]["text"] == streamed

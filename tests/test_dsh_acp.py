@@ -16,11 +16,13 @@ import pytest
 
 from auditrail.dsh_acp import (
     ACP_ALLOW_ONCE_OPTION_ID,
+    ACP_MAX_SUBSCRIBED_UPDATES,
     ACP_PROTOCOL_VERSION,
     ACP_REJECT_ONCE_OPTION_ID,
     AcpClient,
     AcpError,
     AcpFrameReader,
+    AcpMessage,
     AcpProcess,
     AcpRemoteError,
     AcpStopReason,
@@ -1395,3 +1397,282 @@ def test_orphan_response_is_queued_not_lost(acp_env):
     client.initialize(timeout_seconds=5)
     peer.send_result("never-requested", {"ok": True})
     assert wait_for(lambda: bool(transport.drain_inbox()), timeout=5)
+
+
+# --- inbox starvation -------------------------------------------------------
+
+
+def interleaved_prompt_responder(*, on_update=None, chunks=6, session_id=SESSION_ID):
+    """Send updates, then the result, calling ``on_update`` after the first."""
+    fired = False
+
+    def responder(method, params, request_id, peer):
+        nonlocal fired
+        if method == AgentMethod.SESSION_NEW:
+            peer.send_result(request_id, {"sessionId": session_id})
+            return
+        if method != AgentMethod.SESSION_PROMPT:
+            peer.send_result(request_id, {})
+            return
+        for index in range(chunks):
+            peer.session_update(
+                session_id,
+                {
+                    "sessionUpdate": SessionUpdateKind.AGENT_MESSAGE_CHUNK,
+                    "content": {"type": "text", "text": "c%d;" % index},
+                    "messageId": "m1",
+                },
+            )
+            if index == 0 and on_update is not None and not fired:
+                fired = True
+                on_update()
+        peer.send_result(request_id, {"stopReason": "end_turn"})
+
+    return responder
+
+
+def test_prompt_owns_its_updates_while_another_thread_drains_the_inbox(acp_env):
+    """The settled outcome must not depend on who wins a notification race.
+
+    A projection layer (the backend's monitor thread) legitimately drains
+    unsolicited updates while a prompt is in flight.  Draining the same inbox
+    from both sides used to split the turn between them, so the outcome came
+    back incomplete.  The turn now owns its own subscribed stream.
+    """
+    consumed = threading.Event()
+
+    def first_update_sent():
+        consumed.set()
+
+    client, transport, peer, workspace = acp_env(
+        initialize_responder(interleaved_prompt_responder(on_update=first_update_sent, chunks=6))
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    drained: list = []
+    stop = threading.Event()
+
+    def drain_like_a_monitor():
+        while not stop.is_set():
+            drained.extend(client.take_notifications(timeout=0.02))
+
+    watcher = threading.Thread(target=drain_like_a_monitor, daemon=True)
+    watcher.start()
+    outcome: list = []
+    failure: list = []
+
+    def turn():
+        try:
+            outcome.append(client.prompt(SESSION_ID, "x", timeout_seconds=5))
+        except Exception as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+
+    worker = threading.Thread(target=turn, daemon=True)
+    try:
+        worker.start()
+        # Once the peer has sent its first update, the monitor is actively
+        # draining the same inbox the turn used to depend on.
+        assert consumed.wait(5)
+        worker.join(timeout=10)
+    finally:
+        stop.set()
+        watcher.join(timeout=2)
+
+    assert failure == []
+    assert not worker.is_alive()
+    settled = outcome[0]
+    assert settled.stop_reason == AcpStopReason.END_TURN
+    assert [event.type for event in settled.updates] == ["text"] * 6 + ["final"]
+    assert settled.text == "".join("c%d;" % index for index in range(6))
+    # The drainer never saw a subscribed turn's chunk: those belong to the turn.
+    assert [event for event in drained if event.type == "text"] == []
+
+
+def test_another_consumer_cannot_steal_a_subscribed_turn(acp_env):
+    """A chunk taken elsewhere must still appear in the turn's own outcome."""
+    emitted = threading.Event()
+
+    def first_chunk_sent():
+        emitted.set()
+
+    client, transport, peer, workspace = acp_env(
+        initialize_responder(interleaved_prompt_responder(on_update=first_chunk_sent, chunks=2))
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    drained: list = []
+    outcome: list = []
+    failure: list = []
+
+    def monitor():
+        # Exactly what the backend's projection thread does: consume the shared
+        # inbox for the whole duration of the turn.
+        while not emitted.is_set():
+            drained.extend(client.take_notifications(timeout=0.02))
+
+    watcher = threading.Thread(target=monitor, daemon=True)
+    watcher.start()
+
+    def turn():
+        try:
+            outcome.append(client.prompt(SESSION_ID, "x", timeout_seconds=5))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+
+    worker = threading.Thread(target=turn, daemon=True)
+    try:
+        worker.start()
+        assert emitted.wait(5)
+        worker.join(timeout=10)
+    finally:
+        watcher.join(timeout=5)
+
+    assert failure == []
+    assert not worker.is_alive()
+    settled = outcome[0]
+    # The turn reports every chunk exactly once, no matter who else was reading.
+    assert [event.data.get("text") for event in settled.updates if event.type == "text"] == [
+        "c0;",
+        "c1;",
+    ]
+    assert settled.text == "c0;c1;"
+    # And the other consumer cannot have seen one it did not own.
+    assert [event for event in drained if event.type == "text"] == []
+
+
+def test_prompt_reports_every_update_through_on_event_in_wire_order(acp_env):
+    observed: list[str] = []
+    client, _, _, workspace = acp_env(
+        initialize_responder(
+            interleaved_prompt_responder(
+                chunks=3,
+            )
+        )
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    outcome = client.prompt(
+        SESSION_ID,
+        "x",
+        timeout_seconds=5,
+        on_event=lambda event: observed.append("%s:%s" % (event.type, event.data.get("text") or "")),
+    )
+
+    assert observed == ["text:c0;", "text:c1;", "text:c2;", "final:c0;c1;c2;"]
+    assert [event.type for event in outcome.updates] == ["text", "text", "text", "final"]
+    assert outcome.text == "c0;c1;c2;"
+
+
+def test_on_event_streams_while_the_prompt_is_still_blocked(acp_env):
+    """Live projection must not wait for the whole turn to settle."""
+    streamed = threading.Event()
+    answered = threading.Event()
+
+    def after_first_update():
+        streamed.set()
+        # The peer withholds the response until the observer has seen the chunk,
+        # so a callback delivered only after settlement would deadlock here.
+        assert answered.wait(5)
+
+    client, _, _, workspace = acp_env(
+        initialize_responder(interleaved_prompt_responder(on_update=after_first_update, chunks=2))
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    seen: list[str] = []
+
+    def observe(event):
+        seen.append(event.data.get("text") or "")
+        if event.data.get("text") == "c0;":
+            answered.set()
+
+    outcome = client.prompt(SESSION_ID, "x", timeout_seconds=10, on_event=observe)
+
+    assert streamed.is_set()
+    assert seen == ["c0;", "c1;", "c0;c1;"]
+    assert outcome.text == "c0;c1;"
+
+
+def test_prompt_claims_updates_queued_before_the_turn_started(acp_env):
+    """Opening the subscription must not leave a leading hole in the turn."""
+    client, _, peer, workspace = acp_env(
+        initialize_responder(interleaved_prompt_responder(chunks=2))
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    peer.session_update(
+        SESSION_ID,
+        {
+            "sessionUpdate": SessionUpdateKind.AGENT_MESSAGE_CHUNK,
+            "content": {"type": "text", "text": "queued;"},
+            "messageId": "m0",
+        },
+    )
+    # Let the frame reach the inbox but leave it unconsumed.
+    assert wait_for(lambda: bool(transport_inbox(client)), timeout=5)
+
+    outcome = client.prompt(SESSION_ID, "x", timeout_seconds=5)
+
+    assert [event.data.get("text") for event in outcome.updates if event.type == "text"] == [
+        "queued;",
+        "c0;",
+        "c1;",
+    ]
+    assert outcome.text == "queued;c0;c1;"
+
+
+def transport_inbox(client):
+    """Peek at the shared inbox without consuming a subscribed turn."""
+    with client.transport._state:
+        return list(client.transport._inbox)
+
+
+def test_subscription_is_released_when_the_transport_closes(acp_env):
+    client, transport, peer, workspace = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    subscription = transport.open_session_updates(SESSION_ID)
+
+    transport.close(terminate=True)
+
+    assert subscription.close() == []
+    with pytest.raises(AcpError) as exc_info:
+        transport.open_session_updates(SESSION_ID)
+    assert exc_info.value.code == "closed"
+
+
+def test_second_subscription_for_one_session_is_refused(acp_env):
+    """One prompt per session is already the contract; the transport enforces it."""
+    client, transport, peer, workspace = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    transport.open_session_updates(SESSION_ID)
+
+    with pytest.raises(AcpError) as exc_info:
+        transport.open_session_updates(SESSION_ID)
+    assert exc_info.value.code == "session_subscribed"
+
+
+def test_subscription_buffer_is_bounded(acp_env):
+    """A pathological turn is bounded and reports what it dropped."""
+    client, transport, peer, workspace = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    subscription = transport.open_session_updates(SESSION_ID)
+    frame = AcpMessage(
+        {
+            "jsonrpc": "2.0",
+            "method": ClientMethod.SESSION_UPDATE,
+            "params": {"sessionId": SESSION_ID, "update": {"sessionUpdate": "plan"}},
+        }
+    )
+
+    with transport._state:
+        for _ in range(ACP_MAX_SUBSCRIBED_UPDATES + 5):
+            transport._claim_update_locked(subscription, frame)
+
+    assert subscription.dropped == 5
+    assert len(subscription.drain()) == ACP_MAX_SUBSCRIBED_UPDATES

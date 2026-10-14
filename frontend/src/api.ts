@@ -496,8 +496,9 @@ export interface LiveEvent {
   payload: any;
 }
 
-// 运行时提供方：远程 Agent HTTP 服务，或本机 DSH Headless 运行时。
-export type RuntimeProviderId = "remote" | "dsh";
+// 运行时提供方：远程 Agent HTTP 服务、本机 DSH Headless 运行时，或本机 DSH ACP
+// 交互运行时（长驻进程 + 会话 + 一次性权限应答）。
+export type RuntimeProviderId = "remote" | "dsh" | "acp";
 
 export interface DshProviderInfo {
   id: string;
@@ -534,8 +535,104 @@ export interface DshOptions {
     default_timeout_seconds: number;
     max_timeout_seconds: number;
     max_concurrency: number;
+    acp: DshAcpManifest;
   };
   judge: JudgeEngineOptions;
+}
+
+// ACP 只在 /api/dsh/acp/options 报告每次连接实际协商到的能力；这里只保留
+// 静态开关，真实能力必须查 capabilities_route，不得在前端写死。
+export interface DshAcpManifest {
+  enabled: boolean;
+  profile: string;
+  permission_options: string[];
+  allow_always: boolean;
+  capabilities_route: string;
+}
+
+export interface DshAcpCapabilities {
+  protocol_version: number;
+  running: boolean;
+  supports_images: boolean;
+  supports_session_list: boolean;
+  supports_session_resume: boolean;
+  supports_session_close: boolean;
+  permission_options: string[];
+}
+
+// 只允许 allow-once / reject-once；allow-always 永远不出现在这里。
+export interface DshAcpPermissionPolicy {
+  allow: string[];
+  reject: string[];
+  allow_always: boolean;
+}
+
+export interface DshAcpOptions {
+  enabled: boolean;
+  disabled_reason?: string | null;
+  profile?: string;
+  capabilities: Partial<DshAcpCapabilities>;
+  permission_policy?: DshAcpPermissionPolicy;
+}
+
+export interface DshAcpSession {
+  session_id: string;
+  workspace: string;
+  state: string;
+  active_operation?: string | null;
+  last_error?: string | null;
+}
+
+export interface DshAcpOperationStatus {
+  operation_id: string;
+  session_id: string;
+  state: string;
+  done: boolean;
+  error: DshChatErrorPayload | null;
+  run_id: string | null;
+}
+
+export interface DshAcpSessionResult {
+  session_id: string;
+  workspace: string;
+  state: string;
+  capabilities?: DshAcpCapabilities;
+}
+
+export interface DshAcpPermissionOption {
+  optionId: string;
+  name?: string;
+  kind?: string;
+}
+
+// SSE permission_requested：请求在 session/prompt 仍阻塞时到达，必须由用户
+// 明确回答 allow-once / reject-once。
+export interface DshAcpPermissionRequest {
+  request_id: string | number;
+  session_id: string;
+  tool_call_id: string;
+  options: DshAcpPermissionOption[];
+  operation_id: string;
+}
+
+// SSE completed 只表示 ACP 回合已结束，不表示任务成功；只有 run_imported
+// 才表示标准 Auditrail run 已发布。
+export interface DshAcpCompletedPayload {
+  session_id: string;
+  stop_reason: string;
+  text: string;
+  cancelled: boolean;
+}
+
+export interface DshAcpPromptPayload {
+  session_id: string;
+  message: string;
+  acceptance_criteria?: string;
+}
+
+export interface DshAcpSessionPayload {
+  workspace: string;
+  session_id?: string;
 }
 
 export interface DshChatPayload {
@@ -621,6 +718,55 @@ export function streamDshChat(payload: DshChatPayload, onEvent: (event: LiveEven
 
 export function cancelDshChat(operationId: string): Promise<DshCancelResult> {
   return apiPost<DshCancelResult>(`/api/dsh/chat/${encodeURIComponent(operationId)}/cancel`);
+}
+
+// --- 本机 DSH ACP 交互运行时 ------------------------------------------------
+
+export function fetchDshAcpOptions(): Promise<DshAcpOptions> {
+  return apiGet<DshAcpOptions>("/api/dsh/acp/options");
+}
+
+export function fetchDshAcpSessions(): Promise<{ sessions: DshAcpSession[] }> {
+  return apiGet<{ sessions: DshAcpSession[] }>("/api/dsh/acp/sessions");
+}
+
+export function createDshAcpSession(payload: DshAcpSessionPayload): Promise<DshAcpSessionResult> {
+  return apiPostJson<DshAcpSessionResult>("/api/dsh/acp/session/new", payload);
+}
+
+export function resumeDshAcpSession(payload: DshAcpSessionPayload): Promise<DshAcpSessionResult> {
+  return apiPostJson<DshAcpSessionResult>("/api/dsh/acp/session/resume", payload);
+}
+
+export function closeDshAcpSession(sessionId: string): Promise<{ ok: boolean; session_id: string }> {
+  return apiDelete<{ ok: boolean; session_id: string }>(
+    `/api/dsh/acp/session/${encodeURIComponent(sessionId)}`
+  );
+}
+
+// 一个 session 同时只允许一个 active prompt；事件顺序为 started、
+// runtime_event / permission_requested、completed，最后是 run_imported 或
+// error{stage:"import"}。
+export function streamDshAcpPrompt(
+  payload: DshAcpPromptPayload,
+  onEvent: (event: LiveEvent) => void
+): Promise<void> {
+  return streamPostJson("/api/dsh/acp/prompt", payload, onEvent);
+}
+
+export function cancelDshAcpOperation(operationId: string): Promise<DshCancelResult> {
+  return apiPostJson<DshCancelResult>("/api/dsh/acp/cancel", { operation_id: operationId });
+}
+
+export function respondDshAcpPermission(
+  operationId: string,
+  requestId: string | number,
+  optionId: string
+): Promise<{ ok: boolean; request_id: string | number; option_id: string }> {
+  return apiPostJson<{ ok: boolean; request_id: string | number; option_id: string }>(
+    "/api/dsh/acp/permission/respond",
+    { operation_id: operationId, request_id: requestId, option_id: optionId }
+  );
 }
 
 export async function apiGet<T>(path: string): Promise<T> {

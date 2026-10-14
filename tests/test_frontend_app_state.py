@@ -208,6 +208,7 @@ def test_live_eval_is_provider_aware_for_dsh_workbench():
 
     # DSH 模式只显示本地字段：远程连接项被隐藏
     assert """<template v-if="provider === 'remote'">""" in source
+    assert "<template v-else-if=\"provider === 'dsh'\">" in source
     assert "<template v-else>" in source
     assert "provider === 'remote' && (pendingClarify" in source
 
@@ -237,7 +238,88 @@ def test_live_eval_is_provider_aware_for_dsh_workbench():
     assert "打开运行（审计）" in source
 
     # 通用 DSH 会话不启用 PPT 续跑启发式
-    assert 'provider.value === "dsh") return buildDshDiagnosis()' in source
+    assert 'provider.value === "dsh" || provider.value === "acp"' in source
+
+
+def test_live_eval_exposes_the_acp_interactive_workbench():
+    source = LIVE_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+    styles = Path("frontend/src/styles.css").read_text(encoding="utf-8")
+
+    # ACP 契约集中在 api.ts：能力、会话、SSE prompt、一次性权限应答
+    assert '"remote" | "dsh" | "acp"' in api_source
+    assert "export interface DshAcpManifest" in api_source
+    assert "export interface DshAcpCapabilities" in api_source
+    assert "export interface DshAcpSession" in api_source
+    assert "export interface DshAcpPermissionRequest" in api_source
+    assert "export interface DshAcpCompletedPayload" in api_source
+    assert "capabilities_route" in api_source
+    assert "/api/dsh/acp/options" in api_source
+    assert "/api/dsh/acp/sessions" in api_source
+    assert "/api/dsh/acp/session/new" in api_source
+    assert "/api/dsh/acp/session/resume" in api_source
+    assert "/api/dsh/acp/prompt" in api_source
+    assert "/api/dsh/acp/cancel" in api_source
+    assert "/api/dsh/acp/permission/respond" in api_source
+    assert "fetchDshAcpOptions" in api_source
+    assert "fetchDshAcpSessions" in api_source
+    assert "createDshAcpSession" in api_source
+    assert "resumeDshAcpSession" in api_source
+    assert "closeDshAcpSession" in api_source
+    assert "streamDshAcpPrompt" in api_source
+    assert "cancelDshAcpOperation" in api_source
+    assert "respondDshAcpPermission" in api_source
+    assert "acp: DshAcpManifest" in api_source
+
+    # 第三个提供方入口与 ACP 工作台面板
+    assert "Local DSH ACP" in source
+    assert "selectProvider('acp')" in source
+    assert "acpEnabled" in source
+    assert "ACP 交互工作台" in source
+    assert "acp-capabilities" in source
+    assert "acp-session-list" in source
+    assert "newAcpSession" in source
+    assert "resumeAcpSession" in source
+    assert "closeAcpSession" in source
+    assert "startAcpTurn" in source
+    assert "stopAcpTurn" in source
+    assert "handleAcpEvent" in source
+    assert "继续 ACP 会话" in source
+
+    # 能力必须来自本次连接的协商结果，不得在前端写死
+    assert "acpCapabilities" in source
+    assert "protocol_version" in source
+    assert "supports_images" in source
+
+    # 权限只提供一次性 allow / reject，绝不出现 allow-always 或自动批准
+    assert "answerAcpPermission" in source
+    assert "allow-once" in source
+    assert "reject-once" in source
+    assert "不提供 allow-always，也不会自动批准" in source
+    assert "'allow-always'" not in source
+    assert '"allow-always"' not in source
+    assert "allowAlways" not in source
+    assert "allow_always: true" not in source
+    assert "dshAcpPermission" in source
+    assert "dshAcpPermissionBusy" in source
+    # 后端返回的权限策略是只读展示，前端不自行拼选项
+    assert "permission_policy" in api_source
+    assert "allow_always" in api_source
+
+    # completed 不等于成功：只有 run_imported 视为已发布 Auditrail run
+    assert "dshAcpStopReason" in source
+    assert "dshAcpPhase" in source
+    assert "run_imported" in source
+    assert "completed 只表示 ACP prompt 已结束" in source
+    assert "回合已结束，但还没有发布运行" in source
+    assert "已发布 Auditrail run" in source
+    assert "settled" in source
+
+    # ACP 面板样式
+    assert ".acp-outcome" in styles
+    assert ".acp-permission" in styles
+    assert ".acp-session-list" in styles
+    assert ".acp-capabilities" in styles
 
 
 def test_live_eval_route_and_sidebar_entry_exist():
