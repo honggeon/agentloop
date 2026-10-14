@@ -1,15 +1,23 @@
 <script setup lang="ts">
-import { computed, inject, ref } from "vue";
+import { computed, inject, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import {
   apiPostJson,
   apiPost,
+  cancelDshChat,
+  fetchDshOptions,
+  streamDshChat,
   streamPostJson,
+  type DshChatErrorPayload,
+  type DshOptions,
+  type DshRuntimeEvent,
   type Finding,
   type JudgeReport,
   type LiveEvaluatePayload,
+  type LiveEvent,
   type RuntimeGraph,
   type RuntimeGraphNode,
+  type RuntimeProviderId,
   type RuntimeSpan,
   type RuntimeTrace,
   type RunItem
@@ -20,6 +28,48 @@ interface LiveLogItem {
   event: string;
   text: string;
 }
+
+type DshPhase = "idle" | "running" | "stopping" | "cancelled" | "timeout" | "failed" | "imported" | "judged";
+
+type DshStreamKind = "status" | "thinking" | "text" | "tool_call" | "tool_result" | "final" | "error";
+
+interface DshStreamItem {
+  index: number;
+  kind: DshStreamKind;
+  title: string;
+  detail: string;
+  status?: string;
+  callId?: string;
+  expanded: boolean;
+}
+
+const DSH_PHASE_LABELS: Record<DshPhase, string> = {
+  idle: "未开始",
+  running: "运行中",
+  stopping: "正在停止",
+  cancelled: "已取消",
+  timeout: "已超时",
+  failed: "失败",
+  imported: "已导入运行",
+  judged: "已评测"
+};
+
+const DSH_STATUS_PHASE_LABELS: Record<string, string> = {
+  turn_start: "回合开始",
+  step_start: "步骤开始",
+  step_end: "步骤结束",
+  turn_end: "回合结束"
+};
+
+const DSH_KIND_LABELS: Record<DshStreamKind, string> = {
+  status: "status",
+  thinking: "thinking",
+  text: "assistant",
+  tool_call: "tool_call",
+  tool_result: "tool_result",
+  final: "final",
+  error: "error"
+};
 
 const router = useRouter();
 const reloadRuns = inject<() => Promise<void>>("reloadRuns")!;
@@ -59,12 +109,58 @@ const pendingApproval = ref<any | null>(null);
 const pendingChatInteraction = ref<any | null>(null);
 const chatResponse = ref("确认");
 
-const canSubmit = computed(() => {
+// 运行时提供方与本地 DSH 工作台状态。
+const provider = ref<RuntimeProviderId>("remote");
+const dshOptions = ref<DshOptions | null>(null);
+const dshOptionsLoaded = ref(false);
+const dshOptionsError = ref("");
+const dshForm = ref({
+  profile: "",
+  workspace: "",
+  message: "",
+  acceptance_criteria: "",
+  timeout: 300
+});
+const dshOperationId = ref("");
+const dshSessionId = ref("");
+const dshPhase = ref<DshPhase>("idle");
+const dshStream = ref<DshStreamItem[]>([]);
+
+const dshEnabled = computed(() => Boolean(dshOptions.value?.dsh.enabled));
+const dshDisabledReason = computed(() => dshOptions.value?.dsh.disabled_reason || "");
+const dshProfiles = computed(() => dshOptions.value?.dsh.profiles || []);
+const dshWorkspaces = computed(() => dshOptions.value?.dsh.workspaces || []);
+const dshWorkspaceRoots = computed(() => dshOptions.value?.dsh.workspace_roots || []);
+const dshMaxTimeout = computed(() => Number(dshOptions.value?.dsh.max_timeout_seconds || 900));
+const dshPhaseLabel = computed(() => DSH_PHASE_LABELS[dshPhase.value]);
+const canSubmitRemote = computed(() => {
   return Boolean(form.value.base_url.trim() && form.value.user_id.trim() && form.value.message.trim() && !running.value);
 });
+const canSubmitDsh = computed(() => {
+  return Boolean(
+    dshEnabled.value &&
+      dshForm.value.profile &&
+      dshForm.value.workspace.trim() &&
+      dshForm.value.message.trim() &&
+      !running.value
+  );
+});
+const canSubmit = computed(() => (provider.value === "dsh" ? canSubmitDsh.value : canSubmitRemote.value));
+const submitLabel = computed(() => {
+  if (provider.value === "dsh") {
+    if (running.value) return "DSH 运行中";
+    return dshSessionId.value ? "继续 DSH 会话" : "开始 DSH 会话";
+  }
+  return running.value ? "运行中" : "开始评测";
+});
+const screenStatus = computed(() => (provider.value === "dsh" ? dshPhaseLabel.value : traceSummary.value.status));
+const traceAgentName = computed(() => (provider.value === "dsh" ? "DSH Runtime" : form.value.title || ""));
+const traceAgentVersion = computed(() => (provider.value === "dsh" ? dshForm.value.profile : form.value.model || ""));
 
 const findings = computed<Finding[]>(() => judge.value?.findings || []);
-const liveGraphTrace = computed<RuntimeTrace>(() => traceFromGraph(graph.value, currentSessionId.value, form.value.title || ""));
+const liveGraphTrace = computed<RuntimeTrace>(() =>
+  traceFromGraph(graph.value, currentSessionId.value, traceAgentName.value, traceAgentVersion.value)
+);
 const activeTrace = computed<RuntimeTrace>(() => {
   if (!trace.value) return liveGraphTrace.value;
   if (traceSource.value === "initial" && liveGraphTrace.value.spans.length > trace.value.spans.length) {
@@ -205,6 +301,296 @@ function handleLiveEvent(item: { event: string; payload: any }) {
     }
   }
 }
+
+async function loadDshOptions() {
+  try {
+    const options = await fetchDshOptions();
+    dshOptions.value = options;
+    dshOptionsError.value = "";
+    dshForm.value.profile = options.dsh.profiles[0] || "";
+    dshForm.value.workspace = options.dsh.workspaces[0] || "";
+    dshForm.value.timeout = Number(options.dsh.default_timeout_seconds || 300);
+  } catch (err) {
+    dshOptionsError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    dshOptionsLoaded.value = true;
+  }
+}
+
+function selectProvider(next: RuntimeProviderId) {
+  if (running.value || provider.value === next) return;
+  if (next === "dsh" && !dshEnabled.value) return;
+  provider.value = next;
+  resetRuntimePanels();
+}
+
+function resetRuntimePanels() {
+  logs.value = [];
+  graph.value = { nodes: [], edges: [], current_node: null };
+  trace.value = null;
+  traceSource.value = "initial";
+  selectedSpanId.value = "";
+  collapsedSpanIds.value = new Set();
+  audit.value = null;
+  error.value = "";
+}
+
+async function submitActive() {
+  if (provider.value === "dsh") {
+    await startDshTurn();
+    return;
+  }
+  await startEvaluation();
+}
+
+async function startDshTurn() {
+  if (!canSubmitDsh.value) return;
+  if (!dshSessionId.value) resetRuntimePanels();
+  running.value = true;
+  error.value = "";
+  judge.value = null;
+  pendingClarify.value = null;
+  pendingApproval.value = null;
+  pendingChatInteraction.value = null;
+  dshPhase.value = "running";
+  const payload = {
+    message: dshForm.value.message.trim(),
+    workspace: dshForm.value.workspace.trim(),
+    profile: dshForm.value.profile,
+    session_id: dshSessionId.value || null,
+    acceptance_criteria: dshForm.value.acceptance_criteria.trim(),
+    timeout: Number(dshForm.value.timeout || dshOptions.value?.dsh.default_timeout_seconds || 300)
+  };
+  try {
+    await streamDshChat(payload, handleDshEvent);
+    await reloadRuns();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    if (dshPhase.value === "running") dshPhase.value = "failed";
+  } finally {
+    running.value = false;
+    dshOperationId.value = "";
+  }
+}
+
+async function stopDshTurn() {
+  if (!dshOperationId.value || !running.value) return;
+  dshPhase.value = "stopping";
+  try {
+    await cancelDshChat(dshOperationId.value);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function newDshSession() {
+  if (running.value) return;
+  dshSessionId.value = "";
+  dshOperationId.value = "";
+  dshStream.value = [];
+  dshPhase.value = "idle";
+  currentSessionId.value = "";
+  resetRuntimePanels();
+}
+
+function handleDshEvent(item: LiveEvent) {
+  appendLog(item.event, item.payload);
+  if (item.event === "run_started") {
+    dshOperationId.value = String(item.payload.operation_id || "");
+    applyDshSessionId(item.payload.session_id);
+    dshPhase.value = "running";
+    return;
+  }
+  if (item.event === "agent_event") {
+    applyDshSessionId(item.payload.session_id);
+    const runtimeEvent = item.payload.event as DshRuntimeEvent | undefined;
+    if (runtimeEvent) appendDshRuntimeEvent(runtimeEvent);
+    return;
+  }
+  if (item.event === "graph_update") {
+    graph.value = item.payload.graph || graph.value;
+    return;
+  }
+  if (item.event === "trace_update") {
+    trace.value = item.payload.trace || trace.value;
+    traceSource.value = "session";
+    if (!selectedSpanId.value && trace.value?.spans.length) {
+      selectedSpanId.value = attentionSpanId() || trace.value.spans[0].spanId;
+    }
+    return;
+  }
+  if (item.event === "audit_update") {
+    audit.value = item.payload.audit || null;
+    return;
+  }
+  if (item.event === "run_finished") {
+    finalRun.value = item.payload.run || null;
+    dshPhase.value = "imported";
+    return;
+  }
+  if (item.event === "error") {
+    const payload = item.payload as DshChatErrorPayload;
+    if (payload.cancelled) {
+      dshPhase.value = "cancelled";
+    } else if (payload.timed_out) {
+      dshPhase.value = "timeout";
+    } else {
+      dshPhase.value = "failed";
+    }
+    error.value = payload.stage
+      ? `${payload.stage}: ${payload.detail || JSON.stringify(payload)}`
+      : payload.detail || JSON.stringify(payload);
+    pushDshStream({
+      kind: "error",
+      title: DSH_PHASE_LABELS[dshPhase.value],
+      detail: payload.detail || JSON.stringify(payload)
+    });
+  }
+}
+
+function applyDshSessionId(value: unknown) {
+  const sessionId = typeof value === "string" ? value.trim() : "";
+  if (!sessionId) return;
+  dshSessionId.value = sessionId;
+  currentSessionId.value = sessionId;
+}
+
+function appendDshRuntimeEvent(event: DshRuntimeEvent) {
+  const data = event.data || {};
+  if (event.type === "session") {
+    const sessionId = String(data.session_id || "");
+    const cwd = String(data.cwd || "");
+    pushDshStream({
+      kind: "status",
+      title: "会话已建立",
+      detail: `session: ${sessionId}${cwd ? `\ncwd: ${cwd}` : ""}`
+    });
+    return;
+  }
+  if (event.type === "status") {
+    const phase = String(event.phase || "");
+    pushDshStream({
+      kind: "status",
+      title: DSH_STATUS_PHASE_LABELS[phase] || "状态更新",
+      detail: compact(data)
+    });
+    return;
+  }
+  if (event.type === "thinking") {
+    pushDshStream({ kind: "thinking", title: "思考", detail: String(data.text || ""), expanded: false });
+    return;
+  }
+  if (event.type === "text") {
+    pushDshStream({ kind: "text", title: "助手输出", detail: String(data.text || "") });
+    return;
+  }
+  if (event.type === "tool_call") {
+    pushDshStream({
+      kind: "tool_call",
+      title: String(data.tool || "tool"),
+      detail: formatJson(data.input),
+      callId: String(data.call_id || "")
+    });
+    return;
+  }
+  if (event.type === "tool_result") {
+    pushDshStream({
+      kind: "tool_result",
+      title: String(data.call_id || "tool result"),
+      detail: String(data.result ?? ""),
+      status: String(data.status || ""),
+      callId: String(data.call_id || "")
+    });
+    return;
+  }
+  if (event.type === "final") {
+    pushDshStream({ kind: "final", title: "最终回答", detail: String(data.text || "") });
+    return;
+  }
+  if (event.type === "error") {
+    pushDshStream({
+      kind: "error",
+      title: String(data.code || "error"),
+      detail: String(data.message || "DSH 报告了执行错误")
+    });
+    return;
+  }
+  pushDshStream({
+    kind: "status",
+    title: event.source_type || String(event.type),
+    detail: compact(data)
+  });
+}
+
+function pushDshStream(item: { kind: DshStreamKind; title: string; detail: string; status?: string; callId?: string; expanded?: boolean }) {
+  dshStream.value.push({
+    index: dshStream.value.length + 1,
+    kind: item.kind,
+    title: item.title,
+    detail: item.detail,
+    status: item.status,
+    callId: item.callId,
+    expanded: item.expanded ?? true
+  });
+}
+
+function toggleDshItem(item: DshStreamItem) {
+  item.expanded = !item.expanded;
+}
+
+function dshKindLabel(kind: DshStreamKind) {
+  return DSH_KIND_LABELS[kind] || kind;
+}
+
+function buildDshDiagnosis() {
+  if (dshPhase.value === "cancelled") {
+    return {
+      kind: "failed",
+      title: "运行已取消",
+      message: "本地 DSH 回合已被停止，没有导入运行结果。可以修改 prompt 后重新开始。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (dshPhase.value === "failed" || dshPhase.value === "timeout") {
+    return {
+      kind: "failed",
+      title: dshPhaseLabel.value,
+      message: error.value || "本地 DSH 回合未完成，请查看对话流中的错误事件。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (running.value || dshPhase.value === "running" || dshPhase.value === "stopping") {
+    return {
+      kind: "running",
+      title: dshPhaseLabel.value,
+      message: "正在消费本地 DSH 事件流，思考、工具调用和结果会实时出现在对话流中。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  if (dshPhase.value === "imported" || dshPhase.value === "judged") {
+    return {
+      kind: "success",
+      title: dshPhaseLabel.value,
+      message: finalRun.value
+        ? `已从 DSH 会话导入运行 ${finalRun.value.name}，可打开运行查看确定性审计，或触发 Agent Judge。`
+        : "DSH 会话已导入运行。",
+      recommendedResponse: "",
+      actionLabel: ""
+    };
+  }
+  return {
+    kind: "idle",
+    title: "等待开始本地 DSH 会话",
+    message: "选择后端授权的工作目录与 profile 后发送 prompt；本地 DSH 会话结束后会导入为可审计的 run。",
+    recommendedResponse: "",
+    actionLabel: ""
+  };
+}
+
+onMounted(loadDshOptions);
 
 function selectSpan(span: RuntimeSpan) {
   selectedSpanId.value = span.spanId;
@@ -455,6 +841,9 @@ async function runAgentJudge() {
   try {
     const result = await apiPost<{ report: JudgeReport }>(`/api/runs/${encodeURIComponent(finalRun.value.name)}/judge`);
     judge.value = result.report;
+    if (provider.value === "dsh" && dshPhase.value === "imported") {
+      dshPhase.value = "judged";
+    }
     await reloadRuns();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -469,6 +858,12 @@ async function openFinalRun() {
   }
 }
 
+async function openTrajectory() {
+  if (finalRun.value?.name) {
+    await router.push({ name: "trajectory", params: { runId: finalRun.value.name } });
+  }
+}
+
 async function normalizedPayload(): Promise<LiveEvaluatePayload> {
   return {
     ...form.value,
@@ -476,7 +871,7 @@ async function normalizedPayload(): Promise<LiveEvaluatePayload> {
     user_id: form.value.user_id.trim(),
     token: form.value.token?.trim() || undefined,
     model: form.value.model?.trim() || undefined,
-    title: form.value.title?.trim() || "agentloop runtime evaluation",
+    title: form.value.title?.trim() || "auditrail runtime evaluation",
     skill: form.value.skill?.trim() || undefined,
     message: form.value.message.trim(),
     acceptance_criteria: form.value.acceptance_criteria.trim(),
@@ -540,6 +935,8 @@ function compact(payload: any): string {
 }
 
 function buildRuntimeDiagnosis() {
+  // 本地 DSH 是通用运行时：不使用远程 agent 的 PPT 续跑启发式。
+  if (provider.value === "dsh") return buildDshDiagnosis();
   if (pendingChatInteraction.value) {
     const recommended = pendingChatInteraction.value.recommended_response || "继续";
     return {
@@ -701,7 +1098,7 @@ function flattenTrace(spans: RuntimeSpan[], collapsed: Set<string>) {
   return rows;
 }
 
-function traceFromGraph(runtimeGraph: RuntimeGraph, sessionId: string, agentName: string): RuntimeTrace {
+function traceFromGraph(runtimeGraph: RuntimeGraph, sessionId: string, agentName: string, agentVersion: string): RuntimeTrace {
   const spans = runtimeGraph.nodes.map((node, index) => spanFromGraphNode(node, index, runtimeGraph));
   const failed = spans.some((span) => normalizeTraceStatus(span.status) === "failed");
   const hasRunning = spans.some((span) => normalizeTraceStatus(span.status) === "running");
@@ -709,7 +1106,7 @@ function traceFromGraph(runtimeGraph: RuntimeGraph, sessionId: string, agentName
     traceId: sessionId || "live-preview",
     sessionId,
     agentName: agentName || "Agent Runtime",
-    agentVersion: form.value.model || "",
+    agentVersion: agentVersion || "",
     startTime: spans[0]?.startTime || "",
     endTime: spans[spans.length - 1]?.endTime || "",
     status: running.value || hasRunning ? "running" : failed ? "failed" : spans.length ? "success" : "pending",
@@ -864,14 +1261,17 @@ function spanMetric(span: RuntimeSpan) {
       <div class="hero-copy">
         <p class="eyebrow">Runtime evaluation</p>
         <h2>运行时评测</h2>
-        <p class="lede">输入 prompt 和 Agent Judge 验收标准，实时观察 skill/tool 流程并保存评测运行。</p>
+        <p class="lede">选择远程 Agent 或本地 DSH 运行时，实时观察思考、工具调用与状态事件，并把会话保存为可审计的 run。</p>
       </div>
       <div class="hero-actions">
-        <button class="primary" type="button" :disabled="!canSubmit" @click="startEvaluation">
-          {{ running ? "运行中" : "开始评测" }}
+        <button class="primary" type="button" :disabled="!canSubmit" @click="submitActive">
+          {{ submitLabel }}
         </button>
         <button class="ghost" type="button" :disabled="!finalRun" @click="openFinalRun">
           打开运行
+        </button>
+        <button class="ghost" type="button" :disabled="!finalRun" @click="openTrajectory">
+          查看轨迹
         </button>
       </div>
     </header>
@@ -880,30 +1280,53 @@ function spanMetric(span: RuntimeSpan) {
 
     <section class="ops-bar reveal" aria-label="Live evaluation context">
       <div class="ops-left">
-        <span class="filter-pill active">Live trace</span>
-        <span class="filter-pill">输入</span>
-        <span class="filter-pill">交互</span>
-        <span class="filter-pill">事件</span>
+        <span class="filter-pill" :class="{ active: provider === 'remote' }">远程 Agent</span>
+        <span class="filter-pill" :class="{ active: provider === 'dsh' }">Local DSH</span>
+        <span class="filter-pill active">{{ provider === "dsh" ? "本地事件流" : "Live trace" }}</span>
       </div>
       <div class="ops-right">
         <span class="context-token">session: {{ currentSessionId || "not started" }}</span>
-        <span class="context-token">status: {{ traceSummary.status }}</span>
+        <span class="context-token">status: {{ screenStatus }}</span>
       </div>
     </section>
 
     <section class="live-grid reveal">
-      <form class="panel live-form" @submit.prevent="startEvaluation">
+      <form class="panel live-form" @submit.prevent="submitActive">
         <div class="panel-head">
           <h3>评测输入</h3>
           <span class="chip quiet">{{ running ? "streaming" : "ready" }}</span>
         </div>
+        <div class="provider-switch" role="radiogroup" aria-label="运行时提供方">
+          <button
+            type="button"
+            class="provider-option"
+            :class="{ active: provider === 'remote' }"
+            :aria-pressed="provider === 'remote'"
+            :disabled="running"
+            @click="selectProvider('remote')"
+          >
+            远程 Agent
+          </button>
+          <button
+            type="button"
+            class="provider-option"
+            :class="{ active: provider === 'dsh' }"
+            :aria-pressed="provider === 'dsh'"
+            :disabled="running || !dshEnabled"
+            @click="selectProvider('dsh')"
+          >
+            Local DSH
+          </button>
+        </div>
+
+        <template v-if="provider === 'remote'">
         <label>
           <span>服务器地址</span>
           <input v-model="form.base_url" type="url" placeholder="http://192.168.1.238:8788" required />
         </label>
         <label>
           <span>用户 ID</span>
-          <input v-model="form.user_id" type="text" placeholder="agentloop-test" required />
+          <input v-model="form.user_id" type="text" placeholder="auditrail-test" required />
         </label>
         <div class="form-row">
           <label>
@@ -969,6 +1392,67 @@ function spanMetric(span: RuntimeSpan) {
         <button class="primary wide" type="submit" :disabled="!canSubmit">
           {{ running ? "正在消费事件" : "发送给 agent" }}
         </button>
+        </template>
+
+        <template v-else>
+        <p v-if="!dshOptionsLoaded" class="dsh-hint">正在读取后端授权清单…</p>
+        <p v-else-if="!dshEnabled" class="banner error">
+          {{ dshDisabledReason || "本地 DSH 运行时未启用" }}
+        </p>
+        <p v-if="dshOptionsError" class="banner error">{{ dshOptionsError }}</p>
+        <label>
+          <span>Profile（后端授权）</span>
+          <select v-model="dshForm.profile" :disabled="running">
+            <option v-for="item in dshProfiles" :key="item" :value="item">{{ item }}</option>
+          </select>
+        </label>
+        <label v-if="dshWorkspaces.length">
+          <span>工作目录（后端授权）</span>
+          <select v-model="dshForm.workspace" :disabled="running">
+            <option v-for="item in dshWorkspaces" :key="item" :value="item">{{ item }}</option>
+          </select>
+        </label>
+        <label v-else>
+          <span>工作目录（必须位于授权根目录内）</span>
+          <input v-model="dshForm.workspace" type="text" list="dsh-workspace-roots" placeholder="/path/to/project" />
+          <datalist id="dsh-workspace-roots">
+            <option v-for="item in dshWorkspaceRoots" :key="item" :value="item" />
+          </datalist>
+        </label>
+        <label>
+          <span>超时秒数（上限 {{ dshMaxTimeout }}）</span>
+          <input v-model.number="dshForm.timeout" type="number" min="1" :max="dshMaxTimeout" step="1" />
+        </label>
+        <label>
+          <span>Prompt</span>
+          <textarea
+            v-model="dshForm.message"
+            rows="5"
+            placeholder="描述要本地 DSH 执行的任务，例如：运行相关测试并解释失败原因"
+            required
+          />
+        </label>
+        <label>
+          <span>Agent Judge 验收标准</span>
+          <textarea
+            v-model="dshForm.acceptance_criteria"
+            rows="5"
+            placeholder="- 相关测试通过&#10;- 结论必须能回指证据"
+          />
+        </label>
+        <div class="dsh-actions">
+          <button class="primary wide" type="submit" :disabled="!canSubmit">
+            {{ running ? "DSH 运行中" : dshSessionId ? "继续 DSH 会话" : "发送给本地 DSH" }}
+          </button>
+          <button class="ghost" type="button" :disabled="running || !dshSessionId" @click="newDshSession">
+            新建会话
+          </button>
+          <button class="danger" type="button" :disabled="!running || !dshOperationId" @click="stopDshTurn">
+            停止
+          </button>
+        </div>
+        <p class="dsh-hint">session: {{ dshSessionId || "新会话（发送后由 DSH 分配）" }}</p>
+        </template>
       </form>
 
       <section class="panel graph-panel">
@@ -1129,11 +1613,52 @@ function spanMetric(span: RuntimeSpan) {
             </article>
           </section>
         </div>
-        <p v-else class="empty">开始评测后，这里会实时显示 agent trace、LLM 调用、skill/tool 结果和时间线。</p>
+        <p v-else class="empty">
+          {{ provider === "dsh" ? "开始本地 DSH 会话后，这里会显示来自后端投影的运行时 trace。" : "开始评测后，这里会实时显示 agent trace、LLM 调用、skill/tool 结果和时间线。" }}
+        </p>
       </section>
     </section>
 
-    <section v-if="pendingClarify || pendingApproval || pendingChatInteraction" class="interaction-grid reveal">
+    <section v-if="provider === 'dsh'" class="panel dsh-panel reveal">
+      <div class="panel-head">
+        <h3>DSH 对话流</h3>
+        <div class="dsh-panel-actions">
+          <span class="chip" :data-status="dshPhase">{{ dshPhaseLabel }}</span>
+          <button class="ghost small" type="button" :disabled="running || !dshSessionId" @click="newDshSession">
+            新建会话
+          </button>
+          <button class="danger small" type="button" :disabled="!running || !dshOperationId" @click="stopDshTurn">
+            停止
+          </button>
+        </div>
+      </div>
+      <div v-if="dshStream.length" class="chat-stream">
+        <article v-for="item in dshStream" :key="item.index" class="chat-item" :class="item.kind">
+          <header class="chat-item-head">
+            <span class="chat-kind">{{ dshKindLabel(item.kind) }}</span>
+            <strong>{{ item.title }}</strong>
+            <span v-if="item.status" class="chat-status" :data-status="item.status">{{ item.status }}</span>
+            <span v-if="item.callId" class="chat-call">{{ item.callId }}</span>
+            <button
+              v-if="item.kind === 'thinking'"
+              class="ghost small"
+              type="button"
+              @click="toggleDshItem(item)"
+            >
+              {{ item.expanded ? "收起思考" : "展开思考" }}
+            </button>
+          </header>
+          <pre v-if="item.kind !== 'thinking' || item.expanded">{{ item.detail }}</pre>
+          <p v-else class="chat-collapsed">思考内容默认折叠（{{ item.detail.length }} 字符）</p>
+        </article>
+      </div>
+      <p v-else class="empty">发送 prompt 后，这里会按顺序显示 thinking、助手文本、工具调用 / 结果、状态与错误事件。</p>
+    </section>
+
+    <section
+      v-if="provider === 'remote' && (pendingClarify || pendingApproval || pendingChatInteraction)"
+      class="interaction-grid reveal"
+    >
       <div v-if="pendingChatInteraction" class="panel interaction-card">
         <div class="panel-head">
           <h3>同会话继续</h3>
@@ -1197,6 +1722,14 @@ function spanMetric(span: RuntimeSpan) {
         </div>
         <dl class="judge-meta">
           <div>
+            <dt>提供方</dt>
+            <dd>{{ provider === "dsh" ? "Local DSH" : "远程 Agent" }}</dd>
+          </div>
+          <div v-if="provider === 'dsh'">
+            <dt>DSH 状态</dt>
+            <dd :data-status="dshPhase">{{ dshPhaseLabel }}</dd>
+          </div>
+          <div>
             <dt>Run</dt>
             <dd>{{ finalRun?.name || "-" }}</dd>
           </div>
@@ -1214,6 +1747,10 @@ function spanMetric(span: RuntimeSpan) {
           </div>
         </dl>
         <p class="report">{{ judge?.summary || "运行完成后可触发 Agent Judge，按自然语言验收标准生成证据化判断。" }}</p>
+        <div v-if="finalRun" class="dsh-actions">
+          <button class="ghost small" type="button" @click="openFinalRun">打开运行（审计）</button>
+          <button class="ghost small" type="button" @click="openTrajectory">查看轨迹</button>
+        </div>
         <ul v-if="findings.length" class="findings">
           <li v-for="(finding, index) in findings" :key="index">
             <span class="severity" :data-level="String(finding.severity || '').toLowerCase()">

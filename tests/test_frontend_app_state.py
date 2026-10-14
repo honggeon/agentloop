@@ -131,6 +131,64 @@ def test_live_eval_can_auto_continue_confirmations():
     assert "auto_continue?: boolean" in api_source
 
 
+def test_live_eval_is_provider_aware_for_dsh_workbench():
+    source = LIVE_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    # provider 类型与 DSH SSE 契约集中在 api.ts
+    assert "RuntimeProviderId" in api_source
+    assert "export interface DshOptions" in api_source
+    assert "export interface DshChatPayload" in api_source
+    assert "export interface DshRuntimeEvent" in api_source
+    assert "/api/dsh/options" in api_source
+    assert "/api/dsh/chat" in api_source
+    assert "fetchDshOptions" in api_source
+    assert "streamDshChat" in api_source
+    assert "cancelDshChat" in api_source
+
+    # 只呈现后端批准的 profile / workspace 选项
+    assert "provider-switch" in source
+    assert "Local DSH" in source
+    assert "selectProvider" in source
+    assert "dshEnabled" in source
+    assert "Profile（后端授权）" in source
+    assert "工作目录（后端授权）" in source
+    assert "工作目录（必须位于授权根目录内）" in source
+
+    # DSH 模式只显示本地字段：远程连接项被隐藏
+    assert """<template v-if="provider === 'remote'">""" in source
+    assert "<template v-else>" in source
+    assert "provider === 'remote' && (pendingClarify" in source
+
+    # 停止 / 新建会话 / 继续会话
+    assert "stopDshTurn" in source
+    assert "newDshSession" in source
+    assert "继续 DSH 会话" in source
+
+    # 事件流渲染：thinking 默认折叠，工具调用与结果分行展示
+    assert "DSH 对话流" in source
+    assert "tool_call" in source
+    assert "tool_result" in source
+    assert "chat-collapsed" in source
+    assert "思考内容默认折叠" in source
+    assert "appendDshRuntimeEvent" in source
+
+    # 区分已取消 / 失败 / 已导入 / 已评测
+    assert '"cancelled"' in source
+    assert '"cancelled";' in source
+    assert "已取消" in source
+    assert "已导入运行" in source
+    assert "已评测" in source
+
+    # 导入的 run 可跳转到审计与轨迹视图
+    assert "openTrajectory" in source
+    assert 'name: "trajectory"' in source
+    assert "打开运行（审计）" in source
+
+    # 通用 DSH 会话不启用 PPT 续跑启发式
+    assert 'provider.value === "dsh") return buildDshDiagnosis()' in source
+
+
 def test_live_eval_route_and_sidebar_entry_exist():
     router_source = ROUTER.read_text(encoding="utf-8")
     app_source = APP_VUE.read_text(encoding="utf-8")

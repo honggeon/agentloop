@@ -529,6 +529,101 @@ def test_get_batch_summary(tmp_path, monkeypatch):
     assert data["runs"][0]["failure_root_cause"] == "tool: Dependency wall"
 
 
+def test_dashboard_register_roundtrip_and_env_hint(tmp_path, monkeypatch):
+    settings = Settings(runs_dir=tmp_path / "runs", frontend_port=5999)
+    monkeypatch.setattr("backend.app.routes.dashboard.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    # 未注册时回退到 FRONTEND_PORT 提示
+    assert client.get("/api/dashboard").json()["url"] == "http://127.0.0.1:5999"
+
+    # 注册后返回实际地址，且 0.0.0.0 归一化为 127.0.0.1
+    registered = client.post("/api/dashboard/register", json={"url": "http://0.0.0.0:5111/"}).json()
+    assert registered["url"] == "http://127.0.0.1:5111"
+    assert client.get("/api/dashboard").json()["url"] == "http://127.0.0.1:5111"
+    assert (tmp_path / "runs" / ".dashboard.json").exists()
+
+
+def test_dashboard_register_rejects_invalid_url(tmp_path, monkeypatch):
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.dashboard.get_settings", lambda: settings)
+    client = TestClient(app)
+
+    assert client.post("/api/dashboard/register", json={"url": "ftp://x"}).status_code == 400
+    assert client.post("/api/dashboard/register", json={"url": "http://localhost"}).status_code == 400
+    assert client.post("/api/dashboard/register", json={}).status_code == 400
+
+
+def test_dsh_options_reports_disabled_runtime(tmp_path, monkeypatch):
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
+
+    data = TestClient(app).get("/api/dsh/options").json()
+
+    assert [item["id"] for item in data["providers"]] == ["remote", "dsh"]
+    assert data["providers"][0]["enabled"] is True
+    assert data["providers"][1]["enabled"] is False
+    assert data["dsh"]["enabled"] is False
+    assert data["dsh"]["disabled_reason"] == "local DSH runtime is disabled"
+    assert data["dsh"]["profiles"] == []
+    assert data["dsh"]["workspace_roots"] == []
+    assert data["dsh"]["workspaces"] == []
+
+
+def test_dsh_options_lists_approved_profiles_and_workspaces(tmp_path, monkeypatch):
+    root = tmp_path / "allowed"
+    (root / "project").mkdir(parents=True)
+    (root / "other").mkdir()
+    (root / ".hidden").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        dsh_runtime_enabled=True,
+        dsh_binary=tmp_path / "bin" / "dsh",
+        dsh_allowed_profiles=("headless", "review"),
+        dsh_allowed_workspace_roots=(root,),
+        dsh_default_timeout_seconds=120,
+        dsh_max_timeout_seconds=600,
+        dsh_max_concurrency=2,
+    )
+    monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
+
+    response = TestClient(app).get("/api/dsh/options")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["providers"][1]["enabled"] is True
+    assert data["providers"][1]["disabled_reason"] is None
+    assert data["dsh"]["enabled"] is True
+    assert data["dsh"]["disabled_reason"] is None
+    assert data["dsh"]["profiles"] == ["headless", "review"]
+    assert data["dsh"]["workspace_roots"] == [str(root.resolve())]
+    assert data["dsh"]["workspaces"] == [str((root / "other").resolve()), str((root / "project").resolve())]
+    assert data["dsh"]["default_timeout_seconds"] == 120
+    assert data["dsh"]["max_timeout_seconds"] == 600
+    assert data["dsh"]["max_concurrency"] == 2
+    assert str(settings.dsh_binary) not in response.text
+
+
+def test_dsh_options_reports_invalid_runtime_configuration(tmp_path, monkeypatch):
+    settings = Settings(
+        runs_dir=tmp_path / "runs",
+        dsh_runtime_enabled=True,
+        dsh_binary=None,
+        dsh_allowed_profiles=("headless",),
+        dsh_allowed_workspace_roots=(tmp_path / "allowed",),
+    )
+    monkeypatch.setattr("backend.app.routes.dsh.get_settings", lambda: settings)
+
+    data = TestClient(app).get("/api/dsh/options").json()
+
+    assert data["dsh"]["enabled"] is False
+    assert data["dsh"]["disabled_reason"] == "DSH_BINARY is required when local DSH runtime is enabled"
+    assert data["dsh"]["profiles"] == []
+
+
 def test_import_remote_session_writes_run(tmp_path, monkeypatch):
     runs_dir = tmp_path / "runs"
     settings = Settings(runs_dir=runs_dir)

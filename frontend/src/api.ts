@@ -416,6 +416,95 @@ export interface LiveEvent {
   payload: any;
 }
 
+// 运行时提供方：远程 Agent HTTP 服务，或本机 DSH Headless 运行时。
+export type RuntimeProviderId = "remote" | "dsh";
+
+export interface DshProviderInfo {
+  id: string;
+  enabled: boolean;
+  disabled_reason?: string | null;
+}
+
+// GET /api/dsh/options 返回的后端授权清单：只有这里列出的 profile / workspace
+// 才会被后端接受，前端不得自行拼出其它取值。
+export interface DshOptions {
+  providers: DshProviderInfo[];
+  dsh: {
+    enabled: boolean;
+    disabled_reason?: string | null;
+    profiles: string[];
+    workspace_roots: string[];
+    workspaces: string[];
+    default_timeout_seconds: number;
+    max_timeout_seconds: number;
+    max_concurrency: number;
+  };
+}
+
+export interface DshChatPayload {
+  message: string;
+  workspace: string;
+  profile: string;
+  session_id?: string | null;
+  acceptance_criteria?: string;
+  timeout?: number;
+}
+
+export type DshRuntimeEventType =
+  | "session"
+  | "status"
+  | "thinking"
+  | "text"
+  | "tool_call"
+  | "tool_result"
+  | "final"
+  | "error"
+  | "unknown";
+
+// 与 auditrail.dsh_runtime.DshRuntimeEvent.to_dict() 一致。
+export interface DshRuntimeEvent {
+  type: DshRuntimeEventType | string;
+  data: Record<string, any>;
+  phase?: string;
+  source_type?: string;
+  truncated?: boolean;
+}
+
+export interface DshAgentEventPayload {
+  operation_id: string;
+  session_id?: string | null;
+  event: DshRuntimeEvent;
+}
+
+export interface DshChatErrorPayload {
+  code: string;
+  detail: string;
+  stage: string;
+  operation_id?: string;
+  session_id?: string | null;
+  cancelled?: boolean;
+  timed_out?: boolean;
+}
+
+export interface DshCancelResult {
+  ok: boolean;
+  operation_id: string;
+  session_id?: string | null;
+  state: string;
+}
+
+export function fetchDshOptions(): Promise<DshOptions> {
+  return apiGet<DshOptions>("/api/dsh/options");
+}
+
+export function streamDshChat(payload: DshChatPayload, onEvent: (event: LiveEvent) => void): Promise<void> {
+  return streamPostJson("/api/dsh/chat", payload, onEvent);
+}
+
+export function cancelDshChat(operationId: string): Promise<DshCancelResult> {
+  return apiPost<DshCancelResult>(`/api/dsh/chat/${encodeURIComponent(operationId)}/cancel`);
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`);
   if (!response.ok) {
