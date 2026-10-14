@@ -7,11 +7,14 @@ from auditrail import cli
 from auditrail.dsh_source import (
     build_session_response,
     events_to_messages,
+    find_acp_session_file,
     find_session_file,
     list_sessions,
     read_events,
     session_info,
+    session_log_path,
     source_meta,
+    validate_acp_session_id,
     validate_session_id,
     _model_of,
 )
@@ -165,6 +168,71 @@ def test_find_session_file(tmp_path):
         find_session_file(tmp_path, "..", None)
     with pytest.raises(ValueError):
         find_session_file(tmp_path, SESSION_ID, "../escape")
+
+
+def _write_generation(dsh_home, session_id, filename, workspace_dir="--Users-test-project--"):
+    path = dsh_home / "sessions" / workspace_dir / session_id / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = "\n".join(json.dumps(event, ensure_ascii=False) for event in _events())
+    path.write_bytes(zstandard.ZstdCompressor().compress(payload.encode("utf-8")))
+    return path
+
+
+def test_session_log_path_finds_every_format_generation(tmp_path):
+    zero = _write_generation(tmp_path, SESSION_ID, "session.jsonl.zstd")
+    assert session_log_path(zero.parent) == zero
+
+    four = _write_generation(tmp_path, SESSION_ID, "session.v4.jsonl.zstd")
+    assert session_log_path(four.parent) == four
+
+    # A directory that still holds both generations resolves to the newest one.
+    assert session_log_path(zero.parent) == four
+    corrupted = zero.parent / "session.jsonl.zstd.corrupt-bak-20260906"
+    corrupted.write_bytes(b"")
+    assert session_log_path(zero.parent) == four
+    assert session_log_path(zero.parent / "missing") is None
+
+
+def test_find_session_file_reads_the_current_format_generation(tmp_path):
+    path = _write_generation(tmp_path, SESSION_ID, "session.v4.jsonl.zstd")
+
+    assert find_session_file(tmp_path, SESSION_ID) == path
+    assert find_session_file(tmp_path, SESSION_ID, "--Users-test-project--") == path
+    assert [item["session_id"] for item in list_sessions(tmp_path)] == [SESSION_ID]
+
+
+def test_validate_acp_session_id():
+    acp_id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    assert validate_acp_session_id(acp_id) == acp_id
+    # Headless root ids are a different shape and must not be accepted here.
+    for bad in ("", "../etc", "session-%s" % acp_id, "foo/bar", SESSION_ID, None):
+        with pytest.raises(ValueError):
+            validate_acp_session_id(bad)
+
+
+def test_find_acp_session_file_uses_the_opaque_uuid(tmp_path):
+    acp_id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    path = _write_generation(tmp_path, acp_id, "session.v4.jsonl.zstd")
+
+    assert find_acp_session_file(tmp_path, acp_id) == path
+    assert find_acp_session_file(tmp_path, acp_id, "--Users-test-project--") == path
+    with pytest.raises(FileNotFoundError):
+        find_acp_session_file(tmp_path, "11111111-2222-4333-8444-555555555555")
+    with pytest.raises(ValueError):
+        find_acp_session_file(tmp_path, SESSION_ID)
+    with pytest.raises(ValueError):
+        find_acp_session_file(tmp_path, "..")
+    with pytest.raises(ValueError):
+        find_acp_session_file(tmp_path, acp_id, "../escape")
+
+
+def test_find_acp_session_file_rejects_ambiguous_workspaces(tmp_path):
+    acp_id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    _write_generation(tmp_path, acp_id, "session.v4.jsonl.zstd", workspace_dir="--Users-first--")
+    _write_generation(tmp_path, acp_id, "session.jsonl.zstd", workspace_dir="--Users-second--")
+
+    with pytest.raises(FileNotFoundError):
+        find_acp_session_file(tmp_path, acp_id)
 
 
 def test_events_to_messages_mapping():

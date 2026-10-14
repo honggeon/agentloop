@@ -456,6 +456,18 @@ def _run_dir(root: Path, session_id: str) -> Path:
     return root / ("%s-%s" % (stamp, session_id))
 
 
+def _available_run_dir(base: Path) -> Path:
+    """Return ``base`` or the first free ``-N`` suffix; never overwrite a run."""
+    if not base.exists():
+        return base
+    suffix = 2
+    while True:
+        candidate = base.with_name("%s-%s" % (base.name, suffix))
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
 def _compact(payload) -> str:
     text = json.dumps(payload, ensure_ascii=False, default=str)
     return text[:300] + "..." if len(text) > 300 else text

@@ -17,7 +17,7 @@ from typing import Any, AsyncIterator, Iterable
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from auditrail.cli import _run_dir, _write_run_outputs
+from auditrail.cli import _available_run_dir, _run_dir, _write_run_outputs
 from auditrail.dsh_headless import DshHeadlessClient
 from auditrail.dsh_runtime import DshExecutionResult, DshRunRequest, DshRuntimeEvent, DshValidationError, validate_request
 from auditrail.dsh_source import find_session_file, load_session_response, source_meta
@@ -451,17 +451,6 @@ def _import_durable_run(
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir)
-
-
-def _available_run_dir(base: Path) -> Path:
-    if not base.exists():
-        return base
-    suffix = 2
-    while True:
-        candidate = base.with_name("%s-%s" % (base.name, suffix))
-        if not candidate.exists():
-            return candidate
-        suffix += 1
 
 
 def _validate_resume_workspace(dsh_home: Path, request: DshRunRequest) -> None:

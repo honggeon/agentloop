@@ -61,3 +61,27 @@ def test_enabled_dsh_runtime_requires_fixed_binary():
     with pytest.raises(ValueError, match="DSH_BINARY"):
         build_dsh_runtime_config(Settings(dsh_runtime_enabled=True))
 
+
+def test_get_settings_reads_the_acp_runtime_switch(monkeypatch):
+    monkeypatch.delenv("DSH_ACP_ENABLED", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().dsh_acp_enabled is True
+    finally:
+        get_settings.cache_clear()
+
+    monkeypatch.setenv("DSH_ACP_ENABLED", "false")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().dsh_acp_enabled is False
+    finally:
+        get_settings.cache_clear()
+
+    monkeypatch.setenv("DSH_ACP_ENABLED", "sometimes")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="DSH_ACP_ENABLED"):
+            get_settings()
+    finally:
+        get_settings.cache_clear()
+

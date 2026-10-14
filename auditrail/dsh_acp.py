@@ -505,6 +505,9 @@ class _PendingRequest:
 #: Inbound request handler: return ``True`` when it claims the request.
 AcpRequestHandler = Callable[[AcpMessage, Callable[[Any], None]], bool]
 
+#: Permission listener: notified once per claimed ``session/request_permission``.
+AcpPermissionListener = Callable[["AcpPermissionRequest"], None]
+
 
 class AcpTransport:
     """Bidirectional NDJSON JSON-RPC transport over one ACP process.
@@ -1249,7 +1252,8 @@ class AcpClient:
     The client owns protocol semantics that DSH verifies (workspace, profile,
     one prompt per session) and converts ACP traffic into the shared
     ``DshRuntimeEvent`` vocabulary. It owns no process registry and no policy
-    decision: permission requests are surfaced and answered by the caller.
+    decision: permission requests are surfaced through ``on_permission`` and
+    ``pending_permissions()``, and answered by the caller.
     """
 
     def __init__(
@@ -1260,12 +1264,14 @@ class AcpClient:
         profile: str = "acp",
         client_name: str = ACP_CLIENT_NAME,
         client_version: str = ACP_CLIENT_VERSION,
+        on_permission: Optional[AcpPermissionListener] = None,
     ):
         self.transport = transport
         self.config = config
         self.profile = config.validate_profile(profile)
         self.client_name = client_name
         self.client_version = client_version
+        self.on_permission = on_permission
         self._lock = threading.Lock()
         self._sessions: dict[str, AcpSession] = {}
         self._inflight: set[str] = set()
@@ -1644,6 +1650,16 @@ class AcpClient:
         )
         with self._lock:
             self._permissions[message.request_id] = request
+        listener = self.on_permission
+        if listener is not None:
+            # The listener runs outside the client lock: a projection layer that
+            # takes its own lock must not be able to deadlock the reader thread.
+            try:
+                listener(request)
+            except Exception:
+                # A projection failure must not turn an answerable permission
+                # request into a protocol error; the request stays pending.
+                pass
         return True
 
     def _forget_permission(self, request_id: Any) -> None:

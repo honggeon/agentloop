@@ -117,6 +117,58 @@ beneath an allowed workspace root). The judge turn receives bounded run evidence
 in its prompt, gets no shell or report-writing tools, and its sessions are hidden
 from evaluand discovery.
 
+### Local DSH ACP runtime
+
+The ACP transport (ACP v1 over stdio: NDJSON framing plus JSON-RPC 2.0) powers
+interactive sessions: one long-lived `dsh --profile acp` process owned by the
+backend, with session creation/resume, prompts, streamed updates, one-shot
+permission answers, cancellation, and close. It is disabled by default and needs
+`DSH_RUNTIME_ENABLED=true` plus `DSH_ACP_ENABLED=true` (the ACP switch only, since
+binary/profile/workspace policy is the same server-owned allowlist as Headless).
+The profile is fixed to `acp`; callers never pass argv or environment. Local
+execution stays single-worker: one active prompt per session, and
+`DSH_MAX_CONCURRENCY` bounds the whole runtime.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/dsh/acp/options` | Live negotiated capabilities and the permission policy |
+| `POST /api/dsh/acp/session/new` | Create a session in an allowed workspace |
+| `POST /api/dsh/acp/session/resume` | Resume a persisted session (canonical workspace re-verified) |
+| `GET /api/dsh/acp/sessions` | Sessions this backend currently owns |
+| `POST /api/dsh/acp/prompt` (or `/session/{session_id}/prompt`) | One prompt turn, streamed as SSE |
+| `POST /api/dsh/acp/cancel` (or `/operation/{operation_id}/cancel`) | Cancel one operation |
+| `POST /api/dsh/acp/permission/respond` (or `/operation/{operation_id}/permission`) | Answer one permission request |
+| `GET /api/dsh/acp/operation/{operation_id}` | Operation state, error, and imported `run_id` |
+| `DELETE /api/dsh/acp/session/{session_id}` (or `/session/{session_id}/close`) | Close one session |
+
+`POST /api/dsh/acp/prompt` takes `{"session_id", "message", "acceptance_criteria"}`
+and returns `text/event-stream`. Validation and registry conflicts (`400` / `404`
+/ `409` / `503`) are ordinary JSON errors before the stream starts; everything
+that can only fail while streaming is an `event: error`. Events, in order:
+
+```text
+started              { operation_id, session_id }
+runtime_event        { type, data [, phase, source_type, truncated] }
+permission_requested { request_id, session_id, tool_call_id, options, operation_id }
+completed            { session_id, stop_reason, text, cancelled }
+run_imported         { run_id, session_id }
+error                { code, detail [, stage, session_id] }
+```
+
+`completed` reports the ACP turn settlement, not success: `stopReason` folds
+success and several failure modes into `end_turn`. Exactly one terminal event
+follows it. `run_imported` appears when the authoritative DSH session recording
+was imported as a run directory; an `error` with `stage="import"` means no run was
+published, the operation state is `failed`, and the session id stays available for
+recovery — a turn never looks successful without a run. `permission_requested`
+arrives while `session/prompt` is still blocked and is answered with
+`allow-once` or `reject-once`; cancel, a prompt timeout, or a client disconnect
+answers any outstanding request as cancelled so DSH is never left waiting.
+Imported runs carry `interaction_mode=auditrail-chat`, `dsh_profile=acp`,
+`session_role=evaluand`, and `expectations.json` from the request's acceptance
+criteria.
+
+
 ## Run a Deterministic Case Suite
 
 `cases/` holds machine-readable acceptance-case suites. A case declares the argv

@@ -21,6 +21,9 @@ from typing import Dict, Iterable, List, Optional
 
 import zstandard
 
+#: Version-zero generation filename. Later DSH format generations add a ``vN``
+#: component (``session.v4.jsonl.zstd``); :func:`session_log_path` finds whichever
+#: generation one session directory holds.
 SESSION_FILENAME = "session.jsonl.zstd"
 
 # Event types that carry the conversation itself; chunk streams duplicate the
@@ -29,6 +32,10 @@ _CHUNK_SUFFIXES = ("-chunks", "/chunk")
 
 _SESSION_ID_RE = re.compile(r"^session-[0-9a-fA-F-]{36}$")
 _WORKSPACE_DIR_RE = re.compile(r"^[^./\\][^/\\]*$")
+_SESSION_LOG_RE = re.compile(r"^session(?:\.v(?P<version>\d+))?\.jsonl\.zstd$")
+_UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+#: ACP root sessions are branded random UUIDs with no ``session-`` prefix.
+_ACP_SESSION_ID_RE = re.compile(r"^%s$" % _UUID_RE)
 
 
 def default_dsh_home() -> Path:
@@ -50,6 +57,35 @@ def read_events(path: Path) -> List[Dict]:
     return events
 
 
+def session_log_path(session_dir: Path) -> Optional[Path]:
+    """Return the recording inside one session directory, whatever generation.
+
+    DSH names the log after the session format generation it was created with:
+    version zero keeps ``session.jsonl.zstd``, later generations carry a ``vN``
+    component. A directory holds one generation, so the highest version wins if
+    a migration ever leaves two behind.
+    """
+    best: Optional[tuple[int, Path]] = None
+    try:
+        children = list(session_dir.iterdir())
+    except OSError:
+        return None
+    for child in children:
+        match = _SESSION_LOG_RE.match(child.name)
+        if match is None:
+            continue
+        try:
+            is_file = child.is_file()
+        except OSError:
+            continue
+        if not is_file:
+            continue
+        version = int(match.group("version") or 0)
+        if best is None or version > best[0]:
+            best = (version, child)
+    return best[1] if best is not None else None
+
+
 def iter_session_files(dsh_home: Path) -> Iterable[Path]:
     """Yield every session recording under ``<dsh_home>/sessions``."""
     sessions_root = Path(dsh_home) / "sessions"
@@ -59,8 +95,10 @@ def iter_session_files(dsh_home: Path) -> Iterable[Path]:
         if not workspace_dir.is_dir():
             continue
         for session_dir in sorted(workspace_dir.iterdir()):
-            candidate = session_dir / SESSION_FILENAME
-            if candidate.is_file():
+            if not session_dir.is_dir():
+                continue
+            candidate = session_log_path(session_dir)
+            if candidate is not None:
                 yield candidate
 
 
@@ -80,19 +118,29 @@ def validate_workspace_dir(workspace_dir: str) -> str:
     return value
 
 
-def find_session_file(dsh_home: Path, session_id: str, workspace_dir: Optional[str] = None) -> Path:
-    """Locate one session recording by id, optionally pinned to a workspace dir.
+def validate_acp_session_id(session_id: str) -> str:
+    """Reject anything that is not a bare ACP session UUID.
 
-    Raises ``ValueError`` for unsafe input and ``FileNotFoundError`` when no
-    (or, without a workspace hint, several) recordings match.
+    The ACP bridge mints session ids with ``randomUUID()`` and no prefix, so the
+    recording directory is the opaque UUID itself. Headless root sessions keep
+    their ``session-<uuid>`` name and are resolved by :func:`validate_session_id`;
+    the two shapes are deliberately not interchangeable.
     """
-    session_id = validate_session_id(session_id)
+    value = str(session_id or "").strip()
+    if not _ACP_SESSION_ID_RE.match(value):
+        raise ValueError("invalid ACP session_id: %r" % session_id)
+    return value
+
+
+def _locate_session_file(dsh_home: Path, session_id: str, workspace_dir: Optional[str]) -> Path:
+    """Find the recording of an already-validated session id."""
     sessions_root = Path(dsh_home) / "sessions"
     if workspace_dir:
-        workspace_dir = validate_workspace_dir(workspace_dir)
-        candidate = sessions_root / workspace_dir / session_id / SESSION_FILENAME
-        if not candidate.is_file():
-            raise FileNotFoundError("no DSH session recording at %s" % candidate)
+        resolved_workspace = validate_workspace_dir(workspace_dir)
+        session_dir = sessions_root / resolved_workspace / session_id
+        candidate = session_log_path(session_dir)
+        if candidate is None:
+            raise FileNotFoundError("no DSH session recording under %s" % session_dir)
         return candidate
     matches = [
         path
@@ -106,6 +154,25 @@ def find_session_file(dsh_home: Path, session_id: str, workspace_dir: Optional[s
             "multiple DSH session recordings for %s; pass workspace dir" % session_id
         )
     return matches[0]
+
+
+def find_session_file(dsh_home: Path, session_id: str, workspace_dir: Optional[str] = None) -> Path:
+    """Locate one Headless session recording by ``session-<uuid>`` id.
+
+    Raises ``ValueError`` for unsafe input and ``FileNotFoundError`` when no
+    (or, without a workspace hint, several) recordings match.
+    """
+    return _locate_session_file(dsh_home, validate_session_id(session_id), workspace_dir)
+
+
+def find_acp_session_file(dsh_home: Path, session_id: str, workspace_dir: Optional[str] = None) -> Path:
+    """Locate one ACP session recording by its opaque UUID id.
+
+    Same error contract as :func:`find_session_file`: ``ValueError`` for an id
+    that is not a bare UUID, ``FileNotFoundError`` when no (or several)
+    recordings match.
+    """
+    return _locate_session_file(dsh_home, validate_acp_session_id(session_id), workspace_dir)
 
 
 def list_sessions(dsh_home: Path, limit: Optional[int] = None) -> List[Dict]:

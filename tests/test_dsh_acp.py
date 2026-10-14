@@ -208,13 +208,13 @@ class ScriptedAcpPeer:
 def acp_env(tmp_path):
     created: list = []
 
-    def build(responder=None, *, on_frame=None, **config_overrides):
+    def build(responder=None, *, on_frame=None, on_permission=None, **config_overrides):
         config, workspace = make_config(tmp_path, **config_overrides)
         peer = ScriptedAcpPeer(responder, on_frame=on_frame)
         created.append(peer)
         process = AcpProcess(("dsh", "--profile", "acp"), peer, owns_process=False)
         transport = AcpTransport(process, max_frame_bytes=config.max_event_bytes).start()
-        client = AcpClient(transport, config, profile="acp")
+        client = AcpClient(transport, config, profile="acp", on_permission=on_permission)
         return client, transport, peer, workspace
 
     yield build
@@ -1142,6 +1142,41 @@ def test_permission_request_requires_a_decision_exactly_once(acp_env):
 
     threading.Thread(target=answer, daemon=True).start()
     client.prompt(SESSION_ID, "run it", timeout_seconds=10)
+
+
+def test_permission_listener_is_notified_once_and_cannot_break_the_protocol(acp_env):
+    seen = []
+
+    def listener(request):
+        seen.append(request)
+        raise RuntimeError("projection failed")
+
+    client, _, _, workspace = acp_env(
+        initialize_responder(permission_responder()),
+        on_permission=listener,
+    )
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    def answer():
+        assert wait_for(lambda: client.pending_permissions(), timeout=10)
+        request = client.pending_permissions()[0]
+        client.respond_permission(request.request_id, ACP_ALLOW_ONCE_OPTION_ID)
+
+    threading.Thread(target=answer, daemon=True).start()
+    outcome = client.prompt(SESSION_ID, "run it", timeout_seconds=10)
+
+    assert [request.request_id for request in seen] == ["perm-1"]
+    # A raising listener is a projection bug, not a protocol failure.
+    assert outcome.stop_reason == AcpStopReason.END_TURN
+    assert "outcome=selected" in outcome.text
+    assert client.pending_permissions() == ()
+
+
+def test_permission_listener_is_absent_by_default(acp_env):
+    client, _, _, _ = acp_env(initialize_responder(permission_responder()))
+
+    assert client.on_permission is None
 
 
 # --- normalization ----------------------------------------------------------

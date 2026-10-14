@@ -21,6 +21,7 @@ from auditrail.dsh_source import (
 )
 from auditrail.judges.base import describe_engines
 from backend.app.config import build_dsh_runtime_config, get_settings
+from backend.app.runtime_manager import PERMISSION_OPTION_IDS
 
 
 router = APIRouter(prefix="/api/dsh")
@@ -68,6 +69,16 @@ def get_dsh_options() -> dict[str, Any]:
             "default_timeout_seconds": settings.dsh_default_timeout_seconds,
             "max_timeout_seconds": settings.dsh_max_timeout_seconds,
             "max_concurrency": settings.dsh_max_concurrency,
+            "acp": {
+                "enabled": enabled and settings.dsh_acp_enabled,
+                "profile": "acp",
+                "permission_options": list(PERMISSION_OPTION_IDS),
+                "allow_always": False,
+                # Prompt capabilities (for example image support) are negotiated
+                # per connection from the live model catalog, so the static
+                # manifest points at the route that reports them.
+                "capabilities_route": "/api/dsh/acp/options",
+            },
         },
         "judge": judge_engines,
     }

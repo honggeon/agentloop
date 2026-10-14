@@ -9,6 +9,8 @@
 - `app/routes/runs.py`：run 列表、批量摘要、导入 session、删除、详情、audit/judge/charts、runtime-metrics、Markdown 导出。
 - `app/routes/judge.py`：触发 DeepAgent 裁判并写回 run 目录。
 - `app/routes/live.py`：live 评测。用 `StreamingResponse` 输出 SSE。
+- `app/routes/dsh_acp.py`：ACP 交互运行时的 HTTP/SSE 投影，复用 `app/runtime_manager.py`。
+- `app/runtime_manager.py`：长驻 ACP 进程、会话与操作注册表的唯一所有者；不 import FastAPI，路由只投影它的队列。
 
 API 前缀统一为 `/api`。环境变量集中在 `config.py`，不要在路由里直接 `os.getenv` 一套新配置。
 
