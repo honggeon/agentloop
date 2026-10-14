@@ -379,7 +379,7 @@ def load_expectations(run_path: str | Path) -> Dict:
 
 def build_agent_judge_prompt(run_path: str | Path) -> str:
     prompt = (
-        "Analyze this Agentloop run and write an evidence-backed judge report.\n"
+        "Analyze this Auditrail run and write an evidence-backed judge report.\n"
         "run_path: %s\n"
     ) % Path(run_path)
     criteria = str(load_expectations(run_path).get("acceptance_criteria") or "").strip()
@@ -390,7 +390,7 @@ def build_agent_judge_prompt(run_path: str | Path) -> str:
             "\nJudge the final outcome against these criteria. Treat deterministic audit data as factual evidence, "
             "but use Agent Judge reasoning for the natural-language acceptance criteria.\n"
         ) % criteria
-    prompt += "Return only the final JSON object matching the Agentloop judge schema."
+    prompt += "Return only the final JSON object matching the Auditrail judge schema."
     return prompt
 
 

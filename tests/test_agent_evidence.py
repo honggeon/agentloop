@@ -1,7 +1,7 @@
 import json
 
-from agentloop.agents.evidence import validate_judge_evidence
-from agentloop.agents.schemas import normalize_judge_report
+from auditrail.agents.evidence import validate_judge_evidence
+from auditrail.agents.schemas import normalize_judge_report
 
 
 def _write_evidence_run(tmp_path):

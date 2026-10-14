@@ -1,24 +1,24 @@
-# dsh-agentloop · DSH 上的 Agentloop 评测插件
+# dsh-auditrail · DSH 上的 Auditrail 评测插件
 
-把 [agentloop](https://github.com/)（本仓库）接入 DeepSeek Harness：在 DSH Web
+把 [auditrail](https://github.com/)（本仓库）接入 DeepSeek Harness：在 DSH Web
 **侧边栏底部**放一个「菜单」按钮，点击弹出纵向菜单，内含「设置」（转发打开
 shell 原生设置面板）、「切换皮肤」（展开 dsh-skin-nebula 的皮肤菜单，原右上角
 悬浮按钮随之隐藏）和「Agent测评」三个按钮。「Agent测评」点击后在**中间栏
 （conversation 列）区域内**打开评测面板——不遮挡侧边栏，Esc 或 ✕ 关闭。
-面板列出本机 DSH 录制的 agent 会话，一键导入 agentloop 做**确定性工具审计**，
+面板列出本机 DSH 录制的 agent 会话，一键导入 auditrail 做**确定性工具审计**，
 并且**指标直接在面板内展示**——审计概览、审计发现、工具调用明细、阶段划分、
 轨迹预览，以及 DeepAgent 裁判的 13 维评分（裁判需模型凭据，可选运行）。
-也可以从面板跳转 agentloop 看板看完整报告。
+也可以从面板跳转 auditrail 看板看完整报告。
 
 ## 工作原理
 
 ```
 ~/.dsh/sessions/<workspace>/<session>/session.jsonl.zstd   (DSH 落盘的事件流)
-        │  agentloop.dsh_source（zstd 解压 + 事件 → 消息映射）
+        │  auditrail.dsh_source（zstd 解压 + 事件 → 消息映射）
         ▼
 runs/<run_id>/  (session.json / trajectory.jsonl / summary.json / audit.json …)
         ▲
-agentloop FastAPI 后端  GET /api/dsh/sessions · POST /api/dsh/import
+auditrail FastAPI 后端  GET /api/dsh/sessions · POST /api/dsh/import
         ▲  HTTP（本插件 client bundle 直接 fetch）
 DSH 侧边栏「菜单」→「Agent测评」→ shell.overlay 全屏面板（本插件，纯客户端，Host 侧空操作）
 ```
@@ -32,14 +32,14 @@ DSH 侧边栏「菜单」→「Agent测评」→ shell.overlay 全屏面板（�
   CSS 变量重定位到菜单按钮上方。`shell.overlay`（框架级浮层）承载
   面板，面板矩形通过 `ResizeObserver` 跟踪中间栏（`[class*='centerCol']`）
   的视口位置，只覆盖中间栏区域，侧边栏保持可见可用。
-- 审计、裁判、看板完全复用 agentloop 现有能力，插件只做入口。
-- 数据流走 agentloop 后端 HTTP API，因此 **不需要改 DSH 源码**，也不依赖
+- 审计、裁判、看板完全复用 auditrail 现有能力，插件只做入口。
+- 数据流走 auditrail 后端 HTTP API，因此 **不需要改 DSH 源码**，也不依赖
   DSH 的 host remote 机制；CORS 已默认放行 `http://127.0.0.1:3080`。
 
 ## 安装
 
 ```bash
-# 1. 启动 agentloop 后端（本仓库根目录）
+# 1. 启动 auditrail 后端（本仓库根目录）
 ./start.sh
 
 # 2. 安装插件到 DSH web profile
@@ -72,7 +72,7 @@ install.sh 会把本目录作为 file: 依赖装进 `~/.dsh/profiles/web` 并把
    - 「展开轨迹」查看完整消息轨迹
    - DeepAgent 裁判：未裁判时可点「运行裁判」（调用 LLM），已裁判则展示
      总体结论、完成度得分和 13 个评测维度的状态/得分条
-6. 每行的「外部看板」链接可跳到 agentloop 完整看板（图表、Markdown 导出等）。
+6. 每行的「外部看板」链接可跳到 auditrail 完整看板（图表、Markdown 导出等）。
 7. Esc 或右上角 ✕ 关闭面板。
 
 ## 命令行等价用法
@@ -81,11 +81,11 @@ install.sh 会把本目录作为 file: 依赖装进 `~/.dsh/profiles/web` 并把
 
 ```bash
 # 列出本机 DSH 会话
-python3 -m agentloop.cli list-dsh-sessions
+python3 -m auditrail.cli list-dsh-sessions
 
 # 导入某个会话为 run（随后可 render-run / judge-run）
-python3 -m agentloop.cli import-dsh-session --session-id session-<uuid>
-python3 -m agentloop.cli judge-run --run runs/<run-dir>
+python3 -m auditrail.cli import-dsh-session --session-id session-<uuid>
+python3 -m auditrail.cli judge-run --run runs/<run-dir>
 ```
 
 ## 开发迭代

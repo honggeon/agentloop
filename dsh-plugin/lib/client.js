@@ -1,5 +1,5 @@
 /**
- * dsh-agentloop — client bundle.
+ * dsh-auditrail — client bundle.
  *
  * 入口形态：侧边栏底部的「菜单」按钮（sidebar.footer.action 插槽）。点击弹出
  * 纵向菜单（position:fixed，按按钮视口矩形定位），内含「设置」「切换皮肤」
@@ -9,17 +9,17 @@
  * 「Agent测评」通过 shell.overlay 插槽在中间栏（centerCol）区域打开评测面板
  * （不遮挡侧边栏；Esc 或 ✕ 关闭）。
  *
- * 面板内容：列出本机 DSH 录制的会话，一键导入 agentloop 做确定性审计；
+ * 面板内容：列出本机 DSH 录制的会话，一键导入 auditrail 做确定性审计；
  * 指标直接展示——审计概览、发现、工具调用明细、阶段划分、轨迹预览，
  * 以及（可选）DeepAgent 裁判的 13 维评分。
  *
- * 数据来源：agentloop FastAPI 后端（默认 http://127.0.0.1:18080）。
+ * 数据来源：auditrail FastAPI 后端（默认 http://127.0.0.1:18080）。
  *
  * Bundle format: `window.__ModuleLoader__.load({ id, factory })` — the exact
  * shape the client-modules host half serves at `/plugins/<id>/client.js`.
  */
 window.__ModuleLoader__.load({
-  id: "dsh-agentloop",
+  id: "dsh-auditrail",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
@@ -36,16 +36,16 @@ window.__ModuleLoader__.load({
     // =====================================================================
 
     /** Dictionary namespace owned by this plugin. */
-    var NS = "agentloop";
+    var NS = "auditrail";
 
     /** Services required by the slot registrations. */
     var inject = ["slots", "locale"];
 
     /** localStorage key for the connection config. */
-    var LS_KEY = "dsh-agentloop:v1";
+    var LS_KEY = "dsh-auditrail:v1";
 
     /** localStorage key for the remote-agent connection config. */
-    var LS_REMOTE_KEY = "dsh-agentloop-remote:v1";
+    var LS_REMOTE_KEY = "dsh-auditrail-remote:v1";
 
     var DEFAULT_CONFIG = {
       apiBase: "http://127.0.0.1:18080",
@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * 评测维度中文标签。key 必须以 agentloop.agents.schemas.DIMENSION_DEFINITIONS
+     * 评测维度中文标签。key 必须以 auditrail.agents.schemas.DIMENSION_DEFINITIONS
      * 为准（本映射只是展示层副本）。
      */
     var DIMENSION_LABELS = {
@@ -79,9 +79,9 @@ window.__ModuleLoader__.load({
       settingsItem: "设置",
       skinItem: "切换皮肤",
       appsItem: "Agent测评",
-      panelTitle: "Agentloop · DSH Agent 评测",
+      panelTitle: "Auditrail · DSH Agent 评测",
       close: "关闭",
-      desc: "把本机 DeepSeek Harness 录制的会话导入 agentloop，做确定性工具审计与轨迹分析；指标直接在本页展示。需要先启动 agentloop 后端（agentloop 仓库下 ./start.sh）。",
+      desc: "把本机 DeepSeek Harness 录制的会话导入 auditrail，做确定性工具审计与轨迹分析；指标直接在本页展示。需要先启动 auditrail 后端（auditrail 仓库下 ./start.sh）。",
       apiBase: "后端地址",
       dashboardBase: "看板地址",
       save: "保存",
@@ -131,7 +131,7 @@ window.__ModuleLoader__.load({
       judgeTitle: "DeepAgent 裁判",
       judgeRun: "运行裁判（调用 LLM，耗时较长）",
       judging: "裁判运行中…",
-      judgeMissing: "尚未运行裁判。裁判需要模型凭据（在 agentloop 的 .env 中配置）。",
+      judgeMissing: "尚未运行裁判。裁判需要模型凭据（在 auditrail 的 .env 中配置）。",
       judgeOverall: "总体结论",
       judgeScore: "完成度得分",
       dimTitle: "评测维度",
@@ -160,9 +160,9 @@ window.__ModuleLoader__.load({
       settingsItem: "Settings",
       skinItem: "Switch skin",
       appsItem: "Agent Eval",
-      panelTitle: "Agentloop · DSH Agent Evaluation",
+      panelTitle: "Auditrail · DSH Agent Evaluation",
       close: "Close",
-      desc: "Import locally recorded DeepSeek Harness sessions into agentloop for deterministic tool auditing; metrics render right here. Requires the agentloop backend (./start.sh in the agentloop repo).",
+      desc: "Import locally recorded DeepSeek Harness sessions into auditrail for deterministic tool auditing; metrics render right here. Requires the auditrail backend (./start.sh in the auditrail repo).",
       apiBase: "Backend URL",
       dashboardBase: "Dashboard URL",
       save: "Save",
@@ -212,7 +212,7 @@ window.__ModuleLoader__.load({
       judgeTitle: "DeepAgent judge",
       judgeRun: "Run judge (calls an LLM, slow)",
       judging: "Judge running…",
-      judgeMissing: "Judge has not run yet. It needs model credentials (configured in agentloop's .env).",
+      judgeMissing: "Judge has not run yet. It needs model credentials (configured in auditrail's .env).",
       judgeOverall: "Overall",
       judgeScore: "Completion score",
       dimTitle: "Dimensions",
@@ -531,7 +531,7 @@ window.__ModuleLoader__.load({
       ].join("\n");
       var tag = window.document.createElement("style");
       tag.textContent = css;
-      tag.setAttribute("data-dsh-agentloop", "1");
+      tag.setAttribute("data-dsh-auditrail", "1");
       window.document.head.appendChild(tag);
       return tag;
     }
@@ -689,7 +689,7 @@ window.__ModuleLoader__.load({
     // panel content (config + sessions + runs + metrics detail)
     // =====================================================================
 
-    function AgentLoopPanel(props) {
+    function AuditrailPanel(props) {
       var t = props.t;
 
       var cfgPair = useState(loadConfig);
@@ -1399,7 +1399,7 @@ window.__ModuleLoader__.load({
             onClick: function () { setPanelOpen(false); },
           }, "✕")),
         h("div", { className: "al-overlay-body" },
-          h(AgentLoopPanel, { t: t })),
+          h(AuditrailPanel, { t: t })),
       );
     }
 
@@ -1411,12 +1411,12 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(function () {
         return ctx.locale.register(NS, { zh: zh, en: en });
-      }, "agentloop: dictionaries");
+      }, "auditrail: dictionaries");
       var styleTag = injectCss();
       ctx.slots.inject("sidebar.footer.action", function () {
         return ctx.slots.register({
           name: "sidebar.footer.action",
-          id: "agentloop",
+          id: "auditrail",
           order: 10,
           locale: NS,
           inject: function () { return { t: ctx.locale.bind(NS) }; },
@@ -1425,7 +1425,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject("shell.overlay", function () {
         return ctx.slots.register({
           name: "shell.overlay",
-          id: "agentloop",
+          id: "auditrail",
           order: 10,
           locale: NS,
           inject: function () { return { t: ctx.locale.bind(NS) }; },

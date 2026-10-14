@@ -6,11 +6,11 @@ This project can display exact LLM token and latency metrics when the agent serv
 
 ```text
 agent service LLM client
-  -> agentloop metrics proxy
+  -> auditrail metrics proxy
   -> local model /chat/completions
   -> response.usage
   -> proxy JSONL log
-  -> agentloop import-llm-calls
+  -> auditrail import-llm-calls
   -> runs/<run_id>/llm_calls.json
   -> dashboard runtime metrics
 ```
@@ -102,7 +102,7 @@ or:
 }
 ```
 
-Agentloop accepts both `llm_calls` and `llmCalls`.
+Auditrail accepts both `llm_calls` and `llmCalls`.
 
 ## No-Code Proxy Path
 
@@ -111,32 +111,32 @@ Use this path when `xuanjian-agent` code cannot be modified.
 Start the proxy on the agent host:
 
 ```bash
-uv run agentloop metrics-proxy \
+uv run auditrail metrics-proxy \
   --upstream-base-url http://127.0.0.1:7500/v1 \
   --host 127.0.0.1 \
   --port 7600 \
   --log runs/proxy-llm-calls.jsonl
 ```
 
-If the remote host does not have `uv`, install-free startup is also supported after copying this repository to `/home/newuser/agentloop`:
+If the remote host does not have `uv`, install-free startup is also supported after copying this repository to `/home/newuser/auditrail`:
 
 ```bash
-cd /home/newuser/agentloop
+cd /home/newuser/auditrail
 mkdir -p runs
-nohup env PYTHONPATH=/home/newuser/agentloop \
-  python3 -m agentloop.cli metrics-proxy \
+nohup env PYTHONPATH=/home/newuser/auditrail \
+  python3 -m auditrail.cli metrics-proxy \
   --upstream-base-url http://127.0.0.1:7500/v1 \
   --host 127.0.0.1 \
   --port 7600 \
-  --log /home/newuser/agentloop/runs/proxy-llm-calls.jsonl \
-  > /home/newuser/agentloop/runs/metrics-proxy.out 2>&1 &
-echo $! > /home/newuser/agentloop/runs/metrics-proxy.pid
+  --log /home/newuser/auditrail/runs/proxy-llm-calls.jsonl \
+  > /home/newuser/auditrail/runs/metrics-proxy.out 2>&1 &
+echo $! > /home/newuser/auditrail/runs/metrics-proxy.pid
 ```
 
 Stop the background proxy with:
 
 ```bash
-kill "$(cat /home/newuser/agentloop/runs/metrics-proxy.pid)"
+kill "$(cat /home/newuser/auditrail/runs/metrics-proxy.pid)"
 ```
 
 Point the agent's OpenAI-compatible base URL at the proxy:
@@ -154,7 +154,7 @@ proxy http://127.0.0.1:7600/v1 -> model http://127.0.0.1:7500/v1
 After a test run has been exported into `runs/<run_id>`, import the captured calls:
 
 ```bash
-uv run agentloop import-llm-calls \
+uv run auditrail import-llm-calls \
   --run runs/<run_id> \
   --log runs/proxy-llm-calls.jsonl
 ```
@@ -162,16 +162,16 @@ uv run agentloop import-llm-calls \
 For automatic import during `fetch-session`, `smoke-chat`, and dashboard live evaluation, configure the dashboard/backend process with:
 
 ```env
-AGENTLOOP_LLM_PROXY_LOG=newuser@192.168.0.64:/home/newuser/agentloop/runs/proxy-llm-calls.jsonl
+AUDITRAIL_LLM_PROXY_LOG=newuser@192.168.0.64:/home/newuser/auditrail/runs/proxy-llm-calls.jsonl
 ```
 
 Local file paths are also supported:
 
 ```env
-AGENTLOOP_LLM_PROXY_LOG=/home/newuser/agentloop/runs/proxy-llm-calls.jsonl
+AUDITRAIL_LLM_PROXY_LOG=/home/newuser/auditrail/runs/proxy-llm-calls.jsonl
 ```
 
-When this variable is set, Agentloop imports only the proxy calls whose `startTime` falls inside the run's `session.created_at` / `session.updated_at` window, with a small clock-skew allowance. This prevents older test calls from being mixed into a new run.
+When this variable is set, Auditrail imports only the proxy calls whose `startTime` falls inside the run's `session.created_at` / `session.updated_at` window, with a small clock-skew allowance. This prevents older test calls from being mixed into a new run.
 
 This writes:
 
@@ -231,7 +231,7 @@ Expected impact:
 
 - One extra local HTTP hop, usually a small latency increase.
 - If the proxy process is down, text model calls through `OPENAI_BASE_URL` fail.
-- Token data becomes per-call and exportable into Agentloop.
+- Token data becomes per-call and exportable into Auditrail.
 - CloudManager usage still only reflects traffic that actually goes through CloudManager or LiteLLM; local `xuanjian-agent` calls are captured by the proxy log instead.
 
 Rollback is:

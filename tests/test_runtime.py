@@ -1,6 +1,6 @@
 import json
 
-from agentloop.runtime import build_runtime_graph, build_runtime_trace, load_expectations, save_expectations
+from auditrail.runtime import build_runtime_graph, build_runtime_trace, load_expectations, save_expectations
 
 
 def test_build_runtime_graph_projects_skill_tool_and_final_nodes():

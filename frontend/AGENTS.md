@@ -1,6 +1,6 @@
 # frontend/ — Vue 看板
 
-本目录是评测看板 UI。后端 API 在 `backend/`，run 文件契约和维度 key 在 `agentloop/`。跨层总规则见仓库根 `AGENTS.md`。
+本目录是评测看板 UI。后端 API 在 `backend/`，run 文件契约和维度 key 在 `auditrail/`。跨层总规则见仓库根 `AGENTS.md`。
 
 ## 技术栈
 
@@ -27,7 +27,7 @@ Vue 3 + TypeScript + Vite + Vue Router + ECharts / `vue-echarts`。页面和布�
 ## UI 与契约
 
 - 界面文案保持中文。
-- 维度 `unknown` 显示为「未评估」，不要当成失败或 0 分。`RunView.vue` 可用本地 `DIMENSION_LABELS`，但 key 必须与 `agentloop.agents.schemas.DIMENSION_DEFINITIONS` 一致。
+- 维度 `unknown` 显示为「未评估」，不要当成失败或 0 分。`RunView.vue` 可用本地 `DIMENSION_LABELS`，但 key 必须与 `auditrail.agents.schemas.DIMENSION_DEFINITIONS` 一致。
 - 环境变量只用 `import.meta.env.VITE_API_BASE_URL`。`vite.config.ts` 的 `envDir: ".."` 复用仓库根 `.env`，不要再引入一套前端 env 文件。
 
 ## 验证

@@ -10,10 +10,10 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Response
 
-from agentloop.cli import _run_dir, _source_meta, _write_run_outputs
-from agentloop.agents.schemas import render_dimensions_markdown, render_reliability_markdown
-from agentloop.agents.tools import build_chart_data, list_runs, load_audit, load_run_summary
-from agentloop.client import AgentClient
+from auditrail.cli import _run_dir, _source_meta, _write_run_outputs
+from auditrail.agents.schemas import render_dimensions_markdown, render_reliability_markdown
+from auditrail.agents.tools import build_chart_data, list_runs, load_audit, load_run_summary
+from auditrail.client import AgentClient
 from backend.app.config import get_settings, resolve_run_path
 
 

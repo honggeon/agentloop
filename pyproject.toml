@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentloop"
+name = "auditrail"
 version = "0.1.0"
 description = "Black-box trajectory collection and audit tool for xuanjian-agent."
 requires-python = ">=3.11,<4.0"
@@ -25,10 +25,10 @@ agent = [
 ]
 
 [project.scripts]
-agentloop = "agentloop.cli:main"
+auditrail = "auditrail.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["agentloop*"]
+include = ["auditrail*"]
 exclude = ["runs*", "tests*", "docs*"]
 
 [tool.pytest.ini_options]

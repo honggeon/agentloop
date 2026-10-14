@@ -306,7 +306,7 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
 def render_judge_markdown(report: Dict[str, Any]) -> str:
     normalized = normalize_judge_report(report)
     lines = [
-        "# Agentloop Agent Judge",
+        "# Auditrail Agent Judge",
         "",
         "## Summary",
         "",

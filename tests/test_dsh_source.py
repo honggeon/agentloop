@@ -3,8 +3,8 @@ import json
 import pytest
 import zstandard
 
-from agentloop import cli
-from agentloop.dsh_source import (
+from auditrail import cli
+from auditrail.dsh_source import (
     build_session_response,
     events_to_messages,
     find_session_file,

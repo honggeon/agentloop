@@ -12,7 +12,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
  */
 function dashboardRegister(apiTarget: string): Plugin {
   return {
-    name: "agentloop-dashboard-register",
+    name: "auditrail-dashboard-register",
     configureServer(server) {
       const http = server.httpServer;
       if (!http) return;
@@ -49,7 +49,7 @@ function dashboardRegister(apiTarget: string): Plugin {
  */
 function dashboardLauncher(): Plugin {
   return {
-    name: "agentloop-dashboard-launcher",
+    name: "auditrail-dashboard-launcher",
     configureServer(server) {
       server.middlewares.use("/__launcher/start", (req, res) => {
         res.setHeader("Content-Type", "application/json; charset=utf-8");

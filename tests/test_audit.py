@@ -1,4 +1,4 @@
-from agentloop.audit import audit_messages, render_markdown_report
+from auditrail.audit import audit_messages, render_markdown_report
 
 
 def test_audit_flags_missing_tool_result():

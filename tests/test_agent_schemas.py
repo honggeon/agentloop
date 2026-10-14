@@ -1,6 +1,6 @@
 import json
 
-from agentloop.agents.schemas import (
+from auditrail.agents.schemas import (
     extract_json_object,
     normalize_judge_report,
     render_judge_markdown,
@@ -232,10 +232,10 @@ def test_extract_json_object_falls_back_to_report_shaped_body_without_status():
 def test_extract_json_object_from_unknown_envelope_key():
     # Models sometimes wrap the report in an envelope whose nesting key is not
     # one of the well-known ones (observed: deepseek emits {"schema_version":
-    # "agentloop-judge/1.0", "judge_report": {...}}).
+    # "auditrail-judge/1.0", "judge_report": {...}}).
     payload = {"overall_status": "partial", "completion_score": 42, "confidence": "low", "summary": "ok"}
     envelope = {
-        "schema_version": "agentloop-judge/1.0",
+        "schema_version": "auditrail-judge/1.0",
         "run_path": "runs/x",
         "judge_report": payload,
     }
@@ -341,7 +341,7 @@ def test_render_judge_markdown_includes_evidence():
     )
 
     markdown = render_judge_markdown(report)
-    assert "# Agentloop Agent Judge" in markdown
+    assert "# Auditrail Agent Judge" in markdown
     assert "最终回答没有交付物" in markdown
     assert "session.json#20" in markdown
 

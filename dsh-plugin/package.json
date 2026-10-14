@@ -1,7 +1,7 @@
 {
-  "name": "dsh-agentloop",
+  "name": "dsh-auditrail",
   "version": "0.1.0",
-  "description": "Agentloop 评测面板：在 DSH 设置页中导入本机 DSH 会话并用 agentloop 审计/评测",
+  "description": "Auditrail 评测面板：在 DSH 设置页中导入本机 DSH 会话并用 auditrail 审计/评测",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

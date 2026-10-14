@@ -1,8 +1,8 @@
 import json
 
-from agentloop.agents.dimensions import assess_dimensions
-from agentloop.agents.evidence import validate_judge_evidence
-from agentloop.agents.schemas import normalize_judge_report
+from auditrail.agents.dimensions import assess_dimensions
+from auditrail.agents.evidence import validate_judge_evidence
+from auditrail.agents.schemas import normalize_judge_report
 
 
 def _write_tool_run(tmp_path, status="ok"):

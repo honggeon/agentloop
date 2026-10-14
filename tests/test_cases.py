@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agentloop.cases import (
+from auditrail.cases import (
     evaluate_case,
     load_suite,
     render_report_markdown,

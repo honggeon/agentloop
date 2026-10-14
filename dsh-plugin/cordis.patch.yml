@@ -1,6 +1,6 @@
-# dsh-agentloop bundle patch: registers the agentloop evaluator entry.
+# dsh-auditrail bundle patch: registers the auditrail evaluator entry.
 # Install with: dsh plugin --profile web add <this-package-path>
 # or append the insert block to the profile's cordis.patch.yml.
 - insert:
-    - id: agentloop
-      name: 'dsh-agentloop'
+    - id: auditrail
+      name: 'dsh-auditrail'

@@ -2,7 +2,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from agentloop.client import AgentLoopHTTPError
+from auditrail.client import AuditrailHTTPError
 from backend.app.config import Settings
 from backend.app.main import app
 
@@ -33,7 +33,7 @@ def test_live_evaluate_streams_graph_and_persists_run(tmp_path, monkeypatch):
             assert user_id == "u1"
             assert token == "secret"
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -121,7 +121,7 @@ def test_live_evaluate_uploads_files_and_starts_skill(tmp_path, monkeypatch):
             assert base_url == "http://agent.example"
             assert user_id == "u1"
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             assert title == "ppt job"
             return {"session": {"session_id": "s1"}}
 
@@ -178,7 +178,7 @@ def test_live_evaluate_marks_plain_confirmation_as_interaction(tmp_path, monkeyp
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -220,7 +220,7 @@ def test_live_evaluate_marks_continue_prompt_as_interaction(tmp_path, monkeypatc
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -370,7 +370,7 @@ def test_live_evaluate_detects_tool_call_limit_wording(tmp_path, monkeypatch):
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -418,7 +418,7 @@ def test_live_evaluate_auto_continues_confirmation(tmp_path, monkeypatch):
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -498,7 +498,7 @@ def test_live_evaluate_auto_continue_stops_at_limit(tmp_path, monkeypatch):
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
@@ -548,11 +548,11 @@ def test_live_evaluate_reports_failed_remote_stage(monkeypatch):
         def __init__(self, base_url, user_id, token=None, timeout=60.0):
             pass
 
-        def create_session(self, title="agentloop smoke test", model=""):
+        def create_session(self, title="auditrail smoke test", model=""):
             return {"session": {"session_id": "s1"}}
 
         def start_chat(self, session_id, message, model=None, max_turns=20):
-            raise AgentLoopHTTPError(502, "upstream unavailable")
+            raise AuditrailHTTPError(502, "upstream unavailable")
 
     monkeypatch.setattr("backend.app.routes.live.AgentClient", FakeAgentClient)
     client = TestClient(app)

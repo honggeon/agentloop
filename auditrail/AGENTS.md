@@ -1,4 +1,4 @@
-# agentloop/ — 核心逻辑层
+# auditrail/ — 核心逻辑层
 
 本目录是黑盒采集、确定性审计、运行时图/trace、LLM proxy 和 DeepAgent 裁判的实现层。看板 HTTP 装配在 `backend/`，Web UI 在 `frontend/`。跨层总规则见仓库根 `AGENTS.md`。
 
@@ -19,7 +19,7 @@
 - 禁止 `import backend` 或依赖 Web app / FastAPI 路由状态。
 - 确定性路径（`client`、`trajectory`、`audit`、`runtime`、`llm_proxy` 的记录/转发逻辑、`agents/schemas|evidence|dimensions|tools`）不得要求模型凭据，不得要求安装 `.[agent]`。
 - `agents/agent.py` 可延迟导入 `deepagents` / `langchain` / `langgraph`。缺依赖时抛明确 `RuntimeError`，不要静默降级成假报告。
-- 外部 HTTP 失败必须显式暴露（如 `AgentLoopHTTPError`），不要吞掉。
+- 外部 HTTP 失败必须显式暴露（如 `AuditrailHTTPError`），不要吞掉。
 
 ## 裁判契约
 

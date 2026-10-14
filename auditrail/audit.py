@@ -134,7 +134,7 @@ def infer_phases(messages: Iterable[Dict], tool_details: Optional[List[Dict]] = 
 
 def render_markdown_report(summary: Dict, audit: Dict) -> str:
     lines = [
-        "# Agentloop Tool Audit",
+        "# Auditrail Tool Audit",
         "",
         "## Session",
         "",
@@ -235,7 +235,7 @@ def _is_tool_error(message: Dict, content: str) -> bool:
 
     DSH tool-result blocks carry an explicit ``isError`` marker (mapped to
     ``is_error`` by ``dsh_source``); the content heuristic misfires on text
-    that merely *mentions* errors (stack traces in test output, agentloop's
+    that merely *mentions* errors (stack traces in test output, auditrail's
     own source code being read, PASS logs). Sources without the flag (e.g.
     xuanjian sessions) keep the heuristic.
     """

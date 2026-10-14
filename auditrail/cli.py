@@ -22,7 +22,7 @@ from .runtime import build_agent_judge_prompt
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="agentloop")
+    parser = argparse.ArgumentParser(prog="auditrail")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     fetch = subparsers.add_parser("fetch-session", help="Fetch an existing session and export trajectory files.")
@@ -121,7 +121,7 @@ def _fetch_session(args) -> int:
 
 def _smoke_chat(args) -> int:
     client = AgentClient(args.base_url, args.user_id, token=args.token, timeout=args.timeout)
-    created = client.create_session(title="agentloop smoke test", model=args.model)
+    created = client.create_session(title="auditrail smoke test", model=args.model)
     session = created.get("session") or {}
     session_id = session.get("session_id")
     if not session_id:
@@ -157,7 +157,7 @@ def _render_run(args) -> int:
         print("render-run only rebuilds reports from an existing run directory.", file=sys.stderr)
         print("First fetch the session, for example:", file=sys.stderr)
         print(
-            "  python3 -m agentloop.cli fetch-session --base-url http://192.168.1.238:8788 --user-id agentloop-test --session-id %s"
+            "  python3 -m auditrail.cli fetch-session --base-url http://192.168.1.238:8788 --user-id auditrail-test --session-id %s"
             % session_id,
             file=sys.stderr,
         )
@@ -196,7 +196,7 @@ def _judge_run(args) -> int:
             print("Missing %s" % path, file=sys.stderr)
             return 2
 
-    thread_id = args.thread_id or "agentloop-judge-%s" % run_dir.name
+    thread_id = args.thread_id or "auditrail-judge-%s" % run_dir.name
     messages = [
         {
             "role": "user",

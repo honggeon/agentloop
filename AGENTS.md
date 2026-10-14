@@ -1,10 +1,10 @@
-# AGENTS.md - agentloop Agent 工程规范
+# AGENTS.md - auditrail Agent 工程规范
 
-本文档面向在 `agentloop` 仓库中工作的 AI 编码代理。它只记录长期稳定、跨任务适用的项目级规则；一次性实施计划、阶段性设计和详细背景放在 `docs/` 或具体任务说明中。
+本文档面向在 `auditrail` 仓库中工作的 AI 编码代理。它只记录长期稳定、跨任务适用的项目级规则；一次性实施计划、阶段性设计和详细背景放在 `docs/` 或具体任务说明中。
 
 ## Project Overview
 
-`agentloop` 是面向 `xuanjian-agent` 的黑盒轨迹采集、确定性审计和评测看板工具。项目不侵入目标 agent 服务，而是通过其 HTTP API 采集会话，归一化运行轨迹，并基于真实运行产物进行工具审计、DeepAgent 裁判和 Web 展示。
+`auditrail` 是面向 `xuanjian-agent` 的黑盒轨迹采集、确定性审计和评测看板工具。项目不侵入目标 agent 服务，而是通过其 HTTP API 采集会话，归一化运行轨迹，并基于真实运行产物进行工具审计、DeepAgent 裁判和 Web 展示。
 
 一次运行以 `runs/<run_id>/` 下的文件为契约。常见产物包括：
 
@@ -34,12 +34,12 @@ python3 -m pytest -q
 cd frontend && npm run build
 ./start.sh
 ./start.sh status
-python3 -m agentloop.cli fetch-session --base-url http://HOST:8788 --user-id ID --session-id SID
-python3 -m agentloop.cli smoke-chat --base-url http://HOST:8788 --user-id ID --message "..."
-python3 -m agentloop.cli render-run --run runs/<run-dir>
-python3 -m agentloop.cli judge-run --run runs/<run-dir>
-python3 -m agentloop.cli metrics-proxy --upstream-base-url http://HOST:PORT/v1
-python3 -m agentloop.cli import-llm-calls --run runs/<run-dir> --log runs/proxy-llm-calls.jsonl
+python3 -m auditrail.cli fetch-session --base-url http://HOST:8788 --user-id ID --session-id SID
+python3 -m auditrail.cli smoke-chat --base-url http://HOST:8788 --user-id ID --message "..."
+python3 -m auditrail.cli render-run --run runs/<run-dir>
+python3 -m auditrail.cli judge-run --run runs/<run-dir>
+python3 -m auditrail.cli metrics-proxy --upstream-base-url http://HOST:PORT/v1
+python3 -m auditrail.cli import-llm-calls --run runs/<run-dir> --log runs/proxy-llm-calls.jsonl
 ```
 
 `frontend/node_modules/` 已被忽略。若缺依赖且需要联网安装，先确认再执行 `npm install`。
@@ -47,8 +47,8 @@ python3 -m agentloop.cli import-llm-calls --run runs/<run-dir> --log runs/proxy-
 ## Repository Structure
 
 ```text
-agentloop/
-  agentloop/                 # 核心 Python 包
+auditrail/
+  auditrail/                 # 核心 Python 包
     cli.py                   # CLI：采集、冒烟、重渲染、裁判、LLM 指标代理、调用导入
     client.py                # 黑盒 HTTP 客户端 AgentClient，基于 urllib
     trajectory.py            # 会话响应到 summary / trajectory / JSON(JSONL)
@@ -72,7 +72,7 @@ agentloop/
 
 ## Architecture Rules
 
-- `agentloop/` 是核心逻辑层。不要从核心包 import `backend`，不要让确定性采集、审计、schema 归一化依赖 Web app 状态。
+- `auditrail/` 是核心逻辑层。不要从核心包 import `backend`，不要让确定性采集、审计、schema 归一化依赖 Web app 状态。
 - 后端只做 HTTP 装配、输入校验和核心函数复用。不要在 `backend/` 重写采集、审计、裁判或 Markdown 渲染规则。
 - 按 `run_id` 访问运行目录时，必须通过 `backend.app.config.resolve_run_path` 或同等路径校验，拒绝 `..`、路径分隔符和越界访问。
 - `runs/<run_id>/` 文件是跨 CLI、后端、前端和裁判的共享契约。新增字段必须向后兼容已有报告。
@@ -82,17 +82,17 @@ agentloop/
 
 ## Core Module Responsibilities
 
-- `agentloop.client.AgentClient`：封装目标 agent API，包括 session、chat SSE、文件上传、澄清和审批响应。保持黑盒 HTTP 客户端定位。
-- `agentloop.trajectory`：从原始 session 响应提取消息、LLM 调用、摘要和归一化轨迹。写 JSON/JSONL 时使用结构化序列化。
-- `agentloop.audit`：基于消息和工具调用做确定性审计，包括缺失 tool result、孤儿 tool result、工具错误、危险工具和 final answer 检查。
-- `agentloop.runtime`：构建运行时图和 trace，保存验收标准，组装 judge prompt。
-- `agentloop.agents.schemas`：维护裁判报告 schema、维度定义、归一化和 Markdown 渲染。
-- `agentloop.agents.evidence`、`dimensions`：确定性验证裁判证据和维度评分/封顶。
-- `agentloop.agents.tools`：DeepAgent 可调用工具，工具函数要有稳定签名和 docstring。
+- `auditrail.client.AgentClient`：封装目标 agent API，包括 session、chat SSE、文件上传、澄清和审批响应。保持黑盒 HTTP 客户端定位。
+- `auditrail.trajectory`：从原始 session 响应提取消息、LLM 调用、摘要和归一化轨迹。写 JSON/JSONL 时使用结构化序列化。
+- `auditrail.audit`：基于消息和工具调用做确定性审计，包括缺失 tool result、孤儿 tool result、工具错误、危险工具和 final answer 检查。
+- `auditrail.runtime`：构建运行时图和 trace，保存验收标准，组装 judge prompt。
+- `auditrail.agents.schemas`：维护裁判报告 schema、维度定义、归一化和 Markdown 渲染。
+- `auditrail.agents.evidence`、`dimensions`：确定性验证裁判证据和维度评分/封顶。
+- `auditrail.agents.tools`：DeepAgent 可调用工具，工具函数要有稳定签名和 docstring。
 
 ## Agent / Judge Contract
 
-DeepAgent 裁判由 1 个主 agent 和 4 个子智能体组成，定义在 `agentloop/agents/agent.py` 与 `agentloop/agents/subagents.py`：
+DeepAgent 裁判由 1 个主 agent 和 4 个子智能体组成，定义在 `auditrail/agents/agent.py` 与 `auditrail/agents/subagents.py`：
 
 - `trajectory_analyst`：轨迹、阶段流转、完成信号、上下文断点。
 - `tool_auditor`：工具调用、错误、重试、危险操作、恢复情况。
@@ -102,7 +102,7 @@ DeepAgent 裁判由 1 个主 agent 和 4 个子智能体组成，定义在 `agen
 约束：
 
 - 子智能体描述保持简短，`tests/test_agent_graph.py` 断言长度小于 120。
-- 提示词集中在 `agentloop/agents/prompts.py`，当前项目使用中文提示词。
+- 提示词集中在 `auditrail/agents/prompts.py`，当前项目使用中文提示词。
 - 13 个评测维度 key 和中文标签以 `DIMENSION_DEFINITIONS` 为准。前端可保留本地标签映射，但 key 必须一致。
 - 维度状态只能使用 `pass`、`partial`、`fail`、`unknown`；无证据时使用 `unknown`，不要用 `fail` 或 0 分冒充失败。
 - 维度来源只能使用 `deterministic`、`judge`、`deterministic+judge`、`missing`。
@@ -116,7 +116,7 @@ DeepAgent 裁判由 1 个主 agent 和 4 个子智能体组成，定义在 `agen
 - 环境变量读取集中在 `backend/app/config.py`，默认读取项目根目录 `.env`。
 - API 前缀统一为 `/api`，健康检查为 `/api/health`，返回 `{"status": "ok"}`。
 - live 评测使用 `StreamingResponse` 输出 SSE。流式过程中的业务错误通过 `event: error` 返回。
-- 路由层复用 `agentloop.cli._write_run_outputs`、`AgentClient`、`agentloop.agents.tools` 和 schema 渲染函数，不要复制核心逻辑。
+- 路由层复用 `auditrail.cli._write_run_outputs`、`AgentClient`、`auditrail.agents.tools` 和 schema 渲染函数，不要复制核心逻辑。
 
 ## Frontend Rules
 

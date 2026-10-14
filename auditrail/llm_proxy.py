@@ -21,7 +21,7 @@ def create_proxy_app(upstream_base_url: str, log_path: Path, timeout: float = 30
 
     globals()["Request"] = Request
     globals()["Response"] = Response
-    app = FastAPI(title="Agentloop LLM Metrics Proxy")
+    app = FastAPI(title="Auditrail LLM Metrics Proxy")
     upstream = upstream_base_url.rstrip("/")
 
     @app.api_route("/{path:path}", methods=["POST"])
@@ -250,7 +250,7 @@ def import_configured_proxy_log(run_dir: Path, source: str | None = None) -> dic
 
 
 def _configured_proxy_log_source() -> str:
-    value = os.getenv("AGENTLOOP_LLM_PROXY_LOG", "").strip()
+    value = os.getenv("AUDITRAIL_LLM_PROXY_LOG", "").strip()
     if value:
         return value
     env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -265,13 +265,13 @@ def _configured_proxy_log_source() -> str:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, raw_value = line.split("=", 1)
-        if key.strip() == "AGENTLOOP_LLM_PROXY_LOG":
+        if key.strip() == "AUDITRAIL_LLM_PROXY_LOG":
             return raw_value.strip().strip("'\"")
     return ""
 
 
 def _import_remote_proxy_log(source: str, run_dir: Path) -> dict[str, Any] | None:
-    with tempfile.NamedTemporaryFile(prefix="agentloop-proxy-", suffix=".jsonl") as handle:
+    with tempfile.NamedTemporaryFile(prefix="auditrail-proxy-", suffix=".jsonl") as handle:
         try:
             subprocess.run(["scp", "-q", source, handle.name], check=True, timeout=30)
         except (OSError, subprocess.SubprocessError):

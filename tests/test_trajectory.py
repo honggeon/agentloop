@@ -1,4 +1,4 @@
-from agentloop.trajectory import llm_calls_from_session_response, messages_from_session_response, normalize_messages, session_summary
+from auditrail.trajectory import llm_calls_from_session_response, messages_from_session_response, normalize_messages, session_summary
 
 
 def test_normalize_messages_classifies_roles_and_tool_requests():

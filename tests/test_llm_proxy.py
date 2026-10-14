@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from agentloop.llm_proxy import (
+from auditrail.llm_proxy import (
     append_jsonl,
     build_llm_call_record,
     create_proxy_app,
@@ -104,7 +104,7 @@ def test_proxy_forwards_chat_completion_and_logs_usage(tmp_path, monkeypatch):
             }
         ).encode("utf-8")
 
-    monkeypatch.setattr("agentloop.llm_proxy.forward_request", fake_forward)
+    monkeypatch.setattr("auditrail.llm_proxy.forward_request", fake_forward)
     client = TestClient(create_proxy_app("http://127.0.0.1:7500/v1", log_path))
 
     response = client.post(
@@ -136,7 +136,7 @@ def test_proxy_adds_stream_usage_option_and_logs_sse_usage(tmp_path, monkeypatch
         )
         return 200, {"content-type": "text/event-stream"}, response.encode("utf-8")
 
-    monkeypatch.setattr("agentloop.llm_proxy.forward_request", fake_forward)
+    monkeypatch.setattr("auditrail.llm_proxy.forward_request", fake_forward)
     client = TestClient(create_proxy_app("http://127.0.0.1:7500/v1", log_path))
 
     response = client.post(

@@ -8,10 +8,10 @@ from typing import Any, Generator, Iterable
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from agentloop.cli import _run_dir, _source_meta, _write_run_outputs
-from agentloop.client import AgentClient
-from agentloop.runtime import build_runtime_graph, build_runtime_trace, save_expectations
-from agentloop.trajectory import messages_from_session_response
+from auditrail.cli import _run_dir, _source_meta, _write_run_outputs
+from auditrail.client import AgentClient
+from auditrail.runtime import build_runtime_graph, build_runtime_trace, save_expectations
+from auditrail.trajectory import messages_from_session_response
 from backend.app.config import get_settings
 from backend.app.routes.runs import _enrich_run_item, _run_item, get_batch_summary
 
@@ -75,7 +75,7 @@ def _event_stream(payload: dict[str, Any]) -> Iterable[str]:
     acceptance_criteria = str(payload.get("acceptance_criteria") or "").strip()
     token = str(payload.get("token") or "").strip() or None
     model = str(payload.get("model") or "").strip()
-    title = str(payload.get("title") or "agentloop runtime evaluation").strip() or "agentloop runtime evaluation"
+    title = str(payload.get("title") or "auditrail runtime evaluation").strip() or "auditrail runtime evaluation"
     skill = str(payload.get("skill") or "").strip()
     uploads = [item for item in payload.get("uploads") or [] if isinstance(item, dict)]
     timeout = _float_or_default(payload.get("timeout"), 60.0)

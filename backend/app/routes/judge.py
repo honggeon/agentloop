@@ -5,9 +5,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from agentloop.agents.schemas import resolve_judge_report
-from agentloop.agents.tools import write_judge_report
-from agentloop.runtime import build_agent_judge_prompt
+from auditrail.agents.schemas import resolve_judge_report
+from auditrail.agents.tools import write_judge_report
+from auditrail.runtime import build_agent_judge_prompt
 from backend.app.config import get_settings, resolve_run_path
 
 
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api")
 @router.post("/runs/{run_id}/judge")
 def run_judge(run_id: str) -> dict[str, Any]:
     path = _run_path_or_404(run_id)
-    from agentloop.agents.agent import invoke_agent
+    from auditrail.agents.agent import invoke_agent
 
     messages = [
         {
@@ -25,7 +25,7 @@ def run_judge(run_id: str) -> dict[str, Any]:
             "content": build_agent_judge_prompt(path),
         }
     ]
-    config = {"configurable": {"thread_id": "agentloop-judge-%s" % run_id}}
+    config = {"configurable": {"thread_id": "auditrail-judge-%s" % run_id}}
     try:
         raw_report = asyncio.run(invoke_agent(messages, config=config))
         report = resolve_judge_report(raw_report, path)

@@ -9,7 +9,7 @@ from typing import Dict, Iterator, Optional, Tuple
 from uuid import uuid4
 
 
-class AgentLoopHTTPError(RuntimeError):
+class AuditrailHTTPError(RuntimeError):
     def __init__(self, status: int, body: str):
         detail = body[:500] or "(empty response body)"
         super().__init__("HTTP %s: %s" % (status, detail))
@@ -17,9 +17,9 @@ class AgentLoopHTTPError(RuntimeError):
         self.body = body
 
 
-def _transport_error(url: str, exc: urllib.error.URLError) -> "AgentLoopHTTPError":
+def _transport_error(url: str, exc: urllib.error.URLError) -> "AuditrailHTTPError":
     """Wrap a connection-level failure with an explicit, readable message."""
-    return AgentLoopHTTPError(0, "cannot connect to %s (%s)" % (url, exc.reason))
+    return AuditrailHTTPError(0, "cannot connect to %s (%s)" % (url, exc.reason))
 
 
 @dataclass
@@ -65,7 +65,7 @@ class AgentClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise AgentLoopHTTPError(exc.code, raw) from exc
+            raise AuditrailHTTPError(exc.code, raw) from exc
         except urllib.error.URLError as exc:
             raise _transport_error(url, exc) from exc
         if not raw:
@@ -81,7 +81,7 @@ class AgentClient:
         content: bytes,
         content_type: str = "application/octet-stream",
     ) -> Dict:
-        boundary = "----agentloop-%s" % uuid4().hex
+        boundary = "----auditrail-%s" % uuid4().hex
         body = _multipart_body(boundary, fields, file_field, filename, content, content_type)
         headers = self._headers(json_body=False)
         headers["Content-Type"] = "multipart/form-data; boundary=%s" % boundary
@@ -97,7 +97,7 @@ class AgentClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise AgentLoopHTTPError(exc.code, raw) from exc
+            raise AuditrailHTTPError(exc.code, raw) from exc
         except urllib.error.URLError as exc:
             raise _transport_error(url, exc) from exc
         if not raw:
@@ -108,7 +108,7 @@ class AgentClient:
         params = {"session_id": session_id, "messages": "1" if include_messages else "0"}
         return self.request_json("GET", "/api/session", params=params)
 
-    def create_session(self, title: str = "agentloop smoke test", model: str = "") -> Dict:
+    def create_session(self, title: str = "auditrail smoke test", model: str = "") -> Dict:
         return self.request_json(
             "POST",
             "/api/session/new",
@@ -183,7 +183,7 @@ class AgentClient:
                         data_lines.append(line[5:].lstrip())
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise AgentLoopHTTPError(exc.code, raw) from exc
+            raise AuditrailHTTPError(exc.code, raw) from exc
         except urllib.error.URLError as exc:
             raise _transport_error(url, exc) from exc
 

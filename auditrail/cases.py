@@ -478,7 +478,7 @@ def run_suite(
     owned_root = None
     root = Path(workspace_root) if workspace_root else None
     if root is None:
-        owned_root = tempfile.mkdtemp(prefix="agentloop-cases-")
+        owned_root = tempfile.mkdtemp(prefix="auditrail-cases-")
         root = Path(owned_root)
     try:
         cases = [run_case(case, runner, binary, root) for case in selected]

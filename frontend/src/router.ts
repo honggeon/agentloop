@@ -42,8 +42,8 @@ const router = createRouter({
 });
 
 router.afterEach((to) => {
-  const title = typeof to.meta.title === "string" ? to.meta.title : "Agentloop";
-  document.title = `${title} · Agentloop`;
+  const title = typeof to.meta.title === "string" ? to.meta.title : "Auditrail";
+  document.title = `${title} · Auditrail`;
 });
 
 export default router;

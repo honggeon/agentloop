@@ -1,7 +1,7 @@
 """DSH (DeepSeek Harness) session routes.
 
 Lists locally recorded DSH sessions and imports them as run directories.
-All conversion logic lives in ``agentloop.dsh_source``; this module only does
+All conversion logic lives in ``auditrail.dsh_source``; this module only does
 HTTP assembly, input validation and error mapping.
 """
 
@@ -11,8 +11,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from agentloop.cli import _run_dir, _write_run_outputs
-from agentloop.dsh_source import (
+from auditrail.cli import _run_dir, _write_run_outputs
+from auditrail.dsh_source import (
     find_session_file,
     list_sessions,
     load_session_response,

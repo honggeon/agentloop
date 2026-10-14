@@ -160,7 +160,7 @@ onMounted(checkBackend);
           </svg>
         </span>
         <div>
-          <h1>Agentloop</h1>
+          <h1>Auditrail</h1>
           <p>轨迹评测控制台</p>
         </div>
       </div>

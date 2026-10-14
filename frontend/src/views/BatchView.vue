@@ -170,7 +170,7 @@ onMounted(async () => {
         </label>
         <label>
           <span>用户 ID</span>
-          <input v-model="importForm.user_id" type="text" placeholder="agentloop-test" required />
+          <input v-model="importForm.user_id" type="text" placeholder="auditrail-test" required />
         </label>
         <label>
           <span>Session ID</span>

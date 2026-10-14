@@ -1,6 +1,6 @@
 import importlib
 
-from agentloop.agents.prompts import MAIN_SYSTEM_PROMPT, REPORT_WRITER_PROMPT
+from auditrail.agents.prompts import MAIN_SYSTEM_PROMPT, REPORT_WRITER_PROMPT
 
 
 def test_report_writer_prompt_requires_dimensions_and_reliability():
@@ -14,7 +14,7 @@ def test_report_writer_prompt_requires_dimensions_and_reliability():
 
 
 def test_subagents_have_short_descriptions():
-    module = importlib.import_module("agentloop.agents.subagents")
+    module = importlib.import_module("auditrail.agents.subagents")
     subagents = module.build_subagents("openai:gpt-test")
     names = [item["name"] for item in subagents]
     assert names == ["trajectory_analyst", "tool_auditor", "root_cause_analyst", "report_writer"]
@@ -22,7 +22,7 @@ def test_subagents_have_short_descriptions():
 
 
 def test_quality_assessment_tool_is_available_to_judging_subagents():
-    module = importlib.import_module("agentloop.agents.subagents")
+    module = importlib.import_module("auditrail.agents.subagents")
     subagents = {item["name"]: item for item in module.build_subagents("openai:gpt-test")}
 
     root_tools = {tool.__name__ for tool in subagents["root_cause_analyst"]["tools"]}
@@ -33,7 +33,7 @@ def test_quality_assessment_tool_is_available_to_judging_subagents():
 
 
 def test_prompts_require_completion_deliverable_and_evidence_chain_checks():
-    prompts = importlib.import_module("agentloop.agents.prompts")
+    prompts = importlib.import_module("auditrail.agents.prompts")
 
     assert "assess_run_quality" in prompts.MAIN_SYSTEM_PROMPT
     assert "完成度" in prompts.REPORT_WRITER_PROMPT
@@ -42,6 +42,6 @@ def test_prompts_require_completion_deliverable_and_evidence_chain_checks():
 
 
 def test_agent_module_imports_without_deepagent_installed():
-    module = importlib.import_module("agentloop.agents.agent")
+    module = importlib.import_module("auditrail.agents.agent")
     assert hasattr(module, "get_agent")
     assert hasattr(module, "invoke_agent")

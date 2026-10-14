@@ -1,6 +1,6 @@
 import json
 
-from agentloop import cli
+from auditrail import cli
 
 
 def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
@@ -26,7 +26,7 @@ def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
             "findings": [],
         }
 
-    monkeypatch.setattr("agentloop.agents.agent.invoke_agent", fake_invoke)
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     code = cli.main(["judge-run", "--run", str(run)])
     assert code == 0
     assert json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))["overall_status"] == "success"
@@ -76,7 +76,7 @@ def test_write_run_outputs_imports_configured_proxy_log(tmp_path, monkeypatch):
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("AGENTLOOP_LLM_PROXY_LOG", str(log))
+    monkeypatch.setenv("AUDITRAIL_LLM_PROXY_LOG", str(log))
     session_response = {
         "session": {
             "session_id": "s1",
@@ -170,5 +170,5 @@ def test_judge_run_includes_acceptance_criteria(tmp_path, monkeypatch):
         assert "不能伪造用户确认" in content
         return {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"}
 
-    monkeypatch.setattr("agentloop.agents.agent.invoke_agent", fake_invoke)
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     assert cli.main(["judge-run", "--run", str(run)]) == 0

@@ -4,7 +4,7 @@ DSH records every agent session on local disk as
 ``$DSH_HOME/sessions/<workspace-dir>/<session-id>/session.jsonl.zstd`` — a
 zstd-compressed JSONL event log with ``user/message``, ``assistant/message``,
 ``tool/call`` and ``tool/result`` records. This module scans, decompresses and
-converts those recordings into agentloop's run contract
+converts those recordings into auditrail's run contract
 (``session.json`` / ``trajectory.jsonl`` / ``summary.json``), so the
 deterministic audit and judge pipeline can evaluate DSH agents unchanged.
 

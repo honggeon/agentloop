@@ -1,2 +1,2 @@
-"""Agentloop FastAPI backend."""
+"""Auditrail FastAPI backend."""
 

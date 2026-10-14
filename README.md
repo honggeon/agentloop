@@ -1,20 +1,20 @@
-# agentloop
+# auditrail
 
-`agentloop` is a small black-box trajectory collection and audit tool for `xuanjian-agent`.
+`auditrail` is a small black-box trajectory collection and audit tool for `xuanjian-agent`.
 
 It does not require instrumentation in the agent service. The first version talks to the deployed HTTP API, exports normalized trajectory files, and runs deterministic checks over tool usage.
 
 ## Install
 
 ```bash
-cd /Users/chen/agentloop
+cd /Users/chen/auditrail
 python3 -m pip install -e .
 ```
 
 ## Fetch an Existing Session
 
 ```bash
-python3 -m agentloop.cli fetch-session \
+python3 -m auditrail.cli fetch-session \
   --base-url http://192.168.1.238:8788 \
   --user-id 54775da4-0190-4d67-90e4-32d4a0334571 \
   --session-id 5ab7b3b0-1659-4c30-9735-1d54da1548fd
@@ -30,18 +30,18 @@ Outputs:
 
 ## Evaluate DeepSeek Harness (DSH) Agents
 
-agentloop can audit locally recorded DeepSeek Harness sessions. DSH writes every
+auditrail can audit locally recorded DeepSeek Harness sessions. DSH writes every
 agent session to `~/.dsh/sessions/<workspace>/<session-id>/session.jsonl.zstd`;
-`agentloop/dsh_source.py` converts those event logs into the standard run
+`auditrail/dsh_source.py` converts those event logs into the standard run
 contract, so audit, judge and dashboard work unchanged.
 
 ```bash
 # List recorded DSH sessions (newest first)
-python3 -m agentloop.cli list-dsh-sessions
+python3 -m auditrail.cli list-dsh-sessions
 
 # Import one session as a run directory, then judge it
-python3 -m agentloop.cli import-dsh-session --session-id session-<uuid>
-python3 -m agentloop.cli judge-run --run runs/<run-dir>
+python3 -m auditrail.cli import-dsh-session --session-id session-<uuid>
+python3 -m auditrail.cli judge-run --run runs/<run-dir>
 ```
 
 Backend routes (used by the DSH plugin):
@@ -62,13 +62,13 @@ reports a verdict.
 
 ```bash
 # Run the DSH launcher suite, write cases/results/<suite>-<stamp>.{json,md}
-python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json
+python3 -m auditrail.cli run-cases --suite cases/dsh-cli.json
 
 # Only one case or one module; print without writing reports
-python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json --only DSH-CLI-002 --no-write
+python3 -m auditrail.cli run-cases --suite cases/dsh-cli.json --only DSH-CLI-002 --no-write
 
 # Point the suite at another binary
-python3 -m agentloop.cli run-cases --suite cases/dsh-cli.json --bin ./node_modules/.bin/dsh
+python3 -m auditrail.cli run-cases --suite cases/dsh-cli.json --bin ./node_modules/.bin/dsh
 ```
 
 Exit code is `0` when the suite passes and `1` otherwise, so it can gate CI.
@@ -106,7 +106,7 @@ home against a pre-run snapshot, converts the newest new recording with
 case's `session` block:
 
 ```bash
-python3 -m agentloop.cli run-cases --suite cases/dsh-agent.json
+python3 -m auditrail.cli run-cases --suite cases/dsh-agent.json
 ```
 
 Supported `session` keys: `recorded`, `trajectory_contains` /
@@ -125,9 +125,9 @@ their own suite file.
 ## Run a Smoke Chat
 
 ```bash
-python3 -m agentloop.cli smoke-chat \
+python3 -m auditrail.cli smoke-chat \
   --base-url http://192.168.1.238:8788 \
-  --user-id agentloop-test \
+  --user-id auditrail-test \
   --message "请列出当前工作目录文件"
 ```
 
@@ -150,7 +150,7 @@ export OPENAI_API_KEY=...
 Judge an exported run:
 
 ```bash
-python3 -m agentloop.cli judge-run --run runs/<run-dir>
+python3 -m auditrail.cli judge-run --run runs/<run-dir>
 ```
 
 The command writes:

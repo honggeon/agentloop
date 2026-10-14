@@ -1,6 +1,6 @@
 # docs/ — 设计与计划
 
-本目录存放设计说明、实施计划和周报，不是运行时契约。实现以 `agentloop/`、`backend/`、`frontend/` 代码和 `tests/` 为准。跨层总规则见仓库根 `AGENTS.md`。
+本目录存放设计说明、实施计划和周报，不是运行时契约。实现以 `auditrail/`、`backend/`、`frontend/` 代码和 `tests/` 为准。跨层总规则见仓库根 `AGENTS.md`。
 
 ## 放什么
 

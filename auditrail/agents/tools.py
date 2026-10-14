@@ -14,7 +14,7 @@ from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report, render_judge
 
 def _runs_roots() -> List[Path]:
     roots = []
-    env_root = os.getenv("AGENTLOOP_RUNS_DIR")
+    env_root = os.getenv("AUDITRAIL_RUNS_DIR")
     if env_root:
         roots.append(Path(env_root).expanduser())
     roots.append(Path("runs"))
@@ -42,7 +42,7 @@ def _resolve_run_dir(run_path: str) -> Path:
 
 
 def list_runs(root: str = "runs") -> List[Dict[str, Any]]:
-    """List exported Agentloop run directories under the given root."""
+    """List exported Auditrail run directories under the given root."""
     root_path = Path(root)
     if not root_path.exists():
         return []
@@ -66,7 +66,7 @@ def list_runs(root: str = "runs") -> List[Dict[str, Any]]:
 
 
 def load_run_summary(run_path: str) -> Dict[str, Any]:
-    """Load summary.json from an Agentloop run directory."""
+    """Load summary.json from an Auditrail run directory."""
     try:
         return _read_json(_required(_resolve_run_dir(run_path) / "summary.json"))
     except (FileNotFoundError, ValueError) as exc:
@@ -74,7 +74,7 @@ def load_run_summary(run_path: str) -> Dict[str, Any]:
 
 
 def load_audit(run_path: str) -> Dict[str, Any]:
-    """Load audit.json from an Agentloop run directory."""
+    """Load audit.json from an Auditrail run directory."""
     try:
         return _read_json(_required(_resolve_run_dir(run_path) / "audit.json"))
     except (FileNotFoundError, ValueError) as exc:
@@ -92,7 +92,7 @@ def _int_or(value: Any, default: int) -> int:
 
 
 def load_trajectory_slice(run_path: str, offset: int = 0, limit: int = 50) -> Any:
-    """Load a bounded slice of trajectory.jsonl rows from an Agentloop run directory."""
+    """Load a bounded slice of trajectory.jsonl rows from an Auditrail run directory."""
     try:
         rows = _read_jsonl(_required(_resolve_run_dir(run_path) / "trajectory.jsonl"))
     except (FileNotFoundError, ValueError) as exc:
@@ -341,9 +341,9 @@ def _worst_status(current: str, quality: str) -> str:
 # the user's request and must not create deliverable expectations.
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 
-# Agentloop's own run artifacts. ``_produced_deliverables`` scans the run
+# Auditrail's own run artifacts. ``_produced_deliverables`` scans the run
 # directory; without this exclusion every run would "produce" .md/.json
-# deliverables simply because agentloop wrote its reports there.
+# deliverables simply because auditrail wrote its reports there.
 _RUN_ARTIFACT_NAMES = {
     "session.json",
     "summary.json",

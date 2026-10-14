@@ -51,7 +51,7 @@ async def get_agent() -> Any:
             system_prompt=MAIN_SYSTEM_PROMPT,
             subagents=build_subagents(MODEL_SPEC),
             checkpointer=memory_saver(),
-            name="AgentLoop Analyst",
+            name="Auditrail Analyst",
         )
         return _agent_graph
 

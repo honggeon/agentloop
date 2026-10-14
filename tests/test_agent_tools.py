@@ -1,6 +1,6 @@
 import json
 
-from agentloop.agents.tools import (
+from auditrail.agents.tools import (
     assess_run_quality,
     build_chart_data,
     get_tool_calls,
@@ -132,8 +132,8 @@ def test_assess_run_quality_ignores_system_reminder_injections(tmp_path):
     assert quality["completion"]["status"] != "failed"
 
 
-def test_assess_run_quality_does_not_count_agentloop_reports_as_deliverables(tmp_path):
-    # The run dir always holds agentloop's own tool_audit.md; that must not
+def test_assess_run_quality_does_not_count_auditrail_reports_as_deliverables(tmp_path):
+    # The run dir always holds auditrail's own tool_audit.md; that must not
     # satisfy a requested .md deliverable.
     run = tmp_path / "runs" / "md-deliverable"
     run.mkdir(parents=True)
@@ -265,7 +265,7 @@ def test_write_judge_report_downgrades_fact_findings_without_valid_evidence(tmp_
     assert by_title["terminal failed"]["type"] == "fact"
     assert any("downgraded 1 fact findings" in note for note in report["judge_reliability"]["notes"])
     # the written report must survive re-normalization
-    from agentloop.agents.schemas import normalize_judge_report
+    from auditrail.agents.schemas import normalize_judge_report
 
     renormalized = normalize_judge_report(report)
     assert {f["title"]: f["type"] for f in renormalized["findings"]}["Requested deliverables .pptx were never produced"] == "inference"
@@ -323,14 +323,14 @@ def test_write_judge_report_recomputes_finding_severity_after_quality_merge(tmp_
 
 def test_tools_resolve_partial_run_path(tmp_path, monkeypatch):
     run = _write_run(tmp_path)
-    monkeypatch.setenv("AGENTLOOP_RUNS_DIR", str(run.parent))
+    monkeypatch.setenv("AUDITRAIL_RUNS_DIR", str(run.parent))
     assert load_trajectory_slice("20260807-test", 0, 1)[0]["role"] == "user"
     assert load_trajectory_slice("20260807", 0, 1)[0]["role"] == "user"
 
 
 def test_tools_return_error_for_unknown_run(tmp_path, monkeypatch):
     _write_run(tmp_path)
-    monkeypatch.delenv("AGENTLOOP_RUNS_DIR", raising=False)
+    monkeypatch.delenv("AUDITRAIL_RUNS_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     result = load_trajectory_slice("no-such-run")
     assert "error" in result

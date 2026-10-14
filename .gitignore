@@ -30,6 +30,6 @@ npm-debug.log*
 .idea/
 
 # Project artifacts
-agentloop.egg-info/
+auditrail.egg-info/
 .deepeval/
 .superpowers/

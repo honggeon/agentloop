@@ -622,7 +622,7 @@ def test_backend_judge_includes_acceptance_criteria(tmp_path, monkeypatch):
         assert "必须调用 ppt-master" in messages[0]["content"]
         return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "ok"}
 
-    monkeypatch.setattr("agentloop.agents.agent.invoke_agent", fake_invoke)
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     client = TestClient(app)
 
     response = client.post("/api/runs/run-1/judge")

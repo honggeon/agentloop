@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agentloop 本地开发看板启动脚本
+# auditrail 本地开发看板启动脚本
 # 用法:
 #   ./start.sh            # 启动后端 + 前端
 #   ./start.sh status     # 查看运行状态

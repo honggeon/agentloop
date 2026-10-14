@@ -1,6 +1,6 @@
 # backend/ — FastAPI 装配层
 
-本目录只做 HTTP 装配、输入校验、错误映射、SSE 输出，以及复用 `agentloop` 核心函数。采集、审计、裁判 schema 和 Markdown 渲染规则在 `agentloop/`，不要在这里重写。跨层总规则见仓库根 `AGENTS.md`。
+本目录只做 HTTP 装配、输入校验、错误映射、SSE 输出，以及复用 `auditrail` 核心函数。采集、审计、裁判 schema 和 Markdown 渲染规则在 `auditrail/`，不要在这里重写。跨层总规则见仓库根 `AGENTS.md`。
 
 ## 职责
 
@@ -20,17 +20,17 @@ API 前缀统一为 `/api`。环境变量集中在 `config.py`，不要在路由
 - resolve 后必须落在 `settings.runs_dir` 之内。
 - 不存在则 `FileNotFoundError` → HTTP 404；非法 id → HTTP 400。
 
-禁止把用户传入的 `run_id` 直接拼到路径上。不要把 `agentloop.agents.tools._resolve_run_dir`（裁判工具用的宽松解析）用到 HTTP 入口。
+禁止把用户传入的 `run_id` 直接拼到路径上。不要把 `auditrail.agents.tools._resolve_run_dir`（裁判工具用的宽松解析）用到 HTTP 入口。
 
 ## 复用与错误映射
 
 路由层复用现有函数，不要复制实现：
 
-- 写 run 产物：`agentloop.cli._write_run_outputs`
-- 拉远程 session / live chat：`agentloop.client.AgentClient`
-- 读 run / 图表 / 写裁判：`agentloop.agents.tools`（`list_runs`、`load_run_summary`、`load_audit`、`build_chart_data`、`write_judge_report`）
-- 裁判归一化与维度/可信度 Markdown：`agentloop.agents.schemas`（`resolve_judge_report`、`render_dimensions_markdown`、`render_reliability_markdown`）
-- judge prompt：`agentloop.runtime.build_agent_judge_prompt`
+- 写 run 产物：`auditrail.cli._write_run_outputs`
+- 拉远程 session / live chat：`auditrail.client.AgentClient`
+- 读 run / 图表 / 写裁判：`auditrail.agents.tools`（`list_runs`、`load_run_summary`、`load_audit`、`build_chart_data`、`write_judge_report`）
+- 裁判归一化与维度/可信度 Markdown：`auditrail.agents.schemas`（`resolve_judge_report`、`render_dimensions_markdown`、`render_reliability_markdown`）
+- judge prompt：`auditrail.runtime.build_agent_judge_prompt`
 
 外部调用失败要显式变成 HTTP 错误，不要静默吞错。当前约定：导入远程 session 失败 → 502；缺 DeepAgent 运行时 → 503；其它裁判异常 → 500。
 

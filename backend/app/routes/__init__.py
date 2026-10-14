@@ -1,2 +1,2 @@
-"""HTTP route modules for the Agentloop backend."""
+"""HTTP route modules for the Auditrail backend."""
 
