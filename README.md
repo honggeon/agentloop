@@ -190,6 +190,38 @@ claimed, and `AcpClient.prompt(..., on_event=...)` reports each normalized event
 wire order. `outcome.updates` is therefore the complete turn, and a projection
 layer cannot steal chunks from it.
 
+A cancelled turn is never reported as success. `end_turn` covers several outcomes
+in DSH's mapping, so the caller's cancel signal wins over the peer's result:
+`outcome.cancelled` is true and `stop_reason` is `cancelled` whenever the turn was
+cancelled locally, even if the peer folded it into a normal `end_turn` response.
+Otherwise an aborted turn would be imported as a durable, evaluated run. A peer
+that reports cancellation itself (JSON-RPC `-32800`) is mapped to the same
+cancelled outcome rather than a failure.
+
+### Operating the DSH integration
+
+Enabling the runtime, startup/shutdown order, capacity and backpressure bounds,
+the opt-in real-DSH smoke tests, and a symptom-to-cause troubleshooting table are
+documented in [`docs/dsh-operations.md`](docs/dsh-operations.md). The security and
+reliability audit behind the current hardening, with its residual risks, is in
+[`docs/reports/2026-10-14-dsh-release-readiness.md`](docs/reports/2026-10-14-dsh-release-readiness.md).
+
+`AUDITRAIL_LOAD_DOTENV=0` disables reading the project `.env`. The test suite sets
+it (forced) so a developer's local `.env` cannot steer a test run or make it reach
+the network; production should leave it enabled.
+
+The optional real-binary smoke tests are excluded from the default run and skip
+unless explicitly enabled:
+
+```bash
+AUDITRAIL_DSH_INTEGRATION=1 DSH_BINARY="$(command -v dsh)" \
+  python3 -m pytest tests/test_dsh_integration.py -q
+```
+
+They drive the real Headless, ACP, and cancellation paths. A DSH home is derived
+under the pytest temporary directory by default, so the operator's `~/.dsh` is
+never written to; the tests do consume model quota.
+
 
 ## Run a Deterministic Case Suite
 

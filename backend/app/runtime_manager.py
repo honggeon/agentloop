@@ -36,6 +36,17 @@ from auditrail.runtime import save_expectations
 #: for every turn it ever ran.
 MAX_RETAINED_OPERATIONS = 32
 
+#: Bound on one operation's outbound SSE queue. A browser tab that stops reading
+#: must not be able to grow backend memory without limit, so high-volume progress
+#: events are dropped once the buffer is nearly full. The remaining headroom is
+#: reserved for the low-volume events the SSE contract depends on (permission
+#: requests and the single terminal event), which are never dropped.
+MAX_OPERATION_QUEUE = 4096
+_TERMINAL_QUEUE_RESERVE = 64
+_CRITICAL_OPERATION_EVENTS = frozenset(
+    {"started", "permission_requested", "completed", "run_imported", "error"}
+)
+
 #: The only permission answers DSH offers and this runtime accepts.
 PERMISSION_OPTION_IDS = (ACP_ALLOW_ONCE_OPTION_ID, ACP_REJECT_ONCE_OPTION_ID)
 
@@ -61,8 +72,20 @@ class AcpOperation:
     acceptance_criteria: str = ""
     worker: Optional[threading.Thread] = None
     created_at: float = field(default_factory=time.time)
+    dropped_events: int = 0
 
     def emit(self, event: str, data: Any) -> None:
+        """Queue one SSE event, applying backpressure to high-volume progress.
+
+        Critical events are always queued. Progress events are dropped once the
+        buffer is nearly full, which keeps a stalled reader from exhausting
+        memory while still guaranteeing the terminal event arrives.
+        """
+        if event not in _CRITICAL_OPERATION_EVENTS and self.queue.qsize() >= (
+            MAX_OPERATION_QUEUE - _TERMINAL_QUEUE_RESERVE
+        ):
+            self.dropped_events += 1
+            return
         self.queue.put({"event": event, "data": data})
 
 
@@ -152,7 +175,7 @@ class AcpRuntimeManager:
     def _start_locked(self, workspace: Path) -> AcpClient:
         if self._closed:
             raise AcpManagerError("manager_closed", "ACP runtime manager is closed")
-        if self._process is not None and self._process.poll() is None and self._client is not None:
+        if self._client_is_usable_locked():
             return self._client
         if self._transport is not None:
             try:
@@ -181,6 +204,25 @@ class AcpRuntimeManager:
             session.last_error = "ACP process restarted"
             session.client = client
         return client
+
+    def _client_is_usable_locked(self) -> bool:
+        """True when the cached client's process and transport are both usable.
+
+        Process liveness alone is not enough: a frame limit, write timeout, or
+        reader failure closes the transport while the peer keeps running, and
+        reusing that client would fail every later prompt instead of restarting.
+        """
+        if self._client is None or self._process is None:
+            return False
+        if self._process.poll() is not None:
+            return False
+        is_alive = getattr(self._transport, "is_alive", None)
+        if callable(is_alive):
+            try:
+                return bool(is_alive())
+            except Exception:
+                return False
+        return True
 
     def _ensure_session_client(self, session: ManagedSession) -> AcpClient:
         with self._lock:
@@ -314,8 +356,13 @@ class AcpRuntimeManager:
             # turn, so text is no longer reassembled from both sides.
             def monitor() -> None:
                 while not monitor_stop.is_set() and not operation.done.is_set():
-                    for event in client.take_notifications(timeout=0.05):
-                        emit_event(event)
+                    try:
+                        for event in client.take_notifications(timeout=0.05):
+                            emit_event(event)
+                    except Exception:
+                        # A malformed peer payload must not silently kill the live
+                        # projection thread for the rest of the operation.
+                        continue
 
             watcher = threading.Thread(
                 target=monitor,
@@ -343,6 +390,7 @@ class AcpRuntimeManager:
                     "stop_reason": outcome.stop_reason,
                     "text": outcome.text,
                     "cancelled": outcome.cancelled,
+                    "dropped_events": operation.dropped_events,
                 },
             )
             if not outcome.cancelled:
@@ -380,9 +428,21 @@ class AcpRuntimeManager:
         finally:
             monitor_stop.set()
             operation.done.set()
+            # A settled turn can no longer answer a permission request, so drop
+            # them: otherwise a later HTTP POST would answer a finished turn.
+            self._forget_session_permissions(session)
             with self._lock:
                 if session.active_operation == operation.operation_id:
                     session.active_operation = None
+
+    def _forget_session_permissions(self, session: ManagedSession) -> None:
+        forget = getattr(session.client, "forget_permissions_for_session", None)
+        if not callable(forget):
+            return
+        try:
+            forget(session.session_id)
+        except Exception:
+            return
 
     def _settle_import(self, session: ManagedSession, operation: AcpOperation) -> None:
         """Publish the durable run, or report an explicit import-stage error.

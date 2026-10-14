@@ -616,12 +616,14 @@ export interface DshAcpPermissionRequest {
 }
 
 // SSE completed 只表示 ACP 回合已结束，不表示任务成功；只有 run_imported
-// 才表示标准 Auditrail run 已发布。
+// 才表示标准 Auditrail run 已发布。dropped_events > 0 表示消费者读得太慢，
+// 高流量进度事件已被丢弃（终态事件永不丢弃）。
 export interface DshAcpCompletedPayload {
   session_id: string;
   stop_reason: string;
   text: string;
   cancelled: boolean;
+  dropped_events?: number;
 }
 
 export interface DshAcpPromptPayload {

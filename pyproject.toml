@@ -34,3 +34,6 @@ exclude = ["runs*", "tests*", "docs*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "integration: opt-in smoke test that spawns a real DSH binary (skipped unless AUDITRAIL_DSH_INTEGRATION=1)",
+]

@@ -26,12 +26,18 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+
+try:  # POSIX-only; absent on Windows, where the write timeout stays unbounded.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 from .dsh_headless import _redact_sensitive, _redact_structure
 from .dsh_runtime import (
@@ -142,6 +148,109 @@ def encode_frame(message: Mapping[str, Any]) -> bytes:
     return json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
+class _AcpWriteTimeout(Exception):
+    """A frame could not be written within the configured deadline."""
+
+
+def _write_frame_with_deadline(stream: Any, data: bytes, *, timeout_seconds: float) -> None:
+    """Write one frame, giving up once the peer has not read for too long.
+
+    A peer that stops reading its stdin fills the pipe buffer, after which a
+    plain blocking write never returns. While it is stuck it holds the transport's
+    single write lock, so *every* other writer queues behind it and the backend
+    stops making progress. The fd is switched to non-blocking mode for the write
+    and restored afterwards, so no later caller inherits the flag.
+
+    On timeout the frame may be only partly written, which is why the caller
+    invalidates the whole transport rather than retrying.
+    """
+    try:
+        descriptor = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        # No real fd (for example an in-memory test double): the write cannot be
+        # bounded, so keep the previous blocking behaviour.
+        stream.write(data)
+        _flush_stream(stream)
+        return
+
+    deadline = time.monotonic() + timeout_seconds
+    remaining = memoryview(data)
+    if fcntl is None:  # pragma: no cover - non-POSIX platforms
+        stream.write(data)
+        _flush_stream(stream)
+        return
+    try:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+    except (AttributeError, OSError):
+        flags = None
+    if flags is None:
+        stream.write(data)
+        _flush_stream(stream)
+        return
+    fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    try:
+        while remaining:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                raise _AcpWriteTimeout()
+            try:
+                _, writable, _ = select.select([], [descriptor], [], wait)
+            except (OSError, ValueError):
+                writable = [descriptor]
+            if not writable:
+                raise _AcpWriteTimeout()
+            try:
+                written = os.write(descriptor, remaining)
+            except BlockingIOError:
+                continue
+            if written <= 0:
+                raise _AcpWriteTimeout()
+            remaining = remaining[written:]
+    finally:
+        try:
+            fcntl.fcntl(descriptor, fcntl.F_SETFL, flags)
+        except OSError:
+            pass
+
+
+def _flush_stream(stream: Any) -> None:
+    try:
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
+#: Bound on retained permission requests. A peer that stops being answered must
+#: not be able to grow the client's permission table without limit, and a request
+#: whose turn already settled is dropped by
+#: :meth:`AcpClient.forget_permissions_for_session`.
+ACP_MAX_PENDING_PERMISSIONS = 256
+
+
+def _hashable_request_id(request_id: Any) -> Any:
+    """Return a dict-safe id, so an unhashable caller value is a typed error."""
+    try:
+        hash(request_id)
+    except TypeError as exc:
+        raise DshValidationError("permission request id must be a string or integer") from exc
+    return request_id
+
+
+def _is_cancellation_signal(error: AcpError, pending: _PendingRequest) -> bool:
+    """True when a failed turn is really a cancellation, not a failure.
+
+    Either the caller asked to cancel (the peer may still answer normally), or the
+    peer itself reported cancellation with JSON-RPC ``-32800``.
+    """
+    if pending.cancel_requested:
+        return True
+    if error.code == "cancelled":
+        return True
+    if isinstance(error, AcpRemoteError) and error.peer_error.code == JSONRPC_REQUEST_CANCELLED:
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class AcpPeerError:
     """A JSON-RPC error object received from the peer."""
@@ -175,11 +284,19 @@ class AcpRemoteError(AcpError):
     """The peer answered a request with a JSON-RPC error response."""
 
     def __init__(self, peer_error: AcpPeerError, *, method: str = ""):
-        detail = peer_error.message or "ACP peer reported an error"
+        # Peer text is untrusted: cap and redact it, and never attach the raw
+        # error object, so a huge or credential-bearing payload cannot be
+        # amplified into an SSE message or leak through diagnostics.
+        detail = peer_error.message[:512] if peer_error.message else "ACP peer reported an error"
         if method:
             detail = "%s (%s)" % (detail, method)
-        super().__init__("remote_error", _redact_sensitive(detail), data=peer_error.data)
-        self.peer_error = peer_error
+        data = _redact_structure(peer_error.data) if peer_error.data is not None else None
+        super().__init__("remote_error", _redact_sensitive(detail), data=data)
+        self.peer_error = AcpPeerError(
+            code=peer_error.code,
+            message=_redact_sensitive(peer_error.message[:512]),
+            data=data,
+        )
         self.method = method
 
     @property
@@ -220,6 +337,8 @@ class AcpMessage:
 
     @property
     def is_response(self) -> bool:
+        # A frame that carries a method is a request, whatever else it holds, so
+        # it must not be correlated against a pending request id.
         return self.has_id and "method" not in self.raw
 
     @property
@@ -246,6 +365,23 @@ class AcpMessage:
         return dict(self.raw)
 
 
+def validate_jsonrpc_id(value: Any) -> Any:
+    """Return a correlation-safe JSON-RPC id, or raise for an unusable one.
+
+    JSON-RPC allows a string or a number, but Python equates ``True == 1`` and
+    ``1.0 == 1``. Without normalizing, a peer could settle an unrelated pending
+    request (for example the ``initialize`` handshake) by answering with a
+    boolean or float id. Bools and floats are therefore rejected, not coerced.
+    """
+    if isinstance(value, str):
+        if not value or len(value.encode("utf-8")) > 256:
+            raise DshValidationError("invalid JSON-RPC id")
+        return value
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DshValidationError("invalid JSON-RPC id")
+    return value
+
+
 def decode_frame(data: bytes) -> AcpMessage:
     """Decode one complete NDJSON frame.
 
@@ -267,6 +403,13 @@ def decode_frame(data: bytes) -> AcpMessage:
         raise AcpError("malformed_frame", "ACP frame was not a JSON object")
     if payload.get("jsonrpc") != "2.0":
         raise AcpError("malformed_frame", "ACP frame did not declare JSON-RPC 2.0")
+    if "id" in payload:
+        try:
+            payload["id"] = validate_jsonrpc_id(payload["id"])
+        except DshValidationError as exc:
+            # Dropped here so a peer cannot smuggle ``true``/``1.0`` into the
+            # pending-request table, where ``True == 1`` would settle request 1.
+            raise AcpError("malformed_frame", "ACP frame carried an unusable JSON-RPC id") from exc
     return AcpMessage(payload)
 
 
@@ -423,22 +566,38 @@ class AcpProcess:
         if not self._owns_process:
             self.close_stdin()
             return
+        pid = self.pid
+        if pid <= 0:
+            # ``os.getpgid(0)`` is this process's own group, so signalling with a
+            # missing pid would kill the backend instead of the peer. Only the
+            # stdin close is safe here.
+            self.close_stdin()
+            return
         if os.name == "posix":
             import signal
 
             try:
-                os.killpg(os.getpgid(self.pid), signal.SIGKILL if force else signal.SIGTERM)
+                os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
-                if self.poll() is None:
-                    (self._process.kill if force else self._process.terminate)()
-        elif self.poll() is None:
-            (self._process.kill if force else self._process.terminate)()
+                self._signal_directly(force=force)
+        else:
+            self._signal_directly(force=force)
         try:
             self._process.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             if not force:
                 self.terminate(force=True)
         except OSError:
+            pass
+
+    def _signal_directly(self, *, force: bool) -> None:
+        """Fall back to signalling the handle itself when the group is gone."""
+        if self.poll() is not None:
+            return
+        try:
+            (self._process.kill if force else self._process.terminate)()
+        except (AttributeError, OSError):
+            # A partial or already-detached handle must not raise out of close().
             pass
 
 
@@ -511,6 +670,14 @@ AcpPermissionListener = Callable[["AcpPermissionRequest"], None]
 #: Bounded per-turn buffer of ``session/update`` frames.
 ACP_MAX_SUBSCRIBED_UPDATES = 4096
 
+#: Bounded buffer of unclaimed inbound frames (notifications for a session that
+#: has no open subscription, plus responses to unknown or already-settled
+#: requests). A peer that streams updates forever without a matching consumer, or
+#: that answers ids nobody sent, must not be able to grow the backend without
+#: limit. The newest frames are dropped and counted, mirroring the subscription
+#: buffer, so a stalled projection degrades visibly instead of exhausting memory.
+ACP_MAX_UNCLAIMED_INBOX = 4096
+
 
 class AcpSessionUpdates:
     """The ``session/update`` notifications of one in-flight prompt turn.
@@ -554,6 +721,12 @@ class AcpSessionUpdates:
         return self._transport._close_session_updates(self)
 
 
+#: Bound on the per-connection set of answered inbound request ids. The set must
+#: be bounded because ids are peer-chosen; evicting the oldest only risks
+#: re-answering an id the peer reused after thousands of others.
+ACP_MAX_RESPONDED_IDS = 4096
+
+
 class AcpTransport:
     """Bidirectional NDJSON JSON-RPC transport over one ACP process.
 
@@ -579,10 +752,11 @@ class AcpTransport:
 
         self._state = threading.Condition()
         self._inbox: list[AcpMessage] = []
+        self._inbox_dropped = 0
         self._subscriptions: dict[str, AcpSessionUpdates] = {}
         self._pending: dict[Any, _PendingRequest] = {}
         self._handlers: dict[str, AcpRequestHandler] = {}
-        self._responded: set[Any] = set()
+        self._responded: dict[Any, None] = {}
         self._framing_errors: list[AcpError] = []
         self._next_id = 1
         self._stdout_exhausted = False
@@ -617,6 +791,20 @@ class AcpTransport:
             return tuple(self._framing_errors)
 
     @property
+    def inbox_dropped(self) -> int:
+        """Count of unclaimed inbound frames dropped because the buffer was full."""
+        with self._state:
+            return self._inbox_dropped
+
+    def _append_inbox_locked(self, message: AcpMessage) -> None:
+        """Queue one unclaimed frame, keeping the inbox bounded."""
+        if len(self._inbox) >= ACP_MAX_UNCLAIMED_INBOX:
+            self._inbox_dropped += 1
+            return
+        self._inbox.append(message)
+        self._state.notify_all()
+
+    @property
     def stderr_diagnostics(self) -> str:
         with self._state:
             data = bytes(self._stderr_bytes)
@@ -646,6 +834,16 @@ class AcpTransport:
         return self
 
     def is_alive(self) -> bool:
+        """True only when the process runs and this transport can still be used.
+
+        The process can outlive its usefulness: a frame-too-large, write timeout,
+        or reader failure closes the transport while the peer keeps running. A
+        caller that reuses the client on process liveness alone would keep sending
+        into a closed transport, so liveness includes the closed flag.
+        """
+        with self._state:
+            if self._closed:
+                return False
         return self._process.poll() is None
 
     def close_stdin(self) -> None:
@@ -684,9 +882,8 @@ class AcpTransport:
     def send_response(self, request_id: Any, result: Any) -> bool:
         """Answer an inbound request exactly once."""
         with self._state:
-            if request_id in self._responded:
+            if not self._claim_responded_locked(request_id):
                 return False
-            self._responded.add(request_id)
         self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
         return True
 
@@ -694,9 +891,8 @@ class AcpTransport:
         """Refuse an inbound request exactly once with a JSON-RPC error."""
         detail = _redact_sensitive(str(message or "ACP request failed"))[:512]
         with self._state:
-            if request_id in self._responded:
+            if not self._claim_responded_locked(request_id):
                 return False
-            self._responded.add(request_id)
         self._write(
             {
                 "jsonrpc": "2.0",
@@ -704,6 +900,20 @@ class AcpTransport:
                 "error": {"code": int(code), "message": detail},
             }
         )
+        return True
+
+    def _claim_responded_locked(self, request_id: Any) -> bool:
+        """Claim the right to answer one inbound id; False when already answered.
+
+        The record is bounded so a peer that sends unbounded distinct ids cannot
+        grow the set forever. Eviction only loses the guarantee for an id reused
+        after thousands of others, which the caller detects as a fresh request.
+        """
+        if request_id in self._responded:
+            return False
+        self._responded[request_id] = None
+        while len(self._responded) > ACP_MAX_RESPONDED_IDS:
+            self._responded.pop(next(iter(self._responded)), None)
         return True
 
     def send_request(
@@ -715,6 +925,7 @@ class AcpTransport:
         deadline: Optional[float] = None,
         cancellable: bool = False,
         cancel_event: Optional[threading.Event] = None,
+        pending: Optional[_PendingRequest] = None,
     ) -> Any:
         """Send a request and block until its response arrives.
 
@@ -727,6 +938,10 @@ class AcpTransport:
             cancellable: send ``$/cancel_request`` when a cancel is observed, and
                 report a cancelled outcome rather than hanging.
             cancel_event: cooperative cancellation signal.
+            pending: an optional caller-owned request record. The caller can read
+                its ``cancel_requested`` flag after the call settles, which is how
+                a cancelled turn is reported as cancelled even when the peer folds
+                cancellation into a normal result.
 
         Returns:
             The JSON-RPC ``result`` payload.
@@ -748,12 +963,20 @@ class AcpTransport:
                 raise self._close_error or AcpError("closed", "ACP transport is closed")
             request_id = self._next_id
             self._next_id += 1
-            pending = _PendingRequest(
-                request_id=request_id,
-                method=method,
-                deadline=deadline,
-                cancellable=cancellable,
-            )
+            if pending is None:
+                pending = _PendingRequest(
+                    request_id=request_id,
+                    method=method,
+                    deadline=deadline,
+                    cancellable=cancellable,
+                )
+            else:
+                # A caller-owned record keeps its identity but must be registered
+                # under the id this transport actually allocated.
+                pending.request_id = request_id
+                pending.method = method
+                pending.deadline = deadline
+                pending.cancellable = cancellable
             self._pending[request_id] = pending
 
         try:
@@ -931,30 +1154,51 @@ class AcpTransport:
         with self._state:
             if self._write_failed is not None:
                 raise self._write_failed
-        data = encode_frame(message)
+            if self._closed:
+                # A deliberate local close must not look like a wire failure, and
+                # a fire-and-forget frame must not be written to a closed peer.
+                raise self._close_error or AcpError("closed", "ACP transport is closed")
+        try:
+            data = encode_frame(message)
+        except (TypeError, ValueError, RecursionError) as exc:
+            # Caller-supplied params/results reach here unfiltered, so a
+            # non-serializable value must become a typed transport error rather
+            # than a bare TypeError out of prompt()/respond_permission().
+            raise AcpError("write_failed", "ACP frame was not JSON serializable") from exc
         with self._write_lock:
             with self._state:
                 if self._write_failed is not None:
                     raise self._write_failed
             stdin = self._process.stdin
+            error: AcpError
             if stdin is None:
                 error = AcpError("write_failed", "ACP process stdin is unavailable")
-                with self._state:
-                    self._write_failed = error
+                self._invalidate_write(error)
                 raise error
             try:
-                stdin.write(data)
-                stdin.flush()
+                _write_frame_with_deadline(stdin, data, timeout_seconds=self._write_timeout)
+            except _AcpWriteTimeout:
+                # A partial frame may already be on the wire, so the peer's
+                # stream can no longer be trusted: fail the transport instead of
+                # letting the next writer append to a corrupt frame.
+                error = AcpError("write_timeout", "ACP frame write exceeded %ss" % self._write_timeout)
+                self._invalidate_write(error)
+                raise error
             except (OSError, ValueError) as exc:
                 error = AcpError("write_failed", "failed to write an ACP frame: %s" % type(exc).__name__)
-                with self._state:
-                    self._write_failed = error
-                    self._closed = True
-                    if self._close_error is None:
-                        self._close_error = error
-                    self._fail_locked(error)
-                    self._state.notify_all()
+                self._invalidate_write(error)
                 raise error
+
+    def _invalidate_write(self, error: AcpError) -> None:
+        """Record a terminal write failure and fail every in-flight request."""
+        with self._state:
+            if self._write_failed is None:
+                self._write_failed = error
+            self._closed = True
+            if self._close_error is None:
+                self._close_error = error
+            self._fail_locked(error)
+            self._state.notify_all()
 
     def _read_loop(self) -> None:
         stream = self._process.stdout
@@ -1029,8 +1273,7 @@ class AcpTransport:
                 pending = self._pending.get(message.request_id)
                 if pending is None:
                     # Response to an unknown or already-settled request.
-                    self._inbox.append(message)
-                    self._state.notify_all()
+                    self._append_inbox_locked(message)
                     return True
                 if message.is_error:
                     peer_error = message.peer_error or AcpPeerError(
@@ -1062,14 +1305,29 @@ class AcpTransport:
         if subscription is not None:
             self._claim_update_locked(subscription, message)
         else:
-            self._inbox.append(message)
+            self._append_inbox_locked(message)
         self._state.notify_all()
 
     def _handle_inbound_request(self, message: AcpMessage) -> None:
         method = message.method or ""
-        responder = self._responder_for(message.request_id)
-        if responder is None:
+        with self._state:
+            already_answered = message.request_id in self._responded
+            closed = self._closed
+        if closed:
             return
+        if already_answered:
+            # Answering again would double-settle the peer's id, but staying
+            # silent deadlocks a peer that reused one. Report the conflict so the
+            # peer can fail fast instead of waiting forever.
+            with self._state:
+                conflict_id = self._conflict_request_id(message.request_id)
+            self.send_error_response(
+                conflict_id,
+                JSONRPC_INTERNAL_ERROR,
+                "ACP request id was already answered",
+            )
+            return
+        responder = _InboundResponder(self, message.request_id)
         with self._state:
             handler = self._handlers.get(method)
         if handler is None:
@@ -1083,11 +1341,13 @@ class AcpTransport:
         if not claimed:
             responder.refuse(JSONRPC_METHOD_NOT_FOUND, "unsupported ACP method: %s" % method)
 
-    def _responder_for(self, request_id: Any) -> Optional["_InboundResponder"]:
-        with self._state:
-            if request_id in self._responded or self._closed:
-                return None
-            return _InboundResponder(self, request_id)
+    def _conflict_request_id(self, request_id: Any) -> Any:
+        """Return an id safe to echo for a conflicting request response."""
+        if request_id in self._responded:
+            # Already answered under this exact value, so echoing it is truthful
+            # but would be deduplicated; use a distinguishable string form.
+            return "conflict:%s" % request_id
+        return request_id
 
     def _fail_locked(self, error: AcpError) -> None:
         for pending in self._pending.values():
@@ -1726,6 +1986,12 @@ class AcpClient:
         timeout_seconds: Optional[float],
         cancel_event: Optional[threading.Event],
     ) -> AcpPromptOutcome:
+        pending = _PendingRequest(
+            request_id=None,
+            method=AgentMethod.SESSION_PROMPT,
+            deadline=None,
+            cancellable=True,
+        )
         try:
             result = self.transport.send_request(
                 AgentMethod.SESSION_PROMPT,
@@ -1733,9 +1999,10 @@ class AcpClient:
                 timeout_seconds=timeout_seconds,
                 cancellable=True,
                 cancel_event=cancel_event,
+                pending=pending,
             )
         except AcpError as exc:
-            if exc.code == "cancelled":
+            if _is_cancellation_signal(exc, pending):
                 for frame in subscription.drain():
                     self._append_turn_event(events, frame, on_event)
                 return AcpPromptOutcome(
@@ -1765,12 +2032,21 @@ class AcpClient:
             {"text": "".join(text_parts), "stop_reason": stop_reason},
         )
         if on_event is not None:
-            on_event(final_event)
+            # A projection layer must not be able to break a settled turn.
+            try:
+                on_event(final_event)
+            except Exception:
+                pass
         events.append(final_event)
+        # A turn the caller cancelled is never reported as success, even when the
+        # peer folds cancellation into a normal ``end_turn`` result. Completion
+        # would otherwise let the caller import a user-aborted turn as a durable,
+        # evaluated run. The peer's own reason stays visible in ``raw``.
+        cancelled = stop_reason == AcpStopReason.CANCELLED or pending.cancel_requested
         return AcpPromptOutcome(
             session_id=remote_id,
-            stop_reason=stop_reason,
-            cancelled=stop_reason == AcpStopReason.CANCELLED,
+            stop_reason=AcpStopReason.CANCELLED if cancelled else stop_reason,
+            cancelled=cancelled,
             usage=dict(usage) if isinstance(usage, Mapping) else None,
             updates=tuple(events),
             text=final_event.data["text"],
@@ -1820,30 +2096,40 @@ class AcpClient:
             return tuple(self._permissions.values())
 
     def respond_permission(self, request_id: Any, option_id: str) -> bool:
-        """Select one advertised permission option exactly once."""
+        """Select one advertised permission option exactly once.
+
+        The answer is gated by this transport's own allowlist as well as by what
+        the peer advertised, so a peer cannot widen the policy by offering (for
+        example) an ``allow_always`` option: only an explicit once-only allow or
+        reject is ever sent.
+        """
+        key = _hashable_request_id(request_id)
         with self._lock:
-            request = self._permissions.get(request_id)
+            request = self._permissions.get(key)
         if request is None:
             raise AcpError("unknown_permission_request", "no such pending permission request")
+        if option_id not in (ACP_ALLOW_ONCE_OPTION_ID, ACP_REJECT_ONCE_OPTION_ID):
+            raise DshValidationError("permission option is not accepted by this runtime")
         if option_id not in request.option_ids:
             raise DshValidationError("permission option was not offered by the peer")
         sent = self.transport.send_response(
-            request_id,
+            key,
             {"outcome": {"outcome": "selected", "optionId": option_id}},
         )
         if sent:
-            self._forget_permission(request_id)
+            self._forget_permission(key)
         return sent
 
     def cancel_permission(self, request_id: Any) -> bool:
         """Answer ``cancelled``, which DSH folds into its cancelled outcome."""
+        key = _hashable_request_id(request_id)
         with self._lock:
-            request = self._permissions.get(request_id)
+            request = self._permissions.get(key)
         if request is None:
             raise AcpError("unknown_permission_request", "no such pending permission request")
-        sent = self.transport.send_response(request_id, {"outcome": {"outcome": "cancelled"}})
+        sent = self.transport.send_response(key, {"outcome": {"outcome": "cancelled"}})
         if sent:
-            self._forget_permission(request_id)
+            self._forget_permission(key)
         return sent
 
     def _claim_permission_request(
@@ -1855,6 +2141,12 @@ class AcpClient:
         params = message.params
         if not isinstance(params, Mapping):
             return False
+        session_id = str(params.get("sessionId") or "").strip()
+        if not session_id:
+            # A peer-supplied request that names no session cannot be routed to an
+            # owner, so nothing would ever answer it. Reject it here instead of
+            # retaining an unanswerable entry for the life of the process.
+            return False
         tool_call = params.get("toolCall")
         tool_call_id = ""
         if isinstance(tool_call, Mapping):
@@ -1862,7 +2154,7 @@ class AcpClient:
         options = params.get("options")
         request = AcpPermissionRequest(
             request_id=message.request_id,
-            session_id=str(params.get("sessionId") or ""),
+            session_id=session_id,
             tool_call_id=tool_call_id,
             options=tuple(dict(option) for option in options if isinstance(option, Mapping))
             if isinstance(options, list)
@@ -1871,6 +2163,8 @@ class AcpClient:
         )
         with self._lock:
             self._permissions[message.request_id] = request
+            while len(self._permissions) > ACP_MAX_PENDING_PERMISSIONS:
+                self._permissions.pop(next(iter(self._permissions)), None)
         listener = self.on_permission
         if listener is not None:
             # The listener runs outside the client lock: a projection layer that
@@ -1882,6 +2176,18 @@ class AcpClient:
                 # request into a protocol error; the request stays pending.
                 pass
         return True
+
+    def forget_permissions_for_session(self, session_id: str) -> None:
+        """Drop permissions an abandoned turn can no longer answer.
+
+        Called when a turn settles so a later HTTP request cannot answer a
+        permission request that belongs to a finished turn.
+        """
+        key = str(session_id)
+        with self._lock:
+            for request_id, request in list(self._permissions.items()):
+                if request.session_id == key:
+                    self._permissions.pop(request_id, None)
 
     def _forget_permission(self, request_id: Any) -> None:
         with self._lock:

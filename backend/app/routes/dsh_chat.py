@@ -177,7 +177,13 @@ async def dsh_chat(request: Request) -> StreamingResponse:
         payload = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
         payload = None
-    return StreamingResponse(_chat_event_stream(payload), media_type="text/event-stream")
+    return StreamingResponse(
+        _chat_event_stream(payload),
+        media_type="text/event-stream",
+        # Same anti-buffering contract as the ACP route: a proxy that buffers the
+        # stream would defeat the point of streaming live events.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/chat/{operation_id}/cancel")

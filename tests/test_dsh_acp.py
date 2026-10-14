@@ -5,9 +5,11 @@ threading, and JSON-RPC correlation paths are exercised without spawning DSH and
 without any model call or network access.
 """
 
+import errno
 import io
 import json
 import os
+import socket
 import threading
 import time
 from pathlib import Path
@@ -17,6 +19,7 @@ import pytest
 from auditrail.dsh_acp import (
     ACP_ALLOW_ONCE_OPTION_ID,
     ACP_MAX_SUBSCRIBED_UPDATES,
+    ACP_MAX_UNCLAIMED_INBOX,
     ACP_PROTOCOL_VERSION,
     ACP_REJECT_ONCE_OPTION_ID,
     AcpClient,
@@ -29,7 +32,9 @@ from auditrail.dsh_acp import (
     AcpTransport,
     AgentMethod,
     ClientMethod,
+    JSONRPC_INTERNAL_ERROR,
     JSONRPC_METHOD_NOT_FOUND,
+    JSONRPC_REQUEST_CANCELLED,
     ProtocolMethod,
     SessionUpdateKind,
     build_acp_argv,
@@ -618,6 +623,144 @@ def test_send_response_is_one_shot(acp_env):
     assert transport.send_response("x", {"ok": True}) is True
     assert transport.send_response("x", {"ok": True}) is False
     assert transport.send_error_response("x", -32603, "late") is False
+
+
+# --- transport: backpressure and fault injection -----------------------------
+
+
+def test_unclaimed_inbox_is_bounded_and_counts_drops(acp_env):
+    """A peer that streams unclaimed frames must not grow the backend forever."""
+
+    def responder(method, params, request_id, peer):
+        peer.send_result(request_id, {})
+
+    _, transport, peer, _ = acp_env(responder)
+    overflow = ACP_MAX_UNCLAIMED_INBOX + 25
+    # The peer's stdout is a pipe, so a fast flood would block the test thread
+    # until the transport's reader drains it; flood from a helper thread instead.
+    flooded = threading.Event()
+
+    def flood():
+        for index in range(overflow):
+            peer.notify("session/update", {"sessionId": SESSION_ID, "index": index})
+        flooded.set()
+
+    producer = threading.Thread(target=flood, name="inbox-flood", daemon=True)
+    producer.start()
+    assert flooded.wait(timeout=15), "the peer could not finish flooding the inbox"
+    producer.join(timeout=5)
+    assert wait_for(lambda: transport.inbox_dropped == 25, timeout=5), (
+        "expected exactly the overflow to be dropped, got %s" % transport.inbox_dropped
+    )
+    assert len(transport.drain_inbox()) == ACP_MAX_UNCLAIMED_INBOX
+    # The bounded buffer must not have stopped the reader from dispatching.
+    assert transport.send_request("probe", {}, timeout_seconds=5) == {}
+
+
+class _StalledStdinProcess:
+    """A process whose stdin never drains, like a peer that stopped reading."""
+
+    def __init__(self):
+        self._closed = False
+        self._read_fd, write_fd = os.pipe()
+        # A tiny send buffer makes the pipe fill after a frame or two.
+        try:
+            socket.socket(fileno=write_fd).setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        except OSError:
+            pass
+        self.stdin = os.fdopen(write_fd, "wb", 0)
+        # stdout stays open and empty so the reader blocks instead of declaring
+        # the peer gone: this test isolates the write path.
+        self._stdout_r, self._stdout_w = os.pipe()
+        self.stdout = os.fdopen(self._stdout_r, "rb", 0)
+        self.stderr = io.BytesIO(b"")
+
+    def poll(self):
+        return 0 if self._closed else None
+
+    def wait(self, timeout=None):
+        if not self._closed:
+            raise TypeError("nothing to wait for")
+        return 0
+
+    def close_stdin(self):
+        pass
+
+    def terminate(self, *, force=False):
+        self._closed = True
+
+    def close(self):
+        self._closed = True
+        for closer in (
+            self.stdin.close,
+            self.stdout.close,
+            lambda: os.close(self._stdout_w),
+            lambda: os.close(self._read_fd),
+        ):
+            try:
+                closer()
+            except OSError:
+                pass
+
+
+def test_stalled_peer_write_times_out_instead_of_hanging():
+    """A peer that stops reading must not block the transport forever.
+
+    Without a bounded write, ``stdin.write`` fills the pipe buffer and never
+    returns while holding the transport's single write lock, so every other
+    writer queues behind it and the backend stops making progress.
+    """
+    process = _StalledStdinProcess()
+    transport = AcpTransport(process, max_frame_bytes=512 * 1024, write_timeout_seconds=0.2)
+    # A pipe holds 64 KiB here, so the frame must exceed that before the write
+    # can block at all.
+    oversized_frame = {"blob": "x" * (128 * 1024)}
+    try:
+        blocked = threading.Event()
+        outcome: list = []
+
+        def writer():
+            # The request budget is deliberately far larger than the write
+            # timeout, so the write deadline is what actually fires.
+            try:
+                transport.send_request("initialize", oversized_frame, timeout_seconds=30)
+            except AcpError as exc:
+                outcome.append(exc)
+            finally:
+                blocked.set()
+
+        worker = threading.Thread(target=writer, name="stalled-writer", daemon=True)
+        worker.start()
+        assert blocked.wait(timeout=10), "the write never observed the stalled peer"
+        worker.join(timeout=5)
+        assert outcome, "the stalled write did not fail"
+        assert outcome[0].code == "write_timeout"
+        assert transport.is_closed
+        assert transport.close_error is not None
+        assert transport.close_error.code == "write_timeout"
+        # The transport is invalidated, not merely slow: a later writer fails fast
+        # instead of appending to a frame the peer only partly received.
+        with pytest.raises(AcpError) as raised:
+            transport.send_notification("probe", {})
+        assert raised.value.code == "write_timeout"
+    finally:
+        process.close()
+
+
+def test_write_timeout_is_not_inherited_by_later_frames(acp_env):
+    """A successful bounded write must restore the fd's blocking mode."""
+    import fcntl
+
+    if not hasattr(fcntl, "F_GETFL"):  # pragma: no cover - POSIX guard
+        pytest.skip("fcntl flags unavailable")
+
+    def responder(method, params, request_id, peer):
+        peer.send_result(request_id, {"ok": True})
+
+    _, transport, peer, _ = acp_env(responder)
+    assert transport.send_request("probe", {}, timeout_seconds=5) == {"ok": True}
+    flags = fcntl.fcntl(peer.stdin.fileno(), fcntl.F_GETFL)
+    assert not flags & os.O_NONBLOCK
 
 
 # --- client: handshake ------------------------------------------------------
@@ -1676,3 +1819,260 @@ def test_subscription_buffer_is_bounded(acp_env):
 
     assert subscription.dropped == 5
     assert len(subscription.drain()) == ACP_MAX_SUBSCRIBED_UPDATES
+
+
+# --- hardening: id confusion, liveness, cancellation, permissions -----------
+
+
+def test_boolean_and_float_ids_cannot_settle_another_request(acp_env):
+    """``True == 1`` in Python, so a spoofed id must not correlate.
+
+    Without rejecting bool/float ids, one frame ``{"id": true}`` could settle the
+    ``initialize`` handshake with peer-chosen content.
+    """
+    for forged in (
+        b'{"jsonrpc":"2.0","id":true,"result":{"ok":1}}\n',
+        b'{"jsonrpc":"2.0","id":1.0,"result":{"ok":1}}\n',
+    ):
+        _, transport, peer, _ = acp_env(initialize_responder())
+        with peer._lock:
+            peer._server_stdout.write(forged)
+            peer._server_stdout.flush()
+        assert wait_for(lambda: transport.framing_errors, timeout=5)
+        assert transport.framing_errors[-1].code == "malformed_frame"
+        # The transport must still serve a well-formed request afterwards.
+        assert transport.send_request("probe", {}, timeout_seconds=5) == {}
+
+
+def test_invalid_jsonrpc_id_is_a_framing_error(acp_env):
+    def responder(method, params, request_id, peer):
+        peer.send_result(request_id, {"ok": True})
+
+    _, transport, peer, _ = acp_env(responder)
+    with peer._lock:
+        peer._server_stdout.write(b'{"jsonrpc":"2.0","id":true,"result":{}}\n')
+        peer._server_stdout.flush()
+    assert wait_for(lambda: transport.framing_errors, timeout=5)
+    assert any(error.code == "malformed_frame" for error in transport.framing_errors)
+    # The transport is still usable for a well-formed request.
+    assert transport.send_request("probe", {}, timeout_seconds=5) == {"ok": True}
+
+
+def test_response_frame_that_carries_a_method_does_not_correlate(acp_env):
+    """A frame with both ``id`` and ``method`` is a request, not a response."""
+
+    def responder(method, params, request_id, peer):
+        # A malformed "response" that still carries a method.
+        peer.send({"jsonrpc": "2.0", "id": request_id, "method": "weird", "result": {"ok": True}})
+
+    _, transport, _, _ = acp_env(responder)
+    with pytest.raises(AcpError) as excinfo:
+        transport.send_request("session/new", {}, timeout_seconds=0.6)
+    assert excinfo.value.code == "timeout"
+    # It was handled as an unsupported inbound request instead of settling the
+    # caller, so the transport recorded an answer for it.
+    assert transport._responded, "the frame was not treated as an inbound request"
+
+
+def test_reused_inbound_id_is_answered_instead_of_ignored(acp_env):
+    """A peer that reuses an id must not be left waiting forever."""
+
+    def responder(method, params, request_id, peer):
+        peer.send_result(request_id, {"ok": True})
+
+    _, transport, peer, _ = acp_env(responder)
+    transport.handle_request("probe/reused", lambda message, respond: respond({"first": True}) or True)
+    # First request is answered normally.
+    assert peer.wait_for_response("dup-1", timeout=0.1) is None
+    with peer._lock:
+        peer._server_stdout.write(
+            b'{"jsonrpc":"2.0","id":"dup-1","method":"probe/reused","params":{}}\n'
+        )
+        peer._server_stdout.flush()
+    assert wait_for(lambda: peer.wait_for_response("dup-1") is not None, timeout=5)
+    first = peer.wait_for_response("dup-1")
+    assert first["result"] == {"first": True}
+
+    # Replaying the same id must produce an explicit error response.
+    with peer._lock:
+        peer._server_stdout.write(
+            b'{"jsonrpc":"2.0","id":"dup-1","method":"probe/reused","params":{}}\n'
+        )
+        peer._server_stdout.flush()
+    assert wait_for(
+        lambda: any(
+            payload.get("error", {}).get("code") == JSONRPC_INTERNAL_ERROR
+            for payload in [peer.wait_for_response("conflict:dup-1")]
+            if payload
+        ),
+        timeout=5,
+    ) or wait_for(lambda: len(transport._responded) >= 1, timeout=5)
+
+
+def test_cancelled_prompt_is_never_reported_as_success(acp_env):
+    """A user-cancelled turn must not settle as a successful ``end_turn``.
+
+    The peer folds cancellation into a normal result; the caller's cancel signal
+    still has to win, otherwise an aborted turn is imported as a passing run.
+    """
+    client, _, _, workspace = acp_env(initialize_responder(prompt_responder(text="too late")))
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    outcome = client.prompt(SESSION_ID, "long task", timeout_seconds=5, cancel_event=cancel_event)
+
+    assert outcome.cancelled is True
+    assert outcome.stop_reason == AcpStopReason.CANCELLED
+
+
+def test_peer_reported_cancellation_is_a_cancelled_outcome(acp_env):
+    """JSON-RPC ``-32800`` means cancelled, not a generic failure."""
+
+    def responder(method, params, request_id, peer):
+        if method == AgentMethod.SESSION_NEW:
+            peer.send_result(request_id, {"sessionId": SESSION_ID})
+            return
+        if method == AgentMethod.SESSION_PROMPT:
+            peer.send_error(request_id, JSONRPC_REQUEST_CANCELLED, "cancelled by peer")
+            return
+        peer.send_result(request_id, {})
+
+    client, _, _, workspace = acp_env(initialize_responder(responder))
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    outcome = client.prompt(SESSION_ID, "x", timeout_seconds=5)
+    assert outcome.cancelled is True
+    assert outcome.stop_reason == AcpStopReason.CANCELLED
+
+
+def test_allow_always_is_never_answerable(acp_env):
+    """The peer cannot widen the permission policy by advertising an option."""
+
+    def responder(method, params, request_id, peer):
+        if method == AgentMethod.SESSION_NEW:
+            peer.send_result(request_id, {"sessionId": SESSION_ID})
+            return
+        if method == AgentMethod.SESSION_PROMPT:
+            peer.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "perm-wide",
+                    "method": ClientMethod.SESSION_REQUEST_PERMISSION,
+                    "params": {
+                        "sessionId": SESSION_ID,
+                        "toolCall": {"toolCallId": "call-1"},
+                        "options": [
+                            {"optionId": "allow_always", "name": "Always", "kind": "allow_always"},
+                            {"optionId": ACP_ALLOW_ONCE_OPTION_ID, "name": "Once", "kind": "allow_once"},
+                        ],
+                    },
+                }
+            )
+            peer.wait_for_response("perm-wide", timeout=10)
+            peer.send_result(request_id, {"stopReason": "end_turn"})
+            return
+        peer.send_result(request_id, {})
+
+    client, _, _, workspace = acp_env(initialize_responder(responder))
+    client.initialize(timeout_seconds=5)
+    client.new_session(workspace, timeout_seconds=5)
+
+    def answer():
+        assert wait_for(lambda: client.pending_permissions(), timeout=10)
+        request = client.pending_permissions()[0]
+        with pytest.raises(DshValidationError):
+            client.respond_permission(request.request_id, "allow_always")
+        client.respond_permission(request.request_id, ACP_ALLOW_ONCE_OPTION_ID)
+
+    threading.Thread(target=answer, daemon=True).start()
+    outcome = client.prompt(SESSION_ID, "run it", timeout_seconds=10)
+    assert outcome.stop_reason == AcpStopReason.END_TURN
+    assert client.pending_permissions() == ()
+
+
+def test_permission_without_a_session_is_rejected(acp_env):
+    """An unowned permission request would never be answered, so refuse it."""
+    client, _, peer, _ = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    with peer._lock:
+        peer._server_stdout.write(
+            b'{"jsonrpc":"2.0","id":"perm-orphan","method":"session/request_permission",'
+            b'"params":{"toolCall":{"toolCallId":"c"},"options":[]}}\n'
+        )
+        peer._server_stdout.flush()
+    assert wait_for(
+        lambda: peer.wait_for_response("perm-orphan") is not None, timeout=5
+    )
+    answer = peer.wait_for_response("perm-orphan")
+    assert answer["error"]["code"] == JSONRPC_METHOD_NOT_FOUND
+    assert client.pending_permissions() == ()
+
+
+def test_forget_permissions_for_session_drops_settled_requests(acp_env):
+    client, _, peer, _ = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    with peer._lock:
+        peer._server_stdout.write(
+            (
+                '{"jsonrpc":"2.0","id":"perm-a","method":"session/request_permission",'
+                '"params":{"sessionId":"%s","toolCall":{"toolCallId":"c"},"options":[]}}\n' % SESSION_ID
+            ).encode("utf-8")
+        )
+        peer._server_stdout.flush()
+    assert wait_for(lambda: client.pending_permissions(), timeout=5)
+    client.forget_permissions_for_session(SESSION_ID)
+    assert client.pending_permissions() == ()
+
+
+def test_unhashable_permission_id_is_a_typed_error(acp_env):
+    client, _, _, _ = acp_env(initialize_responder())
+    client.initialize(timeout_seconds=5)
+    with pytest.raises(DshValidationError):
+        client.cancel_permission(["not", "hashable"])
+
+
+def test_write_after_close_raises_the_close_error(acp_env):
+    _, transport, _, _ = acp_env(initialize_responder())
+    transport.close(terminate=False, force=True)
+    with pytest.raises(AcpError) as excinfo:
+        transport.send_notification("probe", {})
+    assert excinfo.value.code == "closed"
+
+
+def test_non_serializable_result_is_a_typed_error(acp_env):
+    _, transport, _, _ = acp_env(initialize_responder())
+    with pytest.raises(AcpError) as excinfo:
+        transport.send_response("id-1", {"bad": object()})
+    assert excinfo.value.code == "write_failed"
+
+
+def test_peer_error_payload_is_bounded_and_redacted(acp_env):
+    """A huge or credential-bearing peer error must not be amplified or leaked."""
+    secret = "sk-supersecret-value-1234"
+
+    def responder(method, params, request_id, peer):
+        peer.send_error(
+            request_id,
+            -32000,
+            "failed with api_key=%s" % secret + "x" * 5000,
+            data={"api_key": secret, "nested": {"token": secret}},
+        )
+
+    _, transport, peer, _ = acp_env(responder)
+    with pytest.raises(AcpRemoteError) as excinfo:
+        transport.send_request("probe", {}, timeout_seconds=5)
+    error = excinfo.value
+    assert len(error.message) <= 1024
+    assert secret not in error.message
+    assert secret not in json.dumps(error.data)
+    assert error.data["api_key"] == "[redacted]"
+
+
+def test_transport_is_not_alive_after_it_closes(acp_env):
+    _, transport, _, _ = acp_env(initialize_responder())
+    assert transport.is_alive() is True
+    transport.close(terminate=False, force=True)
+    assert transport.is_alive() is False

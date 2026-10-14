@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -476,6 +477,67 @@ def test_acp_manager_bounds_settled_operations(tmp_path, monkeypatch):
         assert manager.get_operation(operation_id).done.is_set()
 
 
+def test_operation_queue_applies_backpressure_but_keeps_terminal_events(monkeypatch):
+    """A stalled SSE reader must not grow the queue without limit.
+
+    Progress events are dropped once the buffer is nearly full, while the
+    low-volume events the SSE contract depends on are always queued.
+    """
+    import backend.app.runtime_manager as runtime_manager
+
+    monkeypatch.setattr(runtime_manager, "MAX_OPERATION_QUEUE", 8)
+    monkeypatch.setattr(runtime_manager, "_TERMINAL_QUEUE_RESERVE", 2)
+    operation = runtime_manager.AcpOperation("op-1", SESSION_ID, "prompt")
+
+    for index in range(50):
+        operation.emit("runtime_event", {"index": index})
+    assert operation.dropped_events > 0
+    assert operation.queue.qsize() == 6
+
+    # The reserved headroom means the terminal event still lands.
+    operation.emit("completed", {"stop_reason": "end_turn"})
+    drained = []
+    while not operation.queue.empty():
+        drained.append(operation.queue.get_nowait()["event"])
+    assert drained[-1] == "completed"
+    assert drained.count("runtime_event") == 6
+
+
+def test_operation_queue_never_drops_contract_events(monkeypatch):
+    import backend.app.runtime_manager as runtime_manager
+
+    monkeypatch.setattr(runtime_manager, "MAX_OPERATION_QUEUE", 4)
+    monkeypatch.setattr(runtime_manager, "_TERMINAL_QUEUE_RESERVE", 1)
+    operation = runtime_manager.AcpOperation("op-2", SESSION_ID, "prompt")
+
+    for _ in range(3):
+        operation.emit("started", {"operation_id": "op-2"})
+        operation.emit("permission_requested", {"request_id": "p"})
+        operation.emit("error", {"code": "boom"})
+        operation.emit("run_imported", {"run_id": "run"})
+    assert operation.dropped_events == 0
+    assert operation.queue.qsize() == 12
+
+
+def test_acp_manager_completed_event_reports_dropped_progress(tmp_path):
+    """The settled event always reports how much progress was shed."""
+    manager, workspace = _manager(tmp_path)
+    session = manager.create_session(workspace)
+    _write_durable_recording(tmp_path / "dsh-home", workspace, session.session_id)
+
+    operation = manager.prompt(session.session_id, "turn")
+    assert operation.done.wait(5)
+
+    events = []
+    while not operation.queue.empty():
+        events.append(operation.queue.get_nowait())
+    completed = [item for item in events if item["event"] == "completed"]
+    assert len(completed) == 1
+    # The field is always present so a client can distinguish "0 dropped" from
+    # "this server does not report drops".
+    assert completed[0]["data"]["dropped_events"] == 0
+
+
 def test_acp_manager_capabilities_are_negotiated_not_guessed(tmp_path):
     manager, workspace = _manager(tmp_path)
     manager.create_session(workspace)
@@ -718,6 +780,57 @@ def test_acp_manager_shutdown_settles_operations_and_closes_the_process(tmp_path
     assert operation.done.wait(5)
     assert process.dead is True
     assert manager.list_sessions() == []
+
+
+def test_acp_manager_shutdown_bounds_a_worker_that_never_settles(tmp_path):
+    """Shutdown must not hang on a worker that ignores cancellation."""
+    manager, workspace = _manager(tmp_path)
+    session = manager.create_session(workspace)
+    _write_durable_recording(tmp_path / "dsh-home", workspace, session.session_id)
+    # The fake peer blocks indefinitely: no release event is ever set.
+    session.client.release_prompt = threading.Event()
+    operation = manager.prompt(session.session_id, "stuck")
+    assert wait_for(lambda: session.client.prompt_calls)
+    process = manager.process
+
+    started = time.monotonic()
+    manager.shutdown()
+    elapsed = time.monotonic() - started
+
+    # Shutdown is bounded by its join timeout, and the process is force-closed
+    # even though the worker never settled on its own.
+    assert elapsed < 10, "shutdown blocked on a stuck worker"
+    assert process.dead is True
+    assert manager.list_sessions() == []
+    # A cancelled operation must never look successful.
+    assert operation.state != "completed"
+
+
+def test_route_shutdown_releases_the_manager_and_is_idempotent(injected_manager, tmp_path):
+    """The FastAPI shutdown hook must close the process and be safe to repeat."""
+    manager, workspace = _manager(tmp_path)
+    manager.create_session(workspace)
+    process = manager.process
+    injected_manager(manager)
+
+    dsh_acp_route.shutdown_acp_runtime()
+    assert process.dead is True
+    # A second call with no live manager must not raise.
+    dsh_acp_route.shutdown_acp_runtime()
+    assert dsh_acp_route._manager is None
+
+
+def test_manager_closed_is_reported_before_any_work_starts(tmp_path):
+    manager, workspace = _manager(tmp_path)
+    manager.shutdown()
+    with pytest.raises(AcpManagerError) as excinfo:
+        manager.create_session(workspace)
+    assert excinfo.value.code == "manager_closed"
+
+
+def test_max_concurrency_must_be_positive(tmp_path):
+    with pytest.raises(ValueError):
+        _manager(tmp_path, max_concurrency=0)
 
 
 # --- route: contract --------------------------------------------------------
@@ -1072,6 +1185,7 @@ def test_acp_prompt_route_streams_real_transport_and_imports(
         "stop_reason": "end_turn",
         "text": "tests pass",
         "cancelled": False,
+        "dropped_events": 0,
     }
     imported = events[-1][1]
     assert imported["session_id"] == session_id

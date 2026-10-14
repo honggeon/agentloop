@@ -116,6 +116,87 @@ def test_default_runner_never_uses_a_shell(monkeypatch, tmp_path):
     assert output.exit_code == 0
 
 
+def test_live_process_cancel_terminates_the_process_group(monkeypatch, tmp_path):
+    """A cancel signal must stop a running process, not just the waiting loop."""
+    stopped = []
+
+    class BlockingProcess:
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.stdin = None
+            self.returncode = None
+            self.pid = 2468
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired(["dsh"], timeout)
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    process = BlockingProcess()
+    monkeypatch.setattr("auditrail.dsh_headless.subprocess.Popen", lambda *args, **kwargs: process)
+
+    def fake_killpg(pid, sig):
+        stopped.append((pid, sig))
+        process.returncode = -15
+
+    monkeypatch.setattr("auditrail.dsh_headless.os.killpg", fake_killpg)
+    cancel_event = threading.Event()
+
+    def cancel_soon():
+        # The wait loop only observes the signal between polls, so give it a
+        # moment to enter the loop before cancelling.
+        threading.Event().wait(0.05)
+        cancel_event.set()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+    output = run_subprocess(
+        ("/opt/dsh/bin/dsh", "--json", "hello"),
+        cwd=tmp_path,
+        timeout_seconds=30,
+        cancel_event=cancel_event,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+    )
+
+    assert output.cancelled is True
+    assert output.timed_out is False
+    assert stopped == [(2468, 15)]
+
+
+def test_pre_set_cancel_never_spawns_a_process(monkeypatch, tmp_path):
+    """An already-cancelled request must not start a subprocess at all."""
+    spawned = []
+    monkeypatch.setattr(
+        "auditrail.dsh_headless.subprocess.Popen",
+        lambda *args, **kwargs: spawned.append(args) or None,
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    output = run_subprocess(
+        ("/opt/dsh/bin/dsh", "--json", "hello"),
+        cwd=tmp_path,
+        timeout_seconds=30,
+        cancel_event=cancel_event,
+        max_stdout_bytes=1024,
+        max_stderr_bytes=1024,
+    )
+
+    assert output.cancelled is True
+    assert output.exit_code is None
+    assert spawned == []
+
+
 def test_default_runner_terminates_process_group_on_timeout(monkeypatch, tmp_path):
     stopped = []
 

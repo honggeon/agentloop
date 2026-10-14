@@ -11,7 +11,34 @@ from auditrail.dsh_runtime import DshRuntimeConfig, DshValidationError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+ENV_FILE = PROJECT_ROOT / ".env"
+#: Set to a falsey value to skip ``.env`` loading. The test suite sets this so a
+#: developer's local ``.env`` cannot steer a test run (or leak its credentials).
+DOTENV_ENABLED_VAR = "AUDITRAIL_LOAD_DOTENV"
+
+_FALSEY = {"0", "false", "no", "off", ""}
+_dotenv_loaded = False
+
+
+def load_env_file() -> bool:
+    """Load the project ``.env`` at most once, unless explicitly disabled.
+
+    Real environment variables keep precedence over the file, so an operator can
+    always override a local default without editing ``.env``. An unrecognized
+    guard value leaves loading enabled rather than breaking startup, and a guard
+    lifted later still lets a caller retry the load.
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return True
+    if str(os.getenv(DOTENV_ENABLED_VAR, "true")).strip().lower() in _FALSEY:
+        return False
+    load_dotenv(ENV_FILE)
+    _dotenv_loaded = True
+    return True
+
+
+load_env_file()
 
 
 @dataclass(frozen=True)
@@ -36,6 +63,9 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    # Retry the load here so ``get_settings()`` still sees ``.env`` when the
+    # environment guard was lifted after this module was first imported.
+    load_env_file()
     origins = os.getenv(
         "CORS_ORIGINS",
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3080,http://127.0.0.1:3080",

@@ -1,11 +1,36 @@
+import os
+
 import pytest
 
+from backend.app import config as config_module
 from backend.app.config import (
     Settings,
     build_dsh_runtime_config,
     get_settings,
+    load_env_file,
     resolve_run_path,
 )
+
+
+def test_dotenv_loading_is_disabled_by_the_test_guard(monkeypatch):
+    """A developer's ``.env`` must not be able to steer a test run."""
+    monkeypatch.setenv(config_module.DOTENV_ENABLED_VAR, "0")
+    monkeypatch.setattr(config_module, "_dotenv_loaded", False)
+    assert load_env_file() is False
+    assert config_module._dotenv_loaded is False, "a disabled load must stay retryable"
+
+
+def test_dotenv_loading_reads_the_configured_file(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("AUDITRAIL_TEST_DOTENV_KEY=loaded-from-file\n", encoding="utf-8")
+    monkeypatch.delenv("AUDITRAIL_TEST_DOTENV_KEY", raising=False)
+    monkeypatch.setenv(config_module.DOTENV_ENABLED_VAR, "1")
+    monkeypatch.setattr(config_module, "ENV_FILE", env_file)
+    monkeypatch.setattr(config_module, "_dotenv_loaded", False)
+
+    assert load_env_file() is True
+    assert os.environ["AUDITRAIL_TEST_DOTENV_KEY"] == "loaded-from-file"
+    monkeypatch.delenv("AUDITRAIL_TEST_DOTENV_KEY", raising=False)
 
 
 def test_resolve_run_path_accepts_child_directory(tmp_path):

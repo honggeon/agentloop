@@ -593,10 +593,14 @@ function handleAcpEvent(item: LiveEvent) {
     dshAcpStatus.value = "completed";
     // completed 只表示 ACP 回合已结束；standard run 是否发布由 run_imported 决定。
     dshAcpPhase.value = completed.cancelled ? "cancelled" : "settled";
+    const dropped = completed.dropped_events || 0;
     pushDshStream({
-      kind: "status",
+      kind: dropped > 0 ? "error" : "status",
       title: "ACP 回合已结束",
-      detail: `stop_reason: ${completed.stop_reason}\ncancelled: ${completed.cancelled}\n（回合结束不等于任务成功，等待 run_imported 或 import 阶段的 error）`
+      detail:
+        `stop_reason: ${completed.stop_reason}\ncancelled: ${completed.cancelled}\n` +
+        (dropped > 0 ? `已被丢弃的进度事件: ${dropped}（本页读取过慢，终态事件不受影响）\n` : "") +
+        "（回合结束不等于任务成功，等待 run_imported 或 import 阶段的 error）"
     });
     return;
   }

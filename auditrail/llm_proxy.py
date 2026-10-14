@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+#: Values of ``AUDITRAIL_LOAD_DOTENV`` that disable project ``.env`` reading.
+_DOTENV_DISABLED = {"0", "false", "no", "off", ""}
+
+#: The project ``.env`` consulted only when ``AUDITRAIL_LLM_PROXY_LOG`` is unset.
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
 
 def create_proxy_app(upstream_base_url: str, log_path: Path, timeout: float = 300.0):
     from fastapi import FastAPI, Request
@@ -253,7 +259,12 @@ def _configured_proxy_log_source() -> str:
     value = os.getenv("AUDITRAIL_LLM_PROXY_LOG", "").strip()
     if value:
         return value
-    env_path = Path(__file__).resolve().parents[1] / ".env"
+    # The project ``.env`` is a developer convenience, not a runtime contract.
+    # ``AUDITRAIL_LOAD_DOTENV`` disables reading it: the test suite sets it so a
+    # local ``.env`` (which may name a remote host) cannot make a test scp.
+    if str(os.getenv("AUDITRAIL_LOAD_DOTENV", "true")).strip().lower() in _DOTENV_DISABLED:
+        return ""
+    env_path = ENV_FILE
     if not env_path.exists():
         return ""
     try:

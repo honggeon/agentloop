@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from fastapi.testclient import TestClient
 
 from auditrail.llm_proxy import (
+    _configured_proxy_log_source,
     append_jsonl,
     build_llm_call_record,
     create_proxy_app,
@@ -84,6 +85,27 @@ def test_import_configured_proxy_log_uses_explicit_source(tmp_path):
     assert payload is not None
     assert payload["llm_calls"][0]["callId"] == "llm-1"
     assert (run / "llm_calls.json").exists()
+
+
+def test_dotenv_guard_disables_the_project_env_fallback(monkeypatch):
+    """The repo ``.env`` must not steer an isolated run.
+
+    A developer's ``.env`` can point ``AUDITRAIL_LLM_PROXY_LOG`` at a remote host,
+    so reading it must respect the same guard the application uses.
+    """
+    monkeypatch.delenv("AUDITRAIL_LLM_PROXY_LOG", raising=False)
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "0")
+    assert _configured_proxy_log_source() == ""
+
+
+def test_env_fallback_still_reads_the_file_when_enabled(monkeypatch, tmp_path):
+    """The documented convenience keeps working with the guard lifted."""
+    monkeypatch.delenv("AUDITRAIL_LLM_PROXY_LOG", raising=False)
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "1")
+    env_file = tmp_path / ".env"
+    env_file.write_text("AUDITRAIL_LLM_PROXY_LOG=/tmp/local-calls.jsonl\n", encoding="utf-8")
+    monkeypatch.setattr("auditrail.llm_proxy.ENV_FILE", env_file)
+    assert _configured_proxy_log_source() == "/tmp/local-calls.jsonl"
 
 
 def test_proxy_forwards_chat_completion_and_logs_usage(tmp_path, monkeypatch):
