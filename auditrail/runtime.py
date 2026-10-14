@@ -55,7 +55,11 @@ def build_runtime_graph(messages: Iterable[Dict]) -> Dict:
             call_id = str(message.get("tool_call_id") or "")
             source_id = call_nodes.get(call_id)
             result_id = "result-%s" % (call_id or index)
-            status = "error" if _looks_like_tool_error(str(message.get("content") or "")) else "ok"
+            status = (
+                "error"
+                if message.get("status") == "error" or _looks_like_tool_error(str(message.get("content") or ""))
+                else "ok"
+            )
             if source_id:
                 source_node = next((node for node in nodes if node.get("id") == source_id), None)
                 if source_node:
@@ -170,7 +174,11 @@ def build_runtime_trace(
         if role == "tool":
             call_id = str(message.get("tool_call_id") or "")
             tool_name = str(message.get("tool_name") or "tool")
-            status = "failed" if _looks_like_span_error(str(message.get("content") or "")) else "success"
+            status = (
+                "failed"
+                if message.get("status") == "error" or _looks_like_span_error(str(message.get("content") or ""))
+                else "success"
+            )
             failed = failed or status == "failed"
             parent_span_id = call_spans.get(call_id) or previous_span_id
             if parent_span_id:
