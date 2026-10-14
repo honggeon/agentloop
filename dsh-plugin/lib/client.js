@@ -49,8 +49,11 @@ window.__ModuleLoader__.load({
 
     var DEFAULT_CONFIG = {
       apiBase: "http://127.0.0.1:18080",
-      dashboardBase: "http://127.0.0.1:6173",
+      dashboardBase: "http://127.0.0.1:5111",
     };
+
+    /** 自动匹配看板端口时的候选端口（按优先级探测）。 */
+    var DASHBOARD_PROBE_PORTS = [5111, 5173, 6173, 4173, 3000];
 
     /**
      * 评测维度中文标签。key 必须以 auditrail.agents.schemas.DIMENSION_DEFINITIONS
@@ -373,6 +376,67 @@ window.__ModuleLoader__.load({
       return String(url || "").replace(/\/+$/, "");
     }
 
+    /**
+     * 探测某个 base 是不是 auditrail 看板（Vite dev server）：
+     * /api/health 通过代理返回 ok，且 / 返回 text/html（纯后端 18080 的 / 是 404）。
+     */
+    function probeDashboard(base) {
+      var controller = typeof AbortController === "function" ? new AbortController() : null;
+      var timer = controller ? setTimeout(function () { controller.abort(); }, 1500) : null;
+      var opts = controller ? { signal: controller.signal } : undefined;
+      function done(value) {
+        if (timer) clearTimeout(timer);
+        return value;
+      }
+      return fetch(trimSlash(base) + "/api/health", opts)
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (body) {
+          if (!body || body.status !== "ok") return done(false);
+          return fetch(trimSlash(base) + "/", opts).then(function (res) {
+            var ct = String(res.headers.get("content-type") || "");
+            return done(res.ok && ct.indexOf("text/html") >= 0);
+          });
+        })
+        .catch(function () { return done(false); });
+    }
+
+    /**
+     * 自动匹配看板地址：先问后端「前端启动时上报的实际地址」（POST /api/dashboard/register
+     * 由 vite.config 的 dashboardRegister 插件发出），再依次探测 已保存配置 → 默认 →
+     * 常用端口（主机取 apiBase 的）。每个候选都经 probeDashboard 验证确实是看板
+     * （/ 返回 text/html），返回第一个在运行的；都没有则返回空串。
+     */
+    function resolveDashboardBase(cfg) {
+      var reported = fetchJSON(cfg.apiBase, "/api/dashboard")
+        .then(function (body) { return body && body.url ? String(body.url) : ""; })
+        .catch(function () { return ""; });
+      return reported.then(function (backendUrl) {
+        var candidates = [];
+        function add(base) {
+          var b = trimSlash(base);
+          if (b && candidates.indexOf(b) < 0) candidates.push(b);
+        }
+        add(backendUrl);
+        add(cfg.dashboardBase);
+        add(DEFAULT_CONFIG.dashboardBase);
+        var host = "127.0.0.1";
+        try {
+          host = new URL(trimSlash(cfg.apiBase) || DEFAULT_CONFIG.apiBase).hostname || host;
+        } catch (err) { /* keep default host */ }
+        DASHBOARD_PROBE_PORTS.forEach(function (port) {
+          add("http://" + host + ":" + port);
+        });
+        var chain = Promise.resolve("");
+        candidates.forEach(function (base) {
+          chain = chain.then(function (found) {
+            if (found) return found;
+            return probeDashboard(base).then(function (ok) { return ok ? base : ""; });
+          });
+        });
+        return chain;
+      });
+    }
+
     function fetchJSON(base, path, options) {
       return fetch(trimSlash(base) + path, options).then(function (res) {
         return res.text().then(function (text) {
@@ -418,6 +482,52 @@ window.__ModuleLoader__.load({
         h("rect", { x: 9, y: 1, width: 6, height: 6, rx: 1.5 }),
         h("rect", { x: 1, y: 9, width: 6, height: 6, rx: 1.5 }),
         h("rect", { x: 9, y: 9, width: 6, height: 6, rx: 1.5 }));
+    }
+
+    /** 评分夹图标（菜单里的「Agent测评」项）。 */
+    function evalIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.3, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" },
+        h("rect", { x: 3.5, y: 2.5, width: 9, height: 11.5, rx: 1.5 }),
+        h("path", { d: "M6 2.5h4" }),
+        h("path", { d: "M5.8 8.6l1.5 1.5 3-3.2" }));
+    }
+
+    /** 柱状图图标（菜单里的「质量中心」项）。 */
+    function qualityIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.3, "stroke-linecap": "round", "aria-hidden": "true" },
+        h("path", { d: "M2 13.5V2" }),
+        h("path", { d: "M2 13.5h12" }),
+        h("path", { d: "M5 11V7.5" }),
+        h("path", { d: "M8 11V5" }),
+        h("path", { d: "M11 11V8.5" }));
+    }
+
+    /** 放大镜图标（菜单里的「RAG 测试」项）。 */
+    function ragIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.3, "stroke-linecap": "round", "aria-hidden": "true" },
+        h("circle", { cx: 7, cy: 7, r: 4.2 }),
+        h("path", { d: "M10.2 10.2L14 14" }));
+    }
+
+    /** 代码符号图标（菜单里的「代码分析」项，dsh-code-analysis-platform 注入）。 */
+    function codeAnalysisIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.3, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" },
+        h("polyline", { points: "5 3 2 8 5 13" }),
+        h("polyline", { points: "11 3 14 8 11 13" }),
+        h("line", { x1: "9", y1: "2.5", x2: "7", y2: "13.5" }));
+    }
+
+    /** 看板列图标（菜单里的「遗留项看板」项，dsh-quality-center 注入）。 */
+    function backlogIcon(size) {
+      var s = size || 16;
+      return h("svg", { width: s, height: s, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.3, "stroke-linecap": "round", "aria-hidden": "true" },
+        h("rect", { x: 2.5, y: 3.4, width: 3.1, height: 9.2, rx: 1 }),
+        h("rect", { x: 6.45, y: 3.4, width: 3.1, height: 6.6, rx: 1 }),
+        h("rect", { x: 10.4, y: 3.4, width: 3.1, height: 4.2, rx: 1 }));
     }
 
     /** 简化齿轮图标（菜单里的「设置」项）。 */
@@ -947,7 +1057,16 @@ window.__ModuleLoader__.load({
           var ok = body && body.status === "ok";
           if (cancelled) return;
           setHealth(ok ? "ok" : "fail");
-          if (ok) refreshAll();
+          if (!ok) return;
+          refreshAll();
+          // 自动匹配看板实际端口：后端注册值优先，失败时探测候选端口。
+          resolveDashboardBase(cfg).then(function (resolved) {
+            if (cancelled || !resolved) return;
+            if (trimSlash(resolved) === trimSlash(cfg.dashboardBase)) return;
+            var next = { apiBase: cfg.apiBase, dashboardBase: resolved };
+            setCfg(next);
+            saveConfig(next);
+          });
         }).catch(function () {
           if (!cancelled) setHealth("fail");
         });
@@ -1316,7 +1435,37 @@ window.__ModuleLoader__.load({
                   setMenuOpen(false);
                   setPanelOpen(true);
                 },
-              }, appsIcon(16), h("span", null, t("appsItem"))),
+              }, evalIcon(16), h("span", null, t("appsItem"))),
+              // ── quality-center 集成（dsh-quality-center 插件注入，2026-09-01）──
+              // 在「Agent测评」之后追加「质量中心」菜单项，调用 quality-center 插件暴露的 opener
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  if (window.__QUALITY_CENTER_OPEN__) window.__QUALITY_CENTER_OPEN__();
+                },
+              }, qualityIcon(16), h("span", null, "质量中心")),
+              // ── backlog 独立看板集成（dsh-quality-center 插件注入，2026-09）──
+              // 在「质量中心」之后追加「遗留项看板」菜单项，调用插件暴露的独立看板 opener
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  if (window.__QUALITY_CENTER_BACKLOG_OPEN__) window.__QUALITY_CENTER_BACKLOG_OPEN__();
+                },
+              }, backlogIcon(16), h("span", null, "遗留项看板")),
+              // ── code-analysis 集成（dsh-code-analysis-platform 插件注入，2026-09-06）──
+              // 在「质量中心」之后追加「代码分析」菜单项，调用 code-analysis 插件暴露的 opener
+              h("button", {
+                className: "al-menu-item",
+                role: "menuitem",
+                onClick: function () {
+                  setMenuOpen(false);
+                  if (window.__CODE_ANALYSIS_OPEN__) window.__CODE_ANALYSIS_OPEN__();
+                },
+              }, codeAnalysisIcon(16), h("span", null, "代码分析")),
               // ── rag-testing 集成（dsh-rag-testing 插件注入，2026-08-21）──
               // 在「Agent测评」之后追加「RAG 测试」菜单项，调用 rag-testing 插件暴露的 opener
               h("button", {
@@ -1326,7 +1475,7 @@ window.__ModuleLoader__.load({
                   setMenuOpen(false);
                   if (window.__RAG_TESTING_OPEN__) window.__RAG_TESTING_OPEN__();
                 },
-              }, appsIcon(16), h("span", null, "RAG 测试")))
+              }, ragIcon(16), h("span", null, "RAG 测试")))
           : null,
       );
     }

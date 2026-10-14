@@ -19,6 +19,9 @@ __pycache__/
 runs/
 *.log
 
+# Case suite reports
+cases/results/
+
 # Node
 frontend/node_modules/
 frontend/dist/

@@ -118,25 +118,25 @@ uv run auditrail metrics-proxy \
   --log runs/proxy-llm-calls.jsonl
 ```
 
-If the remote host does not have `uv`, install-free startup is also supported after copying this repository to `/home/newuser/auditrail`:
+If the remote host does not have `uv`, install-free startup is also supported after copying this repository to `/home/newuser/agentloop`:
 
 ```bash
-cd /home/newuser/auditrail
+cd /home/newuser/agentloop
 mkdir -p runs
-nohup env PYTHONPATH=/home/newuser/auditrail \
+nohup env PYTHONPATH=/home/newuser/agentloop \
   python3 -m auditrail.cli metrics-proxy \
   --upstream-base-url http://127.0.0.1:7500/v1 \
   --host 127.0.0.1 \
   --port 7600 \
-  --log /home/newuser/auditrail/runs/proxy-llm-calls.jsonl \
-  > /home/newuser/auditrail/runs/metrics-proxy.out 2>&1 &
-echo $! > /home/newuser/auditrail/runs/metrics-proxy.pid
+  --log /home/newuser/agentloop/runs/proxy-llm-calls.jsonl \
+  > /home/newuser/agentloop/runs/metrics-proxy.out 2>&1 &
+echo $! > /home/newuser/agentloop/runs/metrics-proxy.pid
 ```
 
 Stop the background proxy with:
 
 ```bash
-kill "$(cat /home/newuser/auditrail/runs/metrics-proxy.pid)"
+kill "$(cat /home/newuser/agentloop/runs/metrics-proxy.pid)"
 ```
 
 Point the agent's OpenAI-compatible base URL at the proxy:
@@ -162,13 +162,13 @@ uv run auditrail import-llm-calls \
 For automatic import during `fetch-session`, `smoke-chat`, and dashboard live evaluation, configure the dashboard/backend process with:
 
 ```env
-AUDITRAIL_LLM_PROXY_LOG=newuser@192.168.0.64:/home/newuser/auditrail/runs/proxy-llm-calls.jsonl
+AUDITRAIL_LLM_PROXY_LOG=newuser@192.168.0.64:/home/newuser/agentloop/runs/proxy-llm-calls.jsonl
 ```
 
 Local file paths are also supported:
 
 ```env
-AUDITRAIL_LLM_PROXY_LOG=/home/newuser/auditrail/runs/proxy-llm-calls.jsonl
+AUDITRAIL_LLM_PROXY_LOG=/home/newuser/agentloop/runs/proxy-llm-calls.jsonl
 ```
 
 When this variable is set, Auditrail imports only the proxy calls whose `startTime` falls inside the run's `session.created_at` / `session.updated_at` window, with a small clock-skew allowance. This prevents older test calls from being mixed into a new run.

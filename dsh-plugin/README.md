@@ -57,7 +57,12 @@ install.sh 会把本目录作为 file: 依赖装进 `~/.dsh/profiles/web` 并把
 1. 点击侧边栏底部的 **菜单** 按钮 → 菜单中选 **Agent测评**，评测面板打开
    （菜单里的 **设置** 打开 DSH 原生设置面板，**切换皮肤** 展开皮肤菜单）。
 2. 确认「后端地址」（默认 `http://127.0.0.1:18080`）与「看板地址」
-   （默认 `http://127.0.0.1:6173`），点「测试连接」。
+   （默认 `http://127.0.0.1:5111`，与 `.env` 的 `FRONTEND_PORT` 对齐），点「测试连接」。
+   「看板地址」会**自动匹配**：前端 dev server 启动时会把实际监听端口上报到后端
+   （`vite.config.ts` 的 `dashboardRegister` → `POST /api/dashboard/register`，
+   落盘 `runs/.dashboard.json`），面板打开时经 `GET /api/dashboard` 取回并校验；
+   后端没有注册信息时回退探测常用端口（5111/5173/6173/4173/3000）。换端口重启
+   前端即可自动跟随，无需手工改配置。
 3. 「DSH 会话录制」里点「导入并审计」，导入后自动展开该 run 的指标。
 4. 「连接其他 Agent」卡片可以测试任何兼容 xuanjian-agent HTTP API 的远程
    agent 服务，两种模式：
