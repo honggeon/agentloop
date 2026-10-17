@@ -1738,6 +1738,11 @@ export interface RunIndexWatcherStatus {
   last_refresh_at: string | null;
   pending_events: number;
   error_count: number;
+  // Phase 4：暂停状态与最近失败信息（独立轮询状态，不是数据质量信号）。
+  paused?: boolean;
+  failure_count?: number;
+  last_error?: string | null;
+  last_refresh_reason?: string | null;
 }
 
 // 关联置信度中文标签：unlinked 显示「未关联」，与弱关联区分。
@@ -1993,4 +1998,447 @@ function parseSseBlock(block: string): LiveEvent | null {
   } catch {
     return { event, payload: raw };
   }
+}
+
+// --- Phase 4：认证上下文、可恢复 ImportJob、promptfoo 草稿审核、审计日志、
+// 运行索引健康 --------------------------------------------------------------
+//
+// 本地部署没有生产级认证：GET /api/auth/context 返回的 permissions 是前端
+// 唯一的权限判断依据；auth_mode === "disabled" 时页面必须显示「本地开发模式」
+// 横幅。所有错误响应 detail 是 {code, message, retryable} 结构，message 是
+// 后端给出的安全文案，视图只展示 message，绝不展示原始异常。
+
+// 后端错误体是 JSON 文本（{detail: {code, message, ...}} 或 {detail: "..."}）。
+// 该帮助函数提取安全 message；解析失败时退回原始文本。
+export function apiErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const parsed = JSON.parse(raw);
+    const detail = parsed?.detail;
+    if (detail && typeof detail === "object" && typeof detail.message === "string") {
+      return detail.message;
+    }
+    if (typeof detail === "string") {
+      return detail;
+    }
+  } catch {
+    // 非 JSON 错误文本，原样展示。
+  }
+  return raw;
+}
+
+// GET /api/auth/context：当前身份、角色与能力开关。production_ready 恒为 false。
+export interface AuthContext {
+  auth_mode: "local" | "disabled" | string;
+  role: "viewer" | "operator" | "admin" | string;
+  actor: string;
+  roles: string[];
+  permissions: {
+    import: boolean;
+    review_draft: boolean;
+    approve_draft: boolean;
+    manage_prices: boolean;
+    manage_agents: boolean;
+    manage_index: boolean;
+  };
+  note: string;
+  production_ready: boolean;
+}
+
+export function fetchAuthContext(): Promise<AuthContext> {
+  return apiGet<AuthContext>("/api/auth/context");
+}
+
+// --- ImportJob 状态机 -----------------------------------------------------
+
+// stale 表示 worker 失联（租约过期），与 failed 严格区分。
+export type ImportJobStatus =
+  | "queued"
+  | "validating"
+  | "running"
+  | "paused"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "cancelled"
+  | "stale"
+  | string;
+
+export type ImportJobPhase =
+  | "validating"
+  | "reading"
+  | "normalizing"
+  | "linking"
+  | "persisting"
+  | "finalizing"
+  | string;
+
+// 断点续传位置：cursor / page / byte_offset 视来源类型而定。
+export interface ImportCheckpoint {
+  cursor?: string | null;
+  page?: number | null;
+  byte_offset?: number | null;
+  index?: number | null;
+  last_source_id?: string | null;
+  processed_records?: number | null;
+  checkpoint_at?: string | null;
+}
+
+// 结构化错误：message 已脱敏，绝不包含内部路径 / token / 原始异常文本。
+export interface ImportJobError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+// 完整 ImportJob（GET /api/integrations/imports/{id}）。
+export interface ImportJob {
+  import_id: string;
+  source_system: "langfuse" | "promptfoo" | string;
+  source_type?: string | null;
+  kind?: string | null;
+  mode?: "sync" | "async" | string;
+  dry_run?: boolean;
+  status: ImportJobStatus;
+  phase?: ImportJobPhase | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  cancel_requested?: boolean;
+  cursor?: string | null;
+  page?: number | null;
+  total_records?: number | null;
+  processed_records?: number | null;
+  imported_records?: number | null;
+  duplicate_records?: number | null;
+  unlinked_records?: number | null;
+  invalid_records?: number | null;
+  failed_records?: number | null;
+  retry_count?: number;
+  checkpoint_at?: string | null;
+  checkpoint?: ImportCheckpoint | null;
+  restart_from_beginning?: boolean;
+  source_fingerprint?: string | null;
+  error?: ImportJobError | null;
+  warnings?: string[];
+  worker_id?: string | null;
+  heartbeat_at?: string | null;
+  lease_expires_at?: string | null;
+  legacy_report?: boolean;
+}
+
+// 列表行（GET /api/integrations/imports 的 imports 数组元素）。
+export interface ImportJobSummary {
+  import_id: string;
+  source_system: string;
+  source_type?: string | null;
+  kind?: string | null;
+  mode?: string;
+  status: ImportJobStatus;
+  phase?: ImportJobPhase | null;
+  dry_run?: boolean;
+  total_records?: number | null;
+  processed_records?: number | null;
+  imported_records?: number | null;
+  duplicate_records?: number | null;
+  unlinked_records?: number | null;
+  invalid_records?: number | null;
+  failed_records?: number | null;
+  retry_count?: number;
+  cancel_requested?: boolean;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  checkpoint_at?: string | null;
+  error?: ImportJobError | null;
+  legacy_report?: boolean;
+  imported_at?: string | null;
+}
+
+export interface ImportListPayload {
+  imports: ImportJobSummary[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+// GET /api/integrations/imports/{id}/status 的轮询子集，额外带 stale 标记。
+export interface ImportJobStatusPayload {
+  import_id: string;
+  status: ImportJobStatus;
+  phase?: ImportJobPhase | null;
+  mode?: string;
+  cancel_requested: boolean;
+  total_records?: number | null;
+  processed_records?: number | null;
+  imported_records?: number | null;
+  duplicate_records?: number | null;
+  unlinked_records?: number | null;
+  invalid_records?: number | null;
+  failed_records?: number | null;
+  retry_count?: number;
+  checkpoint?: ImportCheckpoint | null;
+  checkpoint_at?: string | null;
+  restart_from_beginning: boolean;
+  error?: ImportJobError | null;
+  warnings: string[];
+  worker_id?: string | null;
+  heartbeat_at?: string | null;
+  lease_expires_at?: string | null;
+  stale: boolean;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+// POST retry/resume 的 202 响应。
+export interface ImportJobResumeResult {
+  import_id: string;
+  status: ImportJobStatus;
+  retry_count: number;
+  resumed_from_checkpoint: boolean;
+  restart_from_beginning?: boolean;
+  status_url: string;
+  auth_mode?: string;
+  role?: string;
+}
+
+export const IMPORT_JOB_STATUS_LABELS: Record<string, string> = {
+  queued: "排队中",
+  validating: "校验中",
+  running: "运行中",
+  paused: "已暂停",
+  completed: "已完成",
+  partial: "部分完成",
+  failed: "失败",
+  cancelled: "已取消",
+  stale: "已失联"
+};
+
+export const IMPORT_JOB_PHASE_LABELS: Record<string, string> = {
+  validating: "校验",
+  reading: "读取",
+  normalizing: "归一化",
+  linking: "关联",
+  persisting: "落盘",
+  finalizing: "收尾"
+};
+
+export function fetchImportJobs(limit = 50, offset = 0): Promise<ImportListPayload> {
+  const search = new URLSearchParams();
+  search.set("limit", String(limit));
+  search.set("offset", String(offset));
+  return apiGet<ImportListPayload>(`/api/integrations/imports?${search.toString()}`);
+}
+
+export function fetchImportJob(importId: string): Promise<ImportJob> {
+  return apiGet<ImportJob>(`/api/integrations/imports/${encodeURIComponent(importId)}`);
+}
+
+export function fetchImportJobStatus(importId: string): Promise<ImportJobStatusPayload> {
+  return apiGet<ImportJobStatusPayload>(`/api/integrations/imports/${encodeURIComponent(importId)}/status`);
+}
+
+// 取消是协作式请求（cancel_requested），进行中的记录在下一个边界收为 cancelled。
+export function cancelImportJob(importId: string): Promise<ImportJob> {
+  return apiPost<ImportJob>(`/api/integrations/imports/${encodeURIComponent(importId)}/cancel`);
+}
+
+export function retryImportJob(importId: string): Promise<ImportJobResumeResult> {
+  return apiPost<ImportJobResumeResult>(`/api/integrations/imports/${encodeURIComponent(importId)}/retry`);
+}
+
+export function resumeImportJob(importId: string): Promise<ImportJobResumeResult> {
+  return apiPost<ImportJobResumeResult>(`/api/integrations/imports/${encodeURIComponent(importId)}/resume`);
+}
+
+// --- promptfoo 草稿审核 -----------------------------------------------------
+
+// 单条断言：kind === "unmapped" 表示未能映射为平台期望，保留为声明式、
+// 不可执行的 expectation。
+export interface PromptfooAssertion {
+  kind: string;
+  original_type?: string;
+  value?: unknown;
+  reason?: string;
+  safe_to_execute?: boolean;
+}
+
+// provider 只是声明（仅声明，不执行），平台永远不会调用它。
+export interface PromptfooProviderDeclaration {
+  id: string;
+  label?: string | null;
+  executable: boolean;
+}
+
+export interface PromptfooDraft {
+  draft_id: string;
+  case_id: string;
+  status: "draft" | "approved" | "rejected" | "archived" | string;
+  title: string;
+  safe_to_execute: boolean;
+  // 声明了 command/plugin/script 等可执行内容的 draft 永远不能 approve。
+  declared_executable: boolean;
+  forbidden_keys: string[];
+  source_system: string;
+  source_index?: number | null;
+  vars: Record<string, unknown>;
+  expectations: PromptfooAssertion[];
+  provider_declaration: PromptfooProviderDeclaration | null;
+  metadata: Record<string, unknown>;
+  unmapped_count: number;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  promoted_case_id?: string | null;
+  warnings?: string[];
+}
+
+export interface DraftListPayload {
+  drafts: PromptfooDraft[];
+  total: number;
+  count: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+// approve 的输入补全：draft vars 缺 user_id/message 时由用户补充后重试。
+export interface PromptfooInputOverride {
+  user_id?: string;
+  message?: string;
+  session_id?: string;
+}
+
+// approve / reject / archive 的共同返回；idempotent_replay=true 表示重复操作
+// 命中了首次结果，没有产生第二个 TestCase。
+export interface DraftReviewResult {
+  draft: PromptfooDraft;
+  test_case?: TestCase | null;
+  idempotent_replay?: boolean;
+  auth_mode?: string;
+  role?: string;
+}
+
+export const DRAFT_STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  approved: "已通过",
+  rejected: "已拒绝",
+  archived: "已归档"
+};
+
+export function fetchPromptfooDrafts(limit = 50, offset = 0): Promise<DraftListPayload> {
+  const search = new URLSearchParams();
+  search.set("limit", String(limit));
+  search.set("offset", String(offset));
+  return apiGet<DraftListPayload>(`/api/integrations/promptfoo/drafts?${search.toString()}`);
+}
+
+export function fetchPromptfooDraft(draftId: string): Promise<{ draft: PromptfooDraft }> {
+  return apiGet<{ draft: PromptfooDraft }>(`/api/integrations/promptfoo/drafts/${encodeURIComponent(draftId)}`);
+}
+
+export function approvePromptfooDraft(
+  draftId: string,
+  inputOverride?: PromptfooInputOverride
+): Promise<DraftReviewResult> {
+  return apiPostJson<DraftReviewResult>(
+    `/api/integrations/promptfoo/drafts/${encodeURIComponent(draftId)}/approve`,
+    inputOverride ? { input_override: inputOverride } : {}
+  );
+}
+
+export function rejectPromptfooDraft(draftId: string, reason?: string): Promise<DraftReviewResult> {
+  return apiPostJson<DraftReviewResult>(
+    `/api/integrations/promptfoo/drafts/${encodeURIComponent(draftId)}/reject`,
+    reason ? { reason } : {}
+  );
+}
+
+export function archivePromptfooDraft(draftId: string): Promise<DraftReviewResult> {
+  return apiPost<DraftReviewResult>(`/api/integrations/promptfoo/drafts/${encodeURIComponent(draftId)}/archive`);
+}
+
+// --- 审计日志（append-only，只读） -------------------------------------------
+
+export interface AuditEvent {
+  event_id: string;
+  actor: string;
+  role: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  result: "success" | "denied" | "failed" | string;
+  reason: string | null;
+  timestamp: string;
+  request_id: string | null;
+}
+
+export interface AuditEventList {
+  audit_events: AuditEvent[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  authority: string;
+  note: string;
+  auth_mode?: string;
+}
+
+export function fetchAuditEvents(
+  params: { resource_type?: string; resource_id?: string; action?: string; limit?: number; offset?: number } = {}
+): Promise<AuditEventList> {
+  const search = new URLSearchParams();
+  if (params.resource_type) search.set("resource_type", params.resource_type);
+  if (params.resource_id) search.set("resource_id", params.resource_id);
+  if (params.action) search.set("action", params.action);
+  search.set("limit", String(params.limit ?? 50));
+  search.set("offset", String(params.offset ?? 0));
+  return apiGet<AuditEventList>(`/api/audit-events?${search.toString()}`);
+}
+
+// --- 运行索引健康（本地管理，authority: "local"） ------------------------------
+
+export interface RunIndexHealthIndex {
+  status: string;
+  last_scan_at?: string | null;
+  indexed_count?: number;
+  error_count?: number;
+  refresh_reason?: string | null;
+  paused?: boolean;
+  [key: string]: unknown;
+}
+
+// 索引是缓存，不是事实来源；Run 详情始终读取正式产物。
+export interface RunIndexHealthPayload {
+  schema_version: number;
+  index: RunIndexHealthIndex;
+  watcher: RunIndexWatcherStatus;
+  degraded: boolean;
+  paused: boolean;
+  authority: string;
+  auth_mode: string;
+  note: string;
+}
+
+export interface RunIndexPauseResult {
+  watcher: RunIndexWatcherStatus;
+  paused: boolean;
+  authority: string;
+  auth_mode: string;
+  note?: string;
+}
+
+export function fetchRunIndexHealth(): Promise<RunIndexHealthPayload> {
+  return apiGet<RunIndexHealthPayload>("/api/admin/run-index/health");
+}
+
+// 暂停只停自动刷新；手动 rebuild 仍可显式执行。
+export function pauseRunIndex(): Promise<RunIndexPauseResult> {
+  return apiPost<RunIndexPauseResult>("/api/admin/run-index/pause");
+}
+
+export function resumeRunIndex(): Promise<RunIndexPauseResult> {
+  return apiPost<RunIndexPauseResult>("/api/admin/run-index/resume");
 }

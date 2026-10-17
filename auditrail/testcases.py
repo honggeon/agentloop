@@ -101,6 +101,10 @@ def _normalize_unified(raw: Dict[str, Any]) -> Dict[str, Any]:
         "adapter_config": dict(raw.get("adapter_config") or {}),
         "legacy": False,
     }
+    # Phase 4: provenance of promoted external drafts (e.g. promptfoo). Purely
+    # additive; cases without a source_ref read as None.
+    source_ref = raw.get("source_ref")
+    case["source_ref"] = dict(source_ref) if isinstance(source_ref, dict) else None
     if adapter == "http_session":
         _validate_http_input(case)
     return case

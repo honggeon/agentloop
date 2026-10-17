@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 
 from auditrail import prices as price_mod
 
+from backend.app import audit_service, auth
 from backend.app.config import get_settings
 
 router = APIRouter(prefix="/api/prices")
@@ -24,7 +25,8 @@ router = APIRouter(prefix="/api/prices")
 _LOCAL_NOTE = "本地管理能力：无生产级权限控制"
 
 
-def _require_local_admin(settings) -> None:
+def _require_local_admin(settings):
+    """Legacy kill-switch plus the Phase 4 local role boundary (admin)."""
     if not getattr(settings, "local_admin_enabled", False):
         raise HTTPException(
             status_code=403,
@@ -33,6 +35,26 @@ def _require_local_admin(settings) -> None:
                 "message": "price management endpoints are disabled (AUDITRAIL_LOCAL_ADMIN)",
             },
         )
+    return auth.require_role(settings, "admin")
+
+
+def _audit(settings, identity, action: str, price_version: str) -> None:
+    """Append the price audit event; a failed write is an explicit 500."""
+    try:
+        audit_service.append_event(
+            settings,
+            actor=identity["actor"],
+            role=identity["role"],
+            action=action,
+            resource_type="price_version",
+            resource_id=price_version,
+            result="success",
+        )
+    except audit_service.AuditLogError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "audit_unavailable", "message": "审计日志写入失败：%s" % str(exc)[:200]},
+        ) from exc
 
 
 def _with_authority(payload: dict[str, Any]) -> dict[str, Any]:
@@ -51,11 +73,12 @@ def get_prices() -> dict[str, Any]:
 @router.post("/versions", status_code=201)
 def create_price_version(payload: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
-    _require_local_admin(settings)
+    identity = _require_local_admin(settings)
     try:
         version = price_mod.create_price_version(Path(settings.platform_dir), payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"code": "invalid_price_version", "message": str(exc)[:300]}) from exc
+    _audit(settings, identity, "price_version_create", str(version.get("price_version") or ""))
     return _with_authority({"price_version_record": version})
 
 
@@ -77,13 +100,14 @@ def activate_price_version(price_version: str) -> dict[str, Any]:
     """Activate one version; the previous active version is retired and the
     derived ``price_table.json`` is rewritten. History is never rewritten."""
     settings = get_settings()
-    _require_local_admin(settings)
+    identity = _require_local_admin(settings)
     try:
         version = price_mod.activate_price_version(Path(settings.platform_dir), price_version)
     except ValueError as exc:
         message = str(exc)[:300]
         status_code = 404 if "not found" in message else 400
         raise HTTPException(status_code=status_code, detail={"code": "invalid_price_version", "message": message}) from exc
+    _audit(settings, identity, "price_version_activate", price_version)
     return _with_authority({"price_version_record": version})
 
 
@@ -92,13 +116,14 @@ def delete_price_version(price_version: str) -> dict[str, Any]:
     """Delete a draft/retired version. Active or history-referenced versions
     are rejected explicitly."""
     settings = get_settings()
-    _require_local_admin(settings)
+    identity = _require_local_admin(settings)
     try:
         price_mod.delete_price_version(Path(settings.platform_dir), price_version)
     except ValueError as exc:
         message = str(exc)[:300]
         status_code = 404 if "not found" in message else 409
         raise HTTPException(status_code=status_code, detail={"code": "price_version_not_deletable", "message": message}) from exc
+    _audit(settings, identity, "price_version_delete", price_version)
     return _with_authority({"deleted": price_version})
 
 

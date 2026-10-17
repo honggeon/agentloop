@@ -75,7 +75,7 @@ def get_cost_import(import_id: str) -> dict[str, Any]:
 # ------------------------------------------------------------- run index admin
 
 
-def _require_local_admin(settings) -> None:
+def _require_local_admin(settings):
     if not getattr(settings, "local_admin_enabled", False):
         raise HTTPException(
             status_code=403,
@@ -84,6 +84,32 @@ def _require_local_admin(settings) -> None:
                 "message": "local admin endpoints are disabled (AUDITRAIL_LOCAL_ADMIN)",
             },
         )
+    # Phase 4: the local permission boundary applies on top of the legacy
+    # kill-switch; default local mode grants the admin role.
+    from backend.app import auth
+
+    return auth.require_role(settings, "admin")
+
+
+def _audit(settings, identity, action: str, resource_id: str) -> None:
+    """Append the audit event; a failed write is an explicit 500."""
+    from backend.app import audit_service
+
+    try:
+        audit_service.append_event(
+            settings,
+            actor=identity["actor"],
+            role=identity["role"],
+            action=action,
+            resource_type="run_index",
+            resource_id=resource_id,
+            result="success",
+        )
+    except audit_service.AuditLogError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "audit_unavailable", "message": "审计日志写入失败：%s" % str(exc)[:200]},
+        ) from exc
 
 
 @router.get("/admin/run-index/status")
@@ -102,12 +128,19 @@ def get_run_index_status() -> dict[str, Any]:
 @router.post("/admin/run-index/rebuild")
 def rebuild_run_index() -> dict[str, Any]:
     settings = get_settings()
-    _require_local_admin(settings)
-    status = run_index.rebuild_index(
-        Path(settings.runs_dir),
-        Path(settings.platform_dir),
-        cost_lookup=cost_service.cost_lookup(settings),
-    )
+    identity = _require_local_admin(settings)
+    try:
+        status = run_index.rebuild_index(
+            Path(settings.runs_dir),
+            Path(settings.platform_dir),
+            cost_lookup=cost_service.cost_lookup(settings),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "index_rebuilding", "message": str(exc)[:200], "retryable": True},
+        ) from exc
+    _audit(settings, identity, "index_rebuild", "run_index")
     status["authority"] = "local"
     status["note"] = "本地管理能力：无生产级权限控制"
     return status

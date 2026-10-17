@@ -838,3 +838,163 @@ def test_agent_detail_view_shows_external_evaluations_panel():
     assert "EXTERNAL_CONFIDENCE_LABELS" in source
     assert "fetchAgentExternalEvaluations" in source
     assert "fetch(" not in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 4：导入任务、promptfoo 草稿审核、审计日志与运行索引健康
+# ---------------------------------------------------------------------------
+
+IMPORT_LIST_VIEW = Path("frontend/src/views/ImportListView.vue")
+IMPORT_DETAIL_VIEW = Path("frontend/src/views/ImportDetailView.vue")
+PROMPTFOO_DRAFTS_VIEW = Path("frontend/src/views/PromptfooDraftsView.vue")
+AUDIT_EVENTS_VIEW = Path("frontend/src/views/AuditEventsView.vue")
+
+
+def test_phase4_routes_exist_with_name_and_title():
+    source = ROUTER.read_text(encoding="utf-8")
+    assert IMPORT_LIST_VIEW.exists()
+    assert IMPORT_DETAIL_VIEW.exists()
+    assert PROMPTFOO_DRAFTS_VIEW.exists()
+    assert AUDIT_EVENTS_VIEW.exists()
+    assert 'path: "/integrations/imports"' in source
+    assert 'name: "integration-imports"' in source
+    assert "ImportListView" in source
+    assert 'meta: { title: "导入任务" }' in source
+    assert 'path: "/integrations/imports/:importId"' in source
+    assert 'name: "integration-import-detail"' in source
+    assert "ImportDetailView" in source
+    assert 'meta: { title: "导入详情" }' in source
+    assert 'path: "/integrations/promptfoo/drafts"' in source
+    assert 'name: "promptfoo-drafts"' in source
+    assert "PromptfooDraftsView" in source
+    assert 'meta: { title: "promptfoo 草稿审核" }' in source
+    assert 'path: "/admin/audit-events"' in source
+    assert 'name: "audit-events"' in source
+    assert "AuditEventsView" in source
+    assert 'meta: { title: "审计日志" }' in source
+    # 既有路由保持不变
+    assert 'path: "/suite-jobs/:jobId"' in source
+    assert 'name: "suite-job-detail"' in source
+
+
+def test_phase4_api_contracts_exist():
+    source = API_TS.read_text(encoding="utf-8")
+    for name in (
+        "AuthContext",
+        "ImportJobSummary",
+        "ImportJob",
+        "ImportJobStatus",
+        "ImportJobPhase",
+        "ImportCheckpoint",
+        "ImportJobError",
+        "PromptfooDraft",
+        "PromptfooAssertion",
+        "PromptfooProviderDeclaration",
+        "AuditEvent",
+        "AuditEventList",
+        "ImportListPayload",
+        "DraftListPayload",
+    ):
+        assert name in source, name
+    for fn in (
+        "fetchAuthContext",
+        "fetchImportJobs",
+        "fetchImportJob",
+        "fetchImportJobStatus",
+        "cancelImportJob",
+        "retryImportJob",
+        "resumeImportJob",
+        "fetchPromptfooDrafts",
+        "fetchPromptfooDraft",
+        "approvePromptfooDraft",
+        "rejectPromptfooDraft",
+        "archivePromptfooDraft",
+        "fetchAuditEvents",
+        "fetchRunIndexHealth",
+        "pauseRunIndex",
+        "resumeRunIndex",
+    ):
+        assert fn in source, fn
+    for path in (
+        "/api/auth/context",
+        "/api/integrations/imports",
+        "/api/integrations/promptfoo/drafts",
+        "/api/audit-events",
+        "/api/admin/run-index/health",
+        "/api/admin/run-index/pause",
+        "/api/admin/run-index/resume",
+    ):
+        assert path in source, path
+    # 中文状态标签常量
+    assert "IMPORT_JOB_STATUS_LABELS" in source
+    assert "IMPORT_JOB_PHASE_LABELS" in source
+    assert "DRAFT_STATUS_LABELS" in source
+    for label in ("排队中", "校验中", "已暂停", "部分完成", "已取消", "已失联", "归一化", "落盘", "已通过", "已拒绝", "已归档"):
+        assert label in source, label
+    # RunIndexWatcherStatus 的 Phase 4 可选字段
+    assert "paused?: boolean" in source
+    assert "failure_count?: number" in source
+    assert "last_error?: string | null" in source
+    assert "last_refresh_reason?: string | null" in source
+
+
+def test_phase4_views_render_key_copy_without_direct_fetch():
+    views = (IMPORT_LIST_VIEW, IMPORT_DETAIL_VIEW, PROMPTFOO_DRAFTS_VIEW, AUDIT_EVENTS_VIEW)
+    for view in views:
+        source = view.read_text(encoding="utf-8")
+        assert "fetch(" not in source, view  # 组件不直接 fetch
+        assert "fetchAuthContext" in source, view
+        assert "本地开发模式" in source, view
+
+    list_source = IMPORT_LIST_VIEW.read_text(encoding="utf-8")
+    assert "导入任务" in list_source
+    assert "进行中" in list_source
+    assert "部分完成" in list_source
+    assert "已失联" in list_source
+    assert "上一页" in list_source
+    assert "下一页" in list_source
+    assert "integration-import-detail" in list_source
+    assert "fetchImportJobs" in list_source
+
+    detail_source = IMPORT_DETAIL_VIEW.read_text(encoding="utf-8")
+    assert "导入详情" in detail_source
+    assert "取消导入" in detail_source
+    assert "从断点恢复" in detail_source
+    assert "重试导入" in detail_source
+    assert "checkpoint" in detail_source
+    assert "失败原因" in detail_source
+    assert "fetchImportJobStatus" in detail_source
+    assert "cancelImportJob" in detail_source
+    assert "resumeImportJob" in detail_source
+    assert "retryImportJob" in detail_source
+
+    drafts_source = PROMPTFOO_DRAFTS_VIEW.read_text(encoding="utf-8")
+    assert "promptfoo 草稿审核" in drafts_source
+    assert "仅声明，不执行" in drafts_source
+    assert "声明了可执行内容，不能 approve" in drafts_source
+    assert "未映射" in drafts_source
+    assert "input_override" in drafts_source
+    assert "approvePromptfooDraft" in drafts_source
+    assert "rejectPromptfooDraft" in drafts_source
+    assert "archivePromptfooDraft" in drafts_source
+    assert "DRAFT_STATUS_LABELS" in drafts_source
+
+    audit_source = AUDIT_EVENTS_VIEW.read_text(encoding="utf-8")
+    assert "审计日志" in audit_source
+    assert "本地开发模式：认证已禁用" in audit_source
+    assert "append-only 本地审计日志" in audit_source
+    assert "resource_type" in audit_source
+    assert "fetchAuditEvents" in audit_source
+    assert "fetchRunIndexHealth" in audit_source
+    assert "pauseRunIndex" in audit_source
+    assert "resumeRunIndex" in audit_source
+
+
+def test_phase4_sidebar_entries_exist():
+    source = APP_VUE.read_text(encoding="utf-8")
+    assert 'to="/integrations/imports"' in source
+    assert "导入任务" in source
+    assert 'to="/integrations/promptfoo/drafts"' in source
+    assert "草稿审核" in source
+    assert 'to="/admin/audit-events"' in source
+    assert "审计日志" in source

@@ -29,6 +29,8 @@ treated as a platform run id. Traces that cannot be linked are kept as
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,12 +42,52 @@ from . import external_models as ext
 
 SOURCE_SYSTEM = "langfuse"
 
+#: Compatibility layer marker: the adapter tolerates several Langfuse public
+#: API response shapes (v1/v2 field naming, page or cursor pagination); this
+#: version identifies the normalization rules, not a vendor SDK version.
+LANGFUSE_COMPAT_VERSION = "public-api-compat-1"
+
 #: HTTP fetch safety bounds.
 MAX_HTTP_RESPONSE_BYTES = ext.MAX_IMPORT_BYTES
 HTTP_TIMEOUT_SECONDS = 15
 MAX_HTTP_PAGES = 20
 
 _CONFIG_KEYS = ("base_url", "enabled", "token_env", "allowed_hosts")
+
+
+class LangfuseSourceError(ValueError):
+    """Structured source failure with an explicit retry policy.
+
+    - retryable (408/429/5xx, timeouts, transient network errors):
+      ``source_unavailable`` / ``source_rate_limited`` / ``source_timeout``;
+    - non-retryable (400, schema violations, SSRF rejections):
+      ``source_schema_error`` / ``source_rejected``;
+    - non-retryable auth failures (401/403): ``source_unauthorized``.
+
+    The message is always pre-redacted: never the URL query, never the
+    ``Authorization`` header, never the token value or raw response body.
+    """
+
+    def __init__(self, code: str, message: str, *, retryable: bool, status: Optional[int] = None) -> None:
+        super().__init__(str(message)[:300])
+        self.code = str(code)
+        self.retryable = bool(retryable)
+        self.status = status
+
+
+def classify_http_status(status: Optional[int]) -> Tuple[str, bool]:
+    """Map an HTTP status to ``(error_code, retryable)``."""
+    if status in (401, 403):
+        return "source_unauthorized", False
+    if status == 400:
+        return "source_schema_error", False
+    if status == 429:
+        return "source_rate_limited", True
+    if status == 408:
+        return "source_timeout", True
+    if status is not None and 500 <= int(status) <= 599:
+        return "source_unavailable", True
+    return "source_unavailable", True
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +210,9 @@ def normalize_trace(raw: Any) -> Dict[str, Any]:
         raise ValueError("langfuse trace is missing id")
 
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-    session_id = ext._opt_str(raw.get("sessionId") or raw.get("session_id"), limit=128)
+    session_id = ext._opt_str(
+        raw.get("sessionId") or raw.get("session_id") or metadata.get("session_id"), limit=128
+    )
     agent_id = ext._opt_str(
         raw.get("agent_id") or metadata.get("agent_id"), limit=128
     )
@@ -185,23 +229,39 @@ def normalize_trace(raw: Any) -> Dict[str, Any]:
 
     generations: List[Dict[str, Any]] = []
     observations = raw.get("observations") or raw.get("generations") or []
+    generation_warnings = 0
     if isinstance(observations, list):
         for item in observations[: ext.MAX_GENERATIONS]:
             if not isinstance(item, dict):
+                generation_warnings += 1
                 continue
-            generations.append(
-                {
-                    "source_id": ext._opt_str(item.get("id"), limit=128),
-                    "name": ext._opt_str(item.get("name"), limit=128),
-                    "model": ext._opt_str(item.get("model"), limit=128),
-                    "tokens": _usage_tokens(item),
-                    "cost": {
-                        "value": ext._opt_float(item.get("calculatedTotalCost")),
-                        "currency": "USD",
-                        "source": "imported" if ext._opt_float(item.get("calculatedTotalCost")) is not None else "missing",
-                    },
-                }
-            )
+            try:
+                # One broken generation/span never discards the whole trace:
+                # every field is optional and degrades to None.
+                generations.append(
+                    {
+                        "source_id": ext._opt_str(item.get("id"), limit=128),
+                        "name": ext._opt_str(item.get("name"), limit=128),
+                        "model": ext._opt_str(item.get("model"), limit=128),
+                        # generation/span hierarchy (Langfuse v2 observation
+                        # model); missing on v1 exports -> None.
+                        "type": ext._opt_str(item.get("type"), limit=32),
+                        "parent_id": ext._opt_str(
+                            item.get("parentObservationId") or item.get("parent_observation_id"), limit=128
+                        ),
+                        "tokens": _usage_tokens(item),
+                        "cost": {
+                            "value": ext._opt_float(item.get("calculatedTotalCost")),
+                            "currency": "USD",
+                            "source": "imported"
+                            if ext._opt_float(item.get("calculatedTotalCost")) is not None
+                            else "missing",
+                        },
+                    }
+                )
+            except Exception:
+                generation_warnings += 1
+                continue
 
     record = {
         "source_id": str(source_id)[:128],
@@ -229,6 +289,11 @@ def normalize_trace(raw: Any) -> Dict[str, Any]:
     # Re-attach the association hint for link_trace; it is stripped there
     # before the record is persisted.
     normalized["_session_id"] = session_id
+    if generation_warnings:
+        normalized["warnings"] = [
+            "%d generation/span entries were incomplete and were normalized with missing fields"
+            % generation_warnings
+        ]
     return normalized
 
 
@@ -523,10 +588,34 @@ def _read_http_records(
     *,
     fetcher: Optional[Any] = None,
 ) -> Tuple[List[Any], List[str]]:
-    """Fetch trace/score pages from a Langfuse-compatible public API.
+    """Fetch all trace/score pages (bounded) from a Langfuse-compatible API.
 
-    The token is read from the environment variable named by
-    ``config['token_env']``; its value never appears in errors or records.
+    Kept for the synchronous Phase 3 pipeline; the resumable Phase 4 worker
+    uses :func:`iter_http_pages` instead.
+    """
+    records: List[Any] = []
+    warnings: List[str] = []
+    for page_info in iter_http_pages(config, kind, fetcher=fetcher):
+        records.extend(page_info["records"])
+        warnings.extend(page_info["warnings"])
+    return records, warnings
+
+
+def fetch_http_page(
+    config: Dict[str, Any],
+    kind: str,
+    *,
+    fetcher: Optional[Any] = None,
+    cursor: Optional[str] = None,
+    page: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Fetch one page. Returns ``{records, next_cursor, next_page, warnings}``.
+
+    Pagination follows whichever scheme the server answers with: a
+    ``meta.cursor`` (v2 cursor pagination) wins over ``page``/``totalPages``
+    arithmetic (v1 page pagination). The token is read from the environment
+    variable named by ``config['token_env']``; its value never appears in
+    errors, warnings or records.
     """
     import os
 
@@ -535,34 +624,118 @@ def _read_http_records(
     if config.get("token_env"):
         token = os.environ.get(str(config["token_env"]))
     fetch = fetcher or _default_fetch
-    records: List[Any] = []
-    warnings: List[str] = []
     path = "/api/public/%s" % ("traces" if kind == "traces" else "scores")
-    for page in range(1, MAX_HTTP_PAGES + 1):
-        url = "%s%s?limit=100&page=%d" % (base_url, path, page)
-        try:
-            payload = fetch(url, token)
-        except Exception as exc:
-            # Never leak the URL query (may embed params) or token; type only.
-            raise ValueError("langfuse HTTP fetch failed: %s" % type(exc).__name__) from exc
-        if not isinstance(payload, dict):
-            raise ValueError("langfuse HTTP response is not a JSON object")
-        batch = payload.get("data")
-        if not isinstance(batch, list):
-            raise ValueError("langfuse HTTP response is missing the data list")
-        records.extend(batch)
-        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-        total_pages = meta.get("totalPages")
-        if not batch or (ext._is_number(total_pages) and page >= int(total_pages)):
-            break
-    return records, warnings
+    if cursor:
+        url = "%s%s?limit=100&cursor=%s" % (base_url, path, urllib.parse.quote(str(cursor), safe=""))
+    else:
+        url = "%s%s?limit=100&page=%d" % (base_url, path, int(page or 1))
+    try:
+        payload = fetch(url, token)
+    except LangfuseSourceError:
+        raise
+    except Exception as exc:
+        # Never leak the URL query (may embed params) or token; type only.
+        raise LangfuseSourceError(
+            "source_unavailable", "langfuse HTTP fetch failed: %s" % type(exc).__name__, retryable=True
+        ) from exc
+    if not isinstance(payload, dict):
+        raise LangfuseSourceError(
+            "source_schema_error", "langfuse HTTP response is not a JSON object", retryable=False
+        )
+
+    warnings: List[str] = []
+    # Partial errors: some versions return data alongside an error marker.
+    partial_error = payload.get("error") or payload.get("errors")
+    if partial_error:
+        warnings.append("langfuse API reported a partial error (%s); available data was kept" % type(partial_error).__name__)
+
+    # Field naming variants across versions: data | traces | scores.
+    batch = payload.get("data")
+    if not isinstance(batch, list):
+        alt = payload.get("traces" if kind == "traces" else "scores")
+        if isinstance(alt, list):
+            batch = alt
+    if not isinstance(batch, list):
+        if partial_error:
+            batch = []
+        else:
+            raise LangfuseSourceError(
+                "source_schema_error", "langfuse HTTP response is missing the data list", retryable=False
+            )
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    next_cursor = meta.get("cursor") or meta.get("nextCursor") or payload.get("cursor")
+    next_cursor = str(next_cursor)[:256] if next_cursor else None
+    current_page = int(page or 1)
+    total_pages = meta.get("totalPages")
+    if not ext._is_number(total_pages):
+        total_pages = meta.get("total_pages")
+    if cursor:
+        # A cursor-based request only ever follows the next cursor; cursor
+        # servers end the stream by omitting it (never by page arithmetic).
+        next_page = None
+    elif ext._is_number(total_pages):
+        next_page = current_page + 1 if current_page < int(total_pages) else None
+    elif batch:
+        # No pagination metadata: keep paging until an empty batch (bounded
+        # by max_pages in the iterator).
+        next_page = current_page + 1
+    else:
+        next_page = None
+    return {
+        "records": batch,
+        "next_cursor": next_cursor,
+        "next_page": next_page,
+        "page": current_page,
+        "has_more": bool(next_cursor or next_page),
+        "warnings": warnings,
+    }
+
+
+def iter_http_pages(
+    config: Dict[str, Any],
+    kind: str,
+    *,
+    fetcher: Optional[Any] = None,
+    start_cursor: Optional[str] = None,
+    start_page: Optional[int] = None,
+    should_cancel: Optional[Any] = None,
+    max_pages: int = MAX_HTTP_PAGES,
+):
+    """Yield ``fetch_http_page`` results one page at a time.
+
+    Cancellation is cooperative: ``should_cancel()`` is consulted *between*
+    pages (never mid-request); when it returns true the iteration stops
+    cleanly so the caller can persist a checkpoint at a page boundary.
+    """
+    cursor = str(start_cursor)[:256] if start_cursor else None
+    page = int(start_page) if start_page else (None if cursor else 1)
+    fetched = 0
+    while True:
+        if should_cancel is not None and should_cancel():
+            return
+        if fetched >= max_pages:
+            yield {"records": [], "next_cursor": None, "next_page": None, "page": page or 0,
+                   "has_more": False, "warnings": ["import stopped at the %d page limit" % max_pages]}
+            return
+        info = fetch_http_page(config, kind, fetcher=fetcher, cursor=cursor, page=page)
+        fetched += 1
+        yield info
+        cursor = info.get("next_cursor")
+        page = info.get("next_page")
+        if not cursor and not page:
+            return
 
 
 def _default_fetch(url: str, token: Optional[str]) -> Any:
     """Stdlib HTTP GET with a bounded response; redirect targets are
-    re-validated through the endpoint policy."""
+    re-validated through the endpoint policy. HTTP failures surface as
+    :class:`LangfuseSourceError` with an explicit retry classification."""
     parsed_base = url.split("?", 1)[0]
-    endpoint = netguard.validate_endpoint(parsed_base)
+    try:
+        endpoint = netguard.validate_endpoint(parsed_base)
+    except netguard.EndpointRejected as exc:
+        raise LangfuseSourceError("source_rejected", str(exc), retryable=False) from exc
     headers = {"Accept": "application/json", "User-Agent": "auditrail-langfuse-import/1.0"}
     if token:
         headers["Authorization"] = "Bearer %s" % token
@@ -574,11 +747,109 @@ def _default_fetch(url: str, token: Optional[str]) -> Any:
 
     opener = urllib.request.build_opener(_GuardedRedirect())
     request = urllib.request.Request(endpoint + url[len(parsed_base):], headers=headers, method="GET")
-    with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-        body = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
+    try:
+        with opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            body = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        code, retryable = classify_http_status(exc.code)
+        raise LangfuseSourceError(
+            code, "langfuse HTTP %s" % exc.code, retryable=retryable, status=int(exc.code)
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise LangfuseSourceError(
+            "source_unavailable", "langfuse HTTP fetch failed: %s" % type(exc).__name__, retryable=True
+        ) from exc
+    except TimeoutError as exc:
+        raise LangfuseSourceError("source_timeout", "langfuse HTTP fetch timed out", retryable=True) from exc
     if len(body) > MAX_HTTP_RESPONSE_BYTES:
-        raise ValueError("response too large")
-    return json.loads(body.decode("utf-8"))
+        raise LangfuseSourceError("source_schema_error", "response too large", retryable=False)
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise LangfuseSourceError(
+            "source_schema_error", "langfuse HTTP response is not valid JSON", retryable=False
+        ) from exc
+
+
+def iter_file_records(
+    path: Path,
+    *,
+    start_index: int = 0,
+    start_byte_offset: int = 0,
+):
+    """Yield ``(index, raw_record, byte_offset)`` for a JSONL or JSON-array
+    export, starting from a checkpoint position.
+
+    - JSONL: streams line by line; ``byte_offset`` is the offset *after* the
+      yielded line, and ``start_byte_offset`` resumes mid-file safely (a torn
+      or moved offset degrades to ``start_index`` instead of guessing).
+    - JSON array/object: parsed whole (bounded by ``MAX_IMPORT_BYTES``) and
+      resumed by ``index``.
+
+    A malformed line is yielded as ``(index, None, offset)`` — the caller
+    counts it as invalid and continues; one bad record never aborts the read.
+    """
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise LangfuseSourceError(
+            "invalid_import", "source file is not readable: %s" % type(exc).__name__, retryable=False
+        ) from exc
+    if size > ext.MAX_IMPORT_BYTES:
+        raise LangfuseSourceError(
+            "invalid_import",
+            "source file exceeds the %d byte limit" % ext.MAX_IMPORT_BYTES,
+            retryable=False,
+        )
+
+    with open(path, "rb") as handle:
+        prefix = handle.read(1)
+    if prefix in (b"[", b"{"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None  # a JSONL export also starts with "{" — fall through
+        if payload is not None:
+            if isinstance(payload, dict):
+                records: List[Any] = []
+                for key in ("traces", "scores", "data", "records"):
+                    if isinstance(payload.get(key), list):
+                        records = payload[key]
+                        break
+                else:
+                    records = [payload]
+            elif isinstance(payload, list):
+                records = payload
+            else:
+                records = []
+            for index, raw in enumerate(records, start=1):
+                if index <= start_index:
+                    continue
+                yield index, raw, 0
+            return
+
+    # JSONL streaming with byte offsets.
+    index = 0
+    with open(path, "rb") as handle:
+        if start_byte_offset > 0 and start_byte_offset < size:
+            handle.seek(start_byte_offset)
+            index = max(int(start_index), 0)
+        for raw_line in handle:
+            index += 1
+            offset = handle.tell()
+            if index > ext.MAX_IMPORT_LINES:
+                return
+            line = raw_line.decode("utf-8", errors="replace")
+            if not line.strip():
+                continue
+            if len(raw_line) > ext.MAX_LINE_BYTES:
+                yield index, None, offset
+                continue
+            try:
+                yield index, json.loads(line), offset
+            except json.JSONDecodeError:
+                yield index, None, offset
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +878,7 @@ def import_traces(
     association = options.get("association") if isinstance(options.get("association"), dict) else {}
     report = ext.new_import_report(SOURCE_SYSTEM, dry_run=dry_run)
     report["kind"] = "traces"
+    report["adapter_compat"] = LANGFUSE_COMPAT_VERSION
 
     records, read_warnings = read_source_records(
         source, kind="traces", allowed_roots=allowed_roots, config=config, fetcher=fetcher
@@ -677,6 +949,7 @@ def import_scores(
     dry_run = bool(options.get("dry_run"))
     report = ext.new_import_report(SOURCE_SYSTEM, dry_run=dry_run)
     report["kind"] = "scores"
+    report["adapter_compat"] = LANGFUSE_COMPAT_VERSION
 
     records, read_warnings = read_source_records(
         source, kind="scores", allowed_roots=allowed_roots, config=config, fetcher=fetcher

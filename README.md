@@ -586,6 +586,87 @@ they never overwrite `audit.json`, deterministic checks, judge
   `GET /api/suite-jobs/{job_id}/detail`. The legacy `/platform?job=:jobId`
   entry keeps working and links to the new page.
 
+## Agent Test Platform (Phase 4): Production Hardening and Governance
+
+Phase 4 upgrades external imports to resumable asynchronous jobs and adds a
+minimal, honest local permission boundary. Still no database, no queue, no
+SSO — everything stays file-based under `platform/`.
+
+- **ImportJob** (`auditrail/integrations/import_jobs.py` +
+  `backend/app/import_worker.py`) — every external import is a persisted job
+  at `platform/external/imports/<import_id>.json` (atomic writes) with the
+  state machine
+  `queued → validating → running → completed|partial|failed|cancelled`,
+  plus `paused` and `stale`. Checkpoints (`cursor`/`page`/`byte_offset`/
+  `index`) are written every `AUDITRAIL_IMPORT_CHECKPOINT_RECORDS` (default
+  100) records and after every HTTP page, so retry/resume continues instead
+  of restarting; dedupe on `source_system + source_id` makes resumed writes
+  idempotent. Cancellation is cooperative and persisted; already-imported
+  evidence is never rolled back. Workers hold a lease
+  (`worker_id`/`heartbeat_at`/`lease_expires_at`): an expired lease marks the
+  job `stale` (never `completed`), and an old worker can never overwrite a
+  newer worker's state. Errors are classified retryable (HTTP 408/429/5xx,
+  timeouts — bounded auto-retry with capped backoff, max
+  `AUDITRAIL_IMPORT_MAX_RETRIES`, default 5) vs. non-retryable (schema,
+  401/403, SSRF, path errors). `POST /api/integrations/{source}/import`
+  keeps the synchronous contract for small/dry-run imports (HTTP 200 +
+  legacy report fields); large-file/HTTP imports return HTTP 202 with
+  `import_id` and run on the in-process worker. New endpoints:
+  `GET /api/integrations/imports/{id}/status`,
+  `POST /api/integrations/imports/{id}/cancel|retry|resume`
+  (`GET /api/integrations/imports` is now paginated: `limit`/`offset`,
+  `has_more`, server cap 200).
+- **Langfuse compatibility layer** (`adapter_compat` in reports) — page and
+  cursor pagination (`meta.totalPages`/`total_pages`, `meta.cursor`), `data`/
+  `traces`/`scores` field variants, partial-error responses keep available
+  data with a warning, a broken generation/span never drops its trace, and
+  `metadata.session_id` linking variants. Tokens still come only from the
+  named env var and never appear in logs/errors/artifacts.
+- **promptfoo draft promotion** — drafts carry a lifecycle
+  (`draft → approved|rejected|archived`) and are never executed. New
+  endpoints: `GET /api/integrations/promptfoo/drafts[/{id}]`,
+  `POST .../{id}/approve|reject|archive`. Approve re-validates schema and
+  safety, requires derivable http_session input (or an explicit
+  `input_override`), creates one stable formal TestCase with a `source_ref`
+  (`source_system/source_id/approved_by/approved_at`), is idempotent, and is
+  refused for drafts declaring executable content — the platform has no safe
+  execution capability for them. Unmapped assertions stay unmapped
+  (`required: false`, never converted to executable assertions).
+- **Local permission boundary** (`backend/app/auth.py`) — roles
+  `viewer`/`operator`/`admin` from server-owned env config:
+  `AUDITRAIL_AUTH_MODE=local|disabled` (default `local`),
+  `AUDITRAIL_AUTH_ROLE` (default `admin`), `AUDITRAIL_AUTH_ACTOR`.
+  `disabled` is a local-development mode only: everything is allowed and
+  every response/UI surface says so. `GET /api/auth/context` reports the
+  mode, role and effective permissions. This is not production
+  authentication; there is no SSO, no tokens, no multi-user identity.
+- **Audit log** (`backend/app/audit_service.py`) — append-only JSONL at
+  `platform/audit/audit_events.jsonl`; records agent create/update/delete,
+  price version lifecycle, import create/cancel/resume, promptfoo draft
+  review and index rebuild/pause/resume with actor/role/action/resource/
+  result/timestamp. Secrets are redacted; a failed write is an explicit 500
+  (`audit_unavailable`), never silent. Read via paginated, filterable
+  `GET /api/audit-events`. There is no update/delete path.
+- **Run-index operations** — `GET /api/admin/run-index/health` (index +
+  watcher + degraded flag), `POST /api/admin/run-index/pause|resume`
+  (persisted in the meta file; manual rebuild stays available while paused;
+  startup never triggers an implicit full rebuild). Every refresh records
+  its reason (`manual|scheduled|file_change|recovery|import_complete`) in
+  the meta history; watcher failures surface as `degraded` with
+  `failure_count` and a redacted `last_error`. Large runs directories are
+  scanned in batches (`scan_batch`, default 500) without holding locks.
+- **Pagination governance** — `GET /api/agents/{id}/runs` gains `has_more`
+  and a sort whitelist (`effective_ts|started_at|finished_at|status|run_id`,
+  unknown sorts are a 400); `GET /api/agents/{id}/external-evaluations` and
+  `GET /api/suite-jobs/{id}/runs` are paginated server-side
+  (`limit`/`offset`/`total`/`has_more`, capped limits).
+- **Frontend** — new pages: `/integrations/imports` (导入任务),
+  `/integrations/imports/:importId` (导入详情),
+  `/integrations/promptfoo/drafts` (promptfoo 草稿审核),
+  `/admin/audit-events` (审计日志). Buttons are permission-gated from
+  `GET /api/auth/context`; `disabled` auth mode shows a local-development
+  banner.
+
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.

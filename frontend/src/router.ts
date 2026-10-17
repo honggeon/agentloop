@@ -66,6 +66,30 @@ const router = createRouter({
       meta: { title: "SuiteJob 详情" }
     },
     {
+      path: "/integrations/imports",
+      name: "integration-imports",
+      component: () => import("./views/ImportListView.vue"),
+      meta: { title: "导入任务" }
+    },
+    {
+      path: "/integrations/imports/:importId",
+      name: "integration-import-detail",
+      component: () => import("./views/ImportDetailView.vue"),
+      meta: { title: "导入详情" }
+    },
+    {
+      path: "/integrations/promptfoo/drafts",
+      name: "promptfoo-drafts",
+      component: () => import("./views/PromptfooDraftsView.vue"),
+      meta: { title: "promptfoo 草稿审核" }
+    },
+    {
+      path: "/admin/audit-events",
+      name: "audit-events",
+      component: () => import("./views/AuditEventsView.vue"),
+      meta: { title: "审计日志" }
+    },
+    {
       path: "/:pathMatch(.*)*",
       redirect: "/"
     }

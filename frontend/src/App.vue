@@ -190,6 +190,25 @@ onMounted(checkBackend);
           <span class="nav-label">Agent 工作区</span>
           <small>Agent 列表 · 详情 · 运行</small>
         </RouterLink>
+        <RouterLink
+          class="nav-link"
+          :class="{ active: route.name === 'integration-imports' || route.name === 'integration-import-detail' }"
+          to="/integrations/imports"
+        >
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">导入任务</span>
+          <small>Langfuse / promptfoo 导入</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'promptfoo-drafts' }" to="/integrations/promptfoo/drafts">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">草稿审核</span>
+          <small>promptfoo 草稿 → TestCase</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'audit-events' }" to="/admin/audit-events">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">审计日志</span>
+          <small>本地审计 · 运行索引</small>
+        </RouterLink>
       </nav>
 
       <div class="sidebar-meta">

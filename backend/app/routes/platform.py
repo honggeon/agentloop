@@ -20,10 +20,29 @@ from auditrail import run_contract
 from auditrail import testsuites as suite_mod
 from auditrail.netguard import EndpointRejected, validate_endpoint
 from auditrail.runner import create_platform_run
-from backend.app import agent_overview, integration_service, platform_store, run_context, run_executor, suite_executor
+from backend.app import agent_overview, audit_service, auth, integration_service, platform_store, run_context, run_executor, suite_executor
 from backend.app.config import build_endpoint_policy, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
+
+
+def _audit_agent(settings, identity, action: str, agent_id: str) -> None:
+    """Append the agent audit event; a failed write is an explicit 500."""
+    try:
+        audit_service.append_event(
+            settings,
+            actor=identity["actor"],
+            role=identity["role"],
+            action=action,
+            resource_type="agent",
+            resource_id=agent_id,
+            result="success",
+        )
+    except audit_service.AuditLogError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "audit_unavailable", "message": "审计日志写入失败：%s" % str(exc)[:200]},
+        ) from exc
 
 
 # -------------------------------------------------------------------- agents
@@ -77,13 +96,15 @@ def get_agent_runs(
     status: str = "all",
     limit: int = agent_overview.DEFAULT_RUN_LIMIT,
     offset: int = 0,
+    sort: str = "effective_ts",
 ) -> dict[str, Any]:
     settings = get_settings()
     try:
         range_key = agent_overview.validate_range(range)
         status_filter = agent_overview.validate_status_filter(status)
+        sort_key = agent_overview.validate_sort(sort)
         result = agent_overview.list_agent_runs(
-            agent_id, range_key, status_filter, settings, limit=limit, offset=offset
+            agent_id, range_key, status_filter, settings, limit=limit, offset=offset, sort=sort_key
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": str(exc)}) from exc
@@ -98,6 +119,7 @@ def get_agent_runs(
 @router.post("/agents", status_code=201)
 def create_agent(payload: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
+    identity = auth.require_role(settings, "admin")
     try:
         endpoint = validate_endpoint(payload.get("endpoint"), build_endpoint_policy(settings))
     except EndpointRejected as exc:
@@ -112,7 +134,8 @@ def create_agent(payload: dict[str, Any]) -> dict[str, Any]:
             status_code=400,
             detail={"code": "invalid_agent", "message": str(exc)},
         ) from exc
-    return {"agent": agent}
+    _audit_agent(settings, identity, "agent_create", agent["agent_id"])
+    return {"agent": agent, "auth_mode": identity["mode"]}
 
 
 @router.put("/agents/{agent_id}")
@@ -120,6 +143,7 @@ def update_agent(agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Update editable Agent metadata (Phase 2). ``agent_id``/``created_at``
     are immutable; historical runs keep their own ``agent_ref`` snapshot."""
     settings = get_settings()
+    identity = auth.require_role(settings, "admin")
     if payload.get("endpoint") is not None:
         try:
             payload = {**payload, "endpoint": validate_endpoint(payload.get("endpoint"), build_endpoint_policy(settings))}
@@ -140,19 +164,23 @@ def update_agent(agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             status_code=404,
             detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
         )
-    return {"agent": agent}
+    _audit_agent(settings, identity, "agent_update", agent_id)
+    return {"agent": agent, "auth_mode": identity["mode"]}
 
 
 @router.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str) -> dict[str, Any]:
     """Delete an Agent config. Historical runs are preserved and keep their
     ``run.json`` snapshot; the agent reappears as derived/missing config."""
-    if not platform_store.delete_agent(agent_id, get_settings()):
+    settings = get_settings()
+    identity = auth.require_role(settings, "admin")
+    if not platform_store.delete_agent(agent_id, settings):
         raise HTTPException(
             status_code=404,
             detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
         )
-    return {"deleted": agent_id}
+    _audit_agent(settings, identity, "agent_delete", agent_id)
+    return {"deleted": agent_id, "auth_mode": identity["mode"]}
 
 
 # --------------------------------------------------------------- test cases
@@ -541,14 +569,32 @@ def get_suite_job(job_id: str) -> dict[str, Any]:
 
 
 @router.get("/suite-jobs/{job_id}/runs")
-def get_suite_job_runs(job_id: str) -> dict[str, Any]:
-    """All runs of one SuiteJob, grouped by CaseExecution (Phase 2)."""
+def get_suite_job_runs(job_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+    """Runs of one SuiteJob, grouped by CaseExecution (Phase 2).
+
+    Phase 4: the flat ``runs`` list is paginated server-side
+    (``limit``/``offset``, ``total``/``has_more``); ``case_executions`` stays
+    a bounded per-case grouping.
+    """
     payload = run_context.list_job_runs(job_id, get_settings())
     if payload is None:
         raise HTTPException(
             status_code=404,
             detail={"code": "suite_job_not_found", "message": "unknown suite job %s" % job_id},
         )
+    try:
+        limit = min(max(int(limit), 1), 500)
+        offset = max(int(offset), 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_pagination", "message": str(exc)[:200]}) from exc
+    runs = list(payload.get("runs") or [])
+    payload["runs"] = runs[offset : offset + limit]
+    payload["runs_pagination"] = {
+        "total": len(runs),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + limit < len(runs),
+    }
     return payload
 
 

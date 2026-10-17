@@ -43,9 +43,18 @@ META_FILE = "run_index_meta.json"
 #: Index lifecycle statuses surfaced by the API.
 STATUS_READY = "ready"
 STATUS_UNAVAILABLE = "unavailable"
+STATUS_REBUILDING = "rebuilding"
+
+#: Why a refresh happened (recorded in the meta file, surfaced by the API).
+REFRESH_REASONS = ("manual", "scheduled", "file_change", "recovery", "import_complete")
 
 #: Meta error summary bound; full detail stays out of the index.
 _MAX_META_ERRORS = 20
+
+#: Scan batching: the runs directory is processed in chunks so very large
+#: trees never require one uninterruptible pass. No lock is held while
+#: scanning either way.
+DEFAULT_SCAN_BATCH = 500
 
 _LOCK = threading.RLock()
 
@@ -125,6 +134,10 @@ def index_status(platform_dir: Path) -> Dict[str, Any]:
             "indexed_count": len(index.get("entries") or {}) if index else 0,
             "error_count": 0,
             "errors": [],
+            "refresh_reason": None,
+            "refresh_history": [],
+            "paused": False,
+            "rebuilt_from": None,
         }
     status = str(meta.get("status") or STATUS_READY)
     if index is None:
@@ -136,6 +149,11 @@ def index_status(platform_dir: Path) -> Dict[str, Any]:
         "indexed_count": int(meta.get("indexed_count") or 0),
         "error_count": int(meta.get("error_count") or 0),
         "errors": list(meta.get("errors") or [])[:_MAX_META_ERRORS],
+        # Phase 4: refresh provenance and rebuild progress, additive fields.
+        "refresh_reason": meta.get("refresh_reason"),
+        "refresh_history": list(meta.get("refresh_history") or [])[:20],
+        "paused": bool(meta.get("paused")),
+        "rebuilt_from": meta.get("rebuilt_from"),
     }
 
 
@@ -299,6 +317,8 @@ def ensure_index(
     platform_dir: Path,
     *,
     cost_lookup: Optional[Callable[[str], Dict[str, Any]]] = None,
+    reason: str = "scheduled",
+    scan_batch: int = DEFAULT_SCAN_BATCH,
 ) -> Tuple[Optional[Dict[str, Dict[str, Any]]], Dict[str, Any]]:
     """Return ``(entries, status_block)``; ``entries=None`` means fall back.
 
@@ -310,7 +330,8 @@ def ensure_index(
     The runs-directory scan and per-entry reads happen *outside* the lock —
     only the short read/merge/write of the index files themselves is locked,
     and those writes are atomic (staging file + ``os.replace``), so readers
-    never observe a half-written index.
+    never observe a half-written index. ``reason`` (one of
+    ``REFRESH_REASONS``) is recorded in the meta file for auditability.
     """
     stored = load_index(platform_dir)
     if stored is None and _index_path(platform_dir).is_file():
@@ -324,7 +345,7 @@ def ensure_index(
             "indexed_count": 0,
             "error_count": int(meta.get("error_count") or 0) + 1,
         }
-    entries, meta = _scan(runs_dir, stored, cost_lookup=cost_lookup)
+    entries, meta = _scan(runs_dir, stored, cost_lookup=cost_lookup, reason=reason, scan_batch=scan_batch)
     with _LOCK:
         _write_index(platform_dir, entries, meta, previous=stored)
     return entries, {
@@ -333,6 +354,7 @@ def ensure_index(
         "last_scan_at": meta.get("last_scan_at"),
         "indexed_count": len(entries),
         "error_count": len(meta.get("errors") or []),
+        "refresh_reason": meta.get("refresh_reason"),
     }
 
 
@@ -341,9 +363,47 @@ def rebuild_index(
     platform_dir: Path,
     *,
     cost_lookup: Optional[Callable[[str], Dict[str, Any]]] = None,
+    scan_batch: int = DEFAULT_SCAN_BATCH,
 ) -> Dict[str, Any]:
-    """Explicit full rebuild (admin API); returns the fresh status block."""
-    entries, meta = _scan(runs_dir, None, cost_lookup=cost_lookup)
+    """Explicit full rebuild (admin API); returns the fresh status block.
+
+    The meta file flips to ``rebuilding`` first, so status readers can tell
+    an in-progress rebuild from a ready index; the index file itself is
+    atomically replaced at the end, so reads during the rebuild keep serving
+    the *previous* index (never a fabricated empty one).
+    """
+    previous_meta = load_meta(platform_dir) or {}
+    if str(previous_meta.get("status") or "") == STATUS_REBUILDING:
+        # A rebuild is already in progress in this process; the old index
+        # keeps being served. Callers map this to a 409 index_rebuilding.
+        raise ValueError("index rebuild already in progress")
+    _write_meta(
+        platform_dir,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "status": STATUS_REBUILDING,
+            "refresh_reason": "manual",
+            "last_scan_at": previous_meta.get("last_scan_at"),
+            "indexed_count": int(previous_meta.get("indexed_count") or 0),
+            "error_count": int(previous_meta.get("error_count") or 0),
+            "errors": list(previous_meta.get("errors") or [])[:_MAX_META_ERRORS],
+            "paused": bool(previous_meta.get("paused")),
+            "rebuilt_from": previous_meta.get("last_scan_at"),
+        },
+    )
+    try:
+        entries, meta = _scan(runs_dir, None, cost_lookup=cost_lookup, reason="manual", scan_batch=scan_batch)
+    except Exception:
+        # A failed rebuild restores the previous meta; the old index file is
+        # still intact (it is only replaced atomically on success).
+        if previous_meta:
+            _write_meta(platform_dir, previous_meta)
+        raise
+    meta["paused"] = bool(previous_meta.get("paused"))
+    meta["rebuilt_from"] = previous_meta.get("last_scan_at")
+    history = list(previous_meta.get("refresh_history") or [])
+    history.append({"reason": "manual", "at": meta.get("last_scan_at")})
+    meta["refresh_history"] = history[-20:]
     with _LOCK:
         _write_index(platform_dir, entries, meta, previous=None, force=True)
     return index_status(platform_dir)
@@ -354,26 +414,46 @@ def _scan(
     stored: Optional[Dict[str, Any]],
     *,
     cost_lookup: Optional[Callable[[str], Dict[str, Any]]],
+    reason: str = "scheduled",
+    scan_batch: int = DEFAULT_SCAN_BATCH,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
-    """Diff the runs directory against ``stored`` without holding any lock."""
+    """Diff the runs directory against ``stored`` without holding any lock.
+
+    The directory is processed in ``scan_batch`` chunks so very large trees
+    are handled incrementally rather than in one uninterruptible pass.
+    """
     runs_dir = Path(runs_dir)
     previous = (stored or {}).get("entries") or {}
     entries: Dict[str, Dict[str, Any]] = {}
     errors: List[Dict[str, str]] = []
+    reason = reason if reason in REFRESH_REASONS else "scheduled"
+
+    batch_size = max(int(scan_batch), 1)
+    chunk: List[Path] = []
+
+    def process_chunk(dirs: List[Path]) -> None:
+        for run_dir in dirs:
+            run_id = run_dir.name
+            old = previous.get(run_id)
+            signature = _signature(run_dir)
+            if old is not None and old.get("signature") == signature:
+                entries[run_id] = old
+                continue
+            try:
+                entries[run_id] = build_entry(run_dir, runs_dir=runs_dir, cost_lookup=cost_lookup)
+            except Exception as exc:  # one bad run never blocks the whole index
+                errors.append({"run_id": run_id, "stage": "index", "message": "index build failed: %s" % type(exc).__name__})
+                if old is not None:
+                    entries[run_id] = old
 
     for run_dir in _iter_run_dirs(runs_dir):
-        run_id = run_dir.name
-        old = previous.get(run_id)
-        signature = _signature(run_dir)
-        if old is not None and old.get("signature") == signature:
-            entries[run_id] = old
-            continue
-        try:
-            entries[run_id] = build_entry(run_dir, runs_dir=runs_dir, cost_lookup=cost_lookup)
-        except Exception as exc:  # one bad run never blocks the whole index
-            errors.append({"run_id": run_id, "stage": "index", "message": "index build failed: %s" % type(exc).__name__})
-            if old is not None:
-                entries[run_id] = old
+        chunk.append(run_dir)
+        if len(chunk) >= batch_size:
+            process_chunk(chunk)
+            chunk = []
+    if chunk:
+        process_chunk(chunk)
+
     meta = {
         "schema_version": SCHEMA_VERSION,
         "status": STATUS_READY,
@@ -381,8 +461,27 @@ def _scan(
         "indexed_count": len(entries),
         "error_count": len(errors),
         "errors": errors[:_MAX_META_ERRORS],
+        "refresh_reason": reason,
     }
     return entries, meta
+
+
+def _write_meta(platform_dir: Path, meta: Dict[str, Any]) -> None:
+    Path(platform_dir).mkdir(parents=True, exist_ok=True)
+    write_json(_meta_path(platform_dir), meta)
+
+
+def set_paused(platform_dir: Path, paused: bool) -> None:
+    """Persist the paused flag in the meta file (survives restarts)."""
+    meta = load_meta(platform_dir) or {"schema_version": SCHEMA_VERSION, "status": STATUS_UNAVAILABLE}
+    meta = dict(meta)
+    meta["paused"] = bool(paused)
+    _write_meta(platform_dir, meta)
+
+
+def is_paused(platform_dir: Path) -> bool:
+    meta = load_meta(platform_dir)
+    return bool(meta and meta.get("paused"))
 
 
 def _write_index(
@@ -402,8 +501,18 @@ def _write_index(
     changed = force or set(old_entries) != set(entries) or any(
         old_entries.get(run_id) != entry for run_id, entry in entries.items()
     )
+    previous_meta = load_meta(platform_dir) or {}
+    meta = dict(meta)
+    meta.setdefault("paused", bool(previous_meta.get("paused")))
+    history = list(previous_meta.get("refresh_history") or [])
+    reason = meta.get("refresh_reason")
+    if reason:
+        history.append({"reason": reason, "at": meta.get("last_scan_at")})
+    meta["refresh_history"] = history[-20:]
     if not changed and _index_path(platform_dir).is_file():
+        # Still record the refresh reason/history without rewriting entries.
+        _write_meta(platform_dir, meta)
         return
     Path(platform_dir).mkdir(parents=True, exist_ok=True)
     write_json(_index_path(platform_dir), {"schema_version": SCHEMA_VERSION, "entries": entries})
-    write_json(_meta_path(platform_dir), meta)
+    _write_meta(platform_dir, meta)

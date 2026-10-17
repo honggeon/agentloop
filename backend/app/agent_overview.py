@@ -44,6 +44,10 @@ RUN_STATUS_FILTERS = ("all", "completed", "failed", "timed_out", "cancelled", "s
 DEFAULT_RUN_LIMIT = 50
 MAX_RUN_LIMIT = 200
 
+#: Phase 4: sort whitelist for the runs listing. ``effective_ts`` (started,
+#: else finished) is the default; unknown values are rejected with 400.
+RUN_SORT_FIELDS = ("effective_ts", "started_at", "finished_at", "status", "run_id")
+
 #: Per-record sources come from ``auditrail.costs``; ``mixed`` is an
 #: aggregate-only value when several sources contribute.
 COST_SOURCES = cost_mod.COST_SOURCES
@@ -78,6 +82,13 @@ def validate_status_filter(value: Any) -> str:
     text = str(value or "all").strip()
     if text not in RUN_STATUS_FILTERS:
         raise ValueError("status must be one of %s" % list(RUN_STATUS_FILTERS))
+    return text
+
+
+def validate_sort(value: Any) -> str:
+    text = str(value or "effective_ts").strip()
+    if text not in RUN_SORT_FIELDS:
+        raise ValueError("sort must be one of %s" % list(RUN_SORT_FIELDS))
     return text
 
 
@@ -961,6 +972,7 @@ def list_agent_runs(
     *,
     limit: int = DEFAULT_RUN_LIMIT,
     offset: int = 0,
+    sort: str = "effective_ts",
 ) -> Optional[Dict[str, Any]]:
     config, rows, errors, index_block = resolve_agent(agent_id, settings)
     if config is None and not rows:
@@ -971,14 +983,23 @@ def list_agent_runs(
         scoped = [row for row in scoped if row.get("stale")]
     elif status_filter != "all":
         scoped = [row for row in scoped if row.get("status") == status_filter]
-    ordered = _sort_rows(scoped)
+    if sort == "effective_ts":
+        ordered = _sort_rows(scoped)
+    else:
+        # Whitelisted secondary sort keys; missing values sort last.
+        ordered = sorted(
+            scoped,
+            key=lambda row: (row.get(sort) is None, str(row.get(sort) or ""), row["run_id"]),
+        )
     limit = min(max(int(limit), 1), MAX_RUN_LIMIT)
     offset = max(int(offset), 0)
     return {
         "items": [_public_row(row) for row in ordered[offset : offset + limit]],
         "total": len(ordered),
+        "has_more": offset + limit < len(ordered),
         "range": range_key,
         "status": status_filter,
+        "sort": sort,
         "limit": limit,
         "offset": offset,
         "index": index_block,

@@ -4,8 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import get_settings
-from backend.app.routes import costs, dashboard, dsh, dsh_acp, dsh_chat, integrations, judge, live, platform, prices, runs
-from backend.app import run_index_watch
+from backend.app.routes import admin, costs, dashboard, dsh, dsh_acp, dsh_chat, integrations, judge, live, platform, prices, runs
+from backend.app import import_worker, run_index_watch
 
 
 settings = get_settings()
@@ -30,6 +30,7 @@ app.include_router(dsh.router)
 app.include_router(dsh_chat.router)
 app.include_router(dsh_acp.router)
 app.include_router(dashboard.router)
+app.include_router(admin.router)
 app.router.add_event_handler("shutdown", dsh_chat.shutdown_active_operations)
 app.router.add_event_handler("shutdown", dsh_acp.shutdown_acp_runtime)
 # Phase 1.1: resume SuiteJobs left queued/running by a previous process so a
@@ -40,6 +41,10 @@ app.router.add_event_handler("startup", platform.recover_stale_suite_jobs)
 # index refreshes, never touches the main API path, and is always stopped.
 app.router.add_event_handler("startup", run_index_watch.start_run_index_watcher)
 app.router.add_event_handler("shutdown", run_index_watch.stop_run_index_watcher)
+# Phase 4: ImportJob worker — marks expired-lease imports stale on startup
+# (never auto-completes them) and stops accepting work on shutdown.
+app.router.add_event_handler("startup", import_worker.start_import_worker)
+app.router.add_event_handler("shutdown", import_worker.stop_import_worker)
 
 
 @app.get("/api/health")

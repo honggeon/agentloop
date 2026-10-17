@@ -88,6 +88,19 @@ class Settings:
     run_index_debounce_ms: int = 500
     run_index_max_batch: int = 1000
     run_index_poll_interval_ms: int = 2000
+    #: Phase 4 local permission boundary. ``local`` (default): one configured
+    #: identity (``auth_role``/``auth_actor``) authorizes requests;
+    #: ``disabled`` allows everything and is a local-development-only mode
+    #: that must be surfaced in API responses and the UI. Neither is a
+    #: production authentication capability.
+    auth_mode: str = "local"
+    auth_role: str = "admin"
+    auth_actor: str = ""
+    #: Phase 4 ImportJob worker bounds (in-process, file-persisted).
+    import_worker_enabled: bool = True
+    import_lease_seconds: int = 60
+    import_checkpoint_records: int = 100
+    import_max_retries: int = 5
 
 
 @lru_cache(maxsize=1)
@@ -129,6 +142,13 @@ def get_settings() -> Settings:
         run_index_debounce_ms=_positive_int("AUDITRAIL_RUN_INDEX_DEBOUNCE_MS", 500),
         run_index_max_batch=_positive_int("AUDITRAIL_RUN_INDEX_MAX_BATCH", 1000),
         run_index_poll_interval_ms=_positive_int("AUDITRAIL_RUN_INDEX_POLL_INTERVAL_MS", 2000),
+        auth_mode=_env_choice("AUDITRAIL_AUTH_MODE", "local", ("local", "disabled")),
+        auth_role=_env_choice("AUDITRAIL_AUTH_ROLE", "admin", ("viewer", "operator", "admin")),
+        auth_actor=os.getenv("AUDITRAIL_AUTH_ACTOR", "").strip(),
+        import_worker_enabled=_env_bool("AUDITRAIL_IMPORT_WORKER", True),
+        import_lease_seconds=_positive_int("AUDITRAIL_IMPORT_LEASE_SECONDS", 60),
+        import_checkpoint_records=_positive_int("AUDITRAIL_IMPORT_CHECKPOINT_RECORDS", 100),
+        import_max_retries=_positive_int("AUDITRAIL_IMPORT_MAX_RETRIES", 5),
     )
 
 
@@ -212,6 +232,16 @@ def _env_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError("%s must be a boolean" % name)
+
+
+def _env_choice(name: str, default: str, choices: tuple) -> str:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized not in choices:
+        raise ValueError("%s must be one of %s" % (name, list(choices)))
+    return normalized
 
 
 def _positive_int(name: str, default: int) -> int:

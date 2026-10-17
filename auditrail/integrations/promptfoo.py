@@ -41,6 +41,11 @@ SOURCE_SYSTEM = "promptfoo"
 PROMPTFOO_COMPAT_VERSION = "0.118-static"
 DRAFTS_FILE = "promptfoo_drafts.json"
 
+#: Draft lifecycle (Phase 4 human-in-the-loop promotion). Drafts are never
+#: executed; ``approved`` drafts have been promoted to a formal TestCase by an
+#: explicit operator action.
+DRAFT_STATUSES = ("draft", "approved", "rejected", "archived")
+
 #: Import safety limits.
 MAX_IMPORT_BYTES = ext.MAX_IMPORT_BYTES
 MAX_LINES = 50_000
@@ -143,6 +148,44 @@ def read_config_file(path: Path) -> Dict[str, Any]:
     except (OSError, UnicodeDecodeError) as exc:
         raise ValueError("promptfoo config is not readable: %s" % type(exc).__name__) from exc
     return parse_config_text(text, source_name=path.name)
+
+
+#: Credential fragments for draft vars. Narrower than the metadata redaction
+#: set on purpose: ``message``/``content`` are legitimate test *inputs* that a
+#: reviewer must see (truncated), while credentials never belong in a draft.
+_VARS_SECRET_FRAGMENTS = (
+    "authorization",
+    "cookie",
+    "api_key",
+    "apikey",
+    "api-key",
+    "token",
+    "secret",
+    "password",
+    "credential",
+)
+
+
+def _sanitize_vars(raw: Any) -> Dict[str, Any]:
+    """Keep bounded, non-credential var declarations; drop the rest."""
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: Dict[str, Any] = {}
+    for key, value in list(raw.items())[:MAX_VARS]:
+        name = str(key)[:64]
+        lowered = name.lower()
+        if any(fragment in lowered for fragment in _VARS_SECRET_FRAGMENTS):
+            continue
+        if isinstance(value, str):
+            lowered_value = value.lower()
+            if lowered_value.startswith("sk-") or "bearer " in lowered_value:
+                continue
+            cleaned[name] = value[:MAX_STRING_LENGTH]
+        elif isinstance(value, (int, float, bool)) or value is None:
+            cleaned[name] = value
+        else:
+            cleaned[name] = _truncate(value)
+    return cleaned
 
 
 def _truncate(value: Any, *, limit: int = MAX_STRING_LENGTH) -> Any:
@@ -257,16 +300,35 @@ def map_test(raw: Any, index: int, warnings: List[str]) -> Dict[str, Any]:
     safe_to_execute = unmapped == 0 and not forbidden
     draft = {
         "case_id": case_id,
+        # Phase 4 draft lifecycle fields; ``draft_id`` is the stable handle
+        # used by the review API (same value as case_id).
+        "draft_id": case_id,
+        "status": "draft",
         "title": title,
         "draft": True,
         "safe_to_execute": safe_to_execute,
+        # Executable capability declarations (command/plugin/script/provider
+        # execution) block approval unconditionally — the platform has no safe
+        # execution capability for them.
+        "declared_executable": bool(forbidden),
+        "forbidden_keys": list(forbidden),
         "source_system": SOURCE_SYSTEM,
         "source_index": index,
-        "vars": _truncate(vars_raw),
+        # vars are declarations for an external runner; credential-looking
+        # keys/values are dropped at import, never stored.
+        "vars": _sanitize_vars(vars_raw),
         "expectations": assertions,
         "provider_declaration": None,
         "metadata": redact_metadata(metadata),
         "unmapped_count": unmapped,
+        # No created_at here: drafts merge idempotently on case_id, and a
+        # wall-clock field would turn every identical re-import into a fake
+        # conflict. Review state (reviewed_by/at, promoted_case_id) is only
+        # ever written by the review API, and re-imports never clobber it
+        # (merge keeps the stored record on any difference).
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "promoted_case_id": None,
     }
     if not safe_to_execute:
         warnings.append(
@@ -412,6 +474,184 @@ def _save_drafts(platform_dir: Path, drafts: List[Dict[str, Any]]) -> None:
 
 def load_drafts(platform_dir: Path) -> List[Dict[str, Any]]:
     return _load_drafts(platform_dir)
+
+
+# ---------------------------------------------------------------------------
+# draft review lifecycle (Phase 4)
+# ---------------------------------------------------------------------------
+
+#: Legal draft status transitions. ``approved``/``rejected``/``archived``
+#: self-transitions are idempotent no-ops handled by the service layer.
+_DRAFT_TRANSITIONS = {
+    "draft": {"approved", "rejected", "archived"},
+    "approved": {"archived"},
+    "rejected": {"archived"},
+    "archived": set(),
+}
+
+
+def get_draft(platform_dir: Path, draft_id: str) -> Optional[Dict[str, Any]]:
+    draft_id = str(draft_id or "").strip()
+    if not draft_id:
+        return None
+    for draft in _load_drafts(platform_dir):
+        if str(draft.get("draft_id") or draft.get("case_id") or "") == draft_id:
+            # Legacy drafts (pre Phase 4) gain the lifecycle fields on read.
+            normalized = dict(draft)
+            normalized.setdefault("draft_id", normalized.get("case_id"))
+            normalized.setdefault("status", "draft")
+            normalized.setdefault("declared_executable", bool(normalized.get("forbidden_keys")))
+            normalized.setdefault("reviewed_by", None)
+            normalized.setdefault("reviewed_at", None)
+            normalized.setdefault("promoted_case_id", None)
+            return normalized
+    return None
+
+
+def validate_draft_transition(current: Any, target: str) -> str:
+    current = str(current or "draft")
+    target = str(target or "")
+    if target not in DRAFT_STATUSES:
+        raise ValueError("unknown draft status %r" % target)
+    if target == current:
+        return target  # idempotent repeat
+    if target not in _DRAFT_TRANSITIONS.get(current, set()):
+        raise ValueError("draft cannot move from %s to %s" % (current, target))
+    return target
+
+
+def update_draft_status(
+    platform_dir: Path,
+    draft_id: str,
+    status: str,
+    *,
+    actor: Optional[str] = None,
+    promoted_case_id: Optional[str] = None,
+) -> Tuple[Dict[str, Any], bool]:
+    """Transition one draft; returns ``(draft, changed)``. Repeat transitions
+    to the same status are idempotent (``changed=False``)."""
+    current = get_draft(platform_dir, draft_id)
+    if current is None:
+        raise KeyError(draft_id)
+    target = validate_draft_transition(current.get("status"), status)
+    if target == str(current.get("status") or "draft") and not promoted_case_id:
+        return current, False
+    drafts = _load_drafts(platform_dir)
+    updated: Optional[Dict[str, Any]] = None
+    out: List[Dict[str, Any]] = []
+    for draft in drafts:
+        if str(draft.get("draft_id") or draft.get("case_id") or "") == str(current.get("draft_id")):
+            draft = dict(draft)
+            draft["draft_id"] = current.get("draft_id")
+            draft["status"] = target
+            draft["reviewed_by"] = (str(actor)[:64] if actor else None)
+            draft["reviewed_at"] = utc_now()
+            if promoted_case_id:
+                draft["promoted_case_id"] = str(promoted_case_id)[:128]
+            updated = draft
+        out.append(draft)
+    if updated is None:
+        raise KeyError(draft_id)
+    _save_drafts(platform_dir, out)
+    return updated, True
+
+
+def build_test_case_payload(
+    draft: Dict[str, Any],
+    *,
+    actor: Optional[str] = None,
+    approved_at: Optional[str] = None,
+    input_override: Optional[Dict[str, Any]] = None,
+    existing_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build the formal TestCase payload for an approved draft.
+
+    - ``case_id`` is the draft's stable id; re-approving a draft therefore
+      always targets the same TestCase (idempotent promotion);
+    - unmapped assertions are preserved verbatim as ``required=False``
+      declarative entries — they are never converted into executable
+      assertions;
+    - the http_session input must come from the draft vars
+      (``user_id`` + ``message``/``session_id``) or an explicit operator
+      override; nothing is fabricated.
+    """
+    if not isinstance(draft, dict):
+        raise ValueError("draft must be an object")
+    case_id = str(draft.get("case_id") or draft.get("draft_id") or "").strip()
+    if not case_id:
+        raise ValueError("draft is missing case_id")
+
+    vars_raw = draft.get("vars") if isinstance(draft.get("vars"), dict) else {}
+    override = input_override if isinstance(input_override, dict) else {}
+    input_spec: Dict[str, Any] = {}
+    for key in ("user_id", "message", "session_id"):
+        value = override.get(key) if override.get(key) is not None else vars_raw.get(key)
+        if isinstance(value, str) and value.strip():
+            input_spec[key] = value.strip()[: ext.MAX_FIELD_LENGTH]
+    if not input_spec.get("user_id"):
+        raise ValueError("draft vars 缺少 user_id；请在 approve 请求中提供 input_override.user_id")
+    if not input_spec.get("message") and not input_spec.get("session_id"):
+        raise ValueError("draft vars 缺少 message/session_id；请在 approve 请求中提供 input_override")
+
+    expectations: List[Dict[str, Any]] = []
+    for position, assertion in enumerate(draft.get("expectations") or [], start=1):
+        if not isinstance(assertion, dict):
+            continue
+        if assertion.get("kind") == "unmapped":
+            expectations.append(
+                {
+                    "id": "pf-unmapped-%d" % position,
+                    "type": "unmapped_promptfoo_assertion",
+                    "required": False,
+                    "original_type": assertion.get("original_type"),
+                    "reason": str(assertion.get("reason") or "")[:200],
+                    "source": SOURCE_SYSTEM,
+                }
+            )
+        else:
+            expectations.append(
+                {
+                    "id": "pf-assert-%d" % position,
+                    "type": str(assertion.get("kind") or "unknown")[:64],
+                    "required": True,
+                    "value": assertion.get("value"),
+                    "source": SOURCE_SYSTEM,
+                }
+            )
+
+    provider = draft.get("provider_declaration") if isinstance(draft.get("provider_declaration"), dict) else {}
+    version = int(existing_version) + 1 if isinstance(existing_version, int) and existing_version > 0 else 1
+    return {
+        "case_id": case_id,
+        "version": version,
+        "title": str(draft.get("title") or case_id)[: ext.MAX_FIELD_LENGTH],
+        "adapter": "http_session",
+        "input": input_spec,
+        "fixtures": [],
+        "expectations": expectations,
+        "adapter_config": {
+            "provider_id": str(provider.get("id") or "")[: ext.MAX_FIELD_LENGTH],
+            "source": SOURCE_SYSTEM,
+        },
+        "source_ref": {
+            "source_system": SOURCE_SYSTEM,
+            "source_id": str(draft.get("draft_id") or case_id)[:128],
+            "source_version": PROMPTFOO_COMPAT_VERSION,
+            "approved_by": (str(actor)[:64] if actor else None),
+            "approved_at": approved_at or utc_now(),
+        },
+    }
+
+
+def public_draft(draft: Dict[str, Any]) -> Dict[str, Any]:
+    """Display-safe projection: vars/metadata were truncated and redacted at
+    import time; this view additionally bounds list sizes and never includes
+    raw executable content (which is dropped at import, never stored)."""
+    view = dict(draft)
+    view["vars"] = _truncate(view.get("vars"), limit=ext.MAX_FIELD_LENGTH)
+    view["expectations"] = list(view.get("expectations") or [])[:MAX_VARS]
+    view["warnings"] = [str(item)[:200] for item in list(view.get("warnings") or [])[:10]]
+    return view
 
 
 # ---------------------------------------------------------------------------
