@@ -795,6 +795,15 @@ export interface AgentConfig {
   capabilities: string[];
   metadata: Record<string, unknown>;
   config_hash?: string;
+  // Phase 2 正式元数据：environment 可以为 null（不会默认成 production）；
+  // created_at 只在创建时写入，旧配置为 null；source_host 仅用于来源展示。
+  description?: string;
+  environment?: string | null;
+  tags?: string[];
+  enabled?: boolean;
+  source_host?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface TestCaseExpectation {
@@ -871,6 +880,16 @@ export function createAgent(payload: Partial<AgentConfig>): Promise<{ agent: Age
   return apiPostJson<{ agent: AgentConfig }>("/api/agents", payload);
 }
 
+// Phase 2：更新 Agent 元数据（agent_id/created_at 不可变，历史 Run 不受影响）。
+export function updateAgent(agentId: string, payload: Partial<AgentConfig>): Promise<{ agent: AgentConfig }> {
+  return apiPutJson<{ agent: AgentConfig }>(`/api/agents/${encodeURIComponent(agentId)}`, payload);
+}
+
+// 删除 Agent 配置；历史 Run 保留并显示为 missing_configuration/derived。
+export function deleteAgent(agentId: string): Promise<{ deleted: string }> {
+  return apiDelete<{ deleted: string }>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
 export function fetchTestCases(): Promise<{ test_cases: TestCase[]; errors: Array<{ case_id: string; error: string }> }> {
   return apiGet<{ test_cases: TestCase[]; errors: Array<{ case_id: string; error: string }> }>("/api/test-cases");
 }
@@ -930,7 +949,13 @@ export interface SuiteJobAttempt {
   status_reason?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  // Phase 2：同一 CaseExecution 的重试链关联；旧 job 缺失时由后端派生。
+  case_execution_id?: string;
+  attempt_count?: number;
+  is_final_attempt?: boolean;
+  attempt_history_url?: string;
   run_status_url?: string;
+  run_context_url?: string;
   evaluation_status?: string;
   final_quality_status?: string;
 }
@@ -981,7 +1006,11 @@ export interface SuiteJob {
   // 进程重启后被恢复续跑的 job 标记 recovered=true，与正常执行区分展示。
   recovered?: boolean;
   suite_ref?: { id?: string; version?: number; title?: string } | null;
-  agent_ref?: { id?: string; version?: string; config_hash?: string } | null;
+  agent_ref?: { id?: string; name?: string; environment?: string | null; version?: string; config_hash?: string } | null;
+  // Phase 2 展示便利字段；旧 job 没有 agent_ref 时为 null（显示 unknown/derived）。
+  agent_id?: string | null;
+  agent_name?: string | null;
+  agent_environment?: string | null;
   attempts?: SuiteJobAttempt[];
   created_at?: string;
   started_at?: string | null;
@@ -1085,6 +1114,25 @@ export interface AgentScanError {
   message: string;
 }
 
+// Phase 2 运行索引状态：used=false 时页面提示「索引不可用，当前使用扫描结果」。
+export interface RunIndexBlock {
+  used: boolean;
+  status: "ready" | "rebuilding" | "unavailable" | "fallback" | string;
+  last_scan_at?: string | null;
+  indexed_count?: number;
+  error_count?: number;
+}
+
+// 成本来源：observed 观测 / imported 导入 / estimated 估算 / missing 无数据 /
+// mixed 多来源。估算值必须标注「估算」，无数据显示「—」。
+export type CostSource = "observed" | "imported" | "estimated" | "missing" | "mixed" | string;
+
+export interface CostBlock {
+  total: number | null;
+  currency: string | null;
+  source: CostSource;
+}
+
 export interface AgentRunStats {
   run_count: number;
   last_run_at: string | null;
@@ -1102,6 +1150,14 @@ export interface AgentListItem {
   metadata?: Record<string, unknown>;
   max_concurrency?: number | null;
   config_hash?: string;
+  // Phase 2 元数据（旧配置缺省时为 null/空）。
+  description?: string;
+  environment?: string | null;
+  tags?: string[];
+  enabled?: boolean;
+  source_host?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
   derived: boolean;
   stats: AgentRunStats;
 }
@@ -1118,6 +1174,7 @@ export interface DerivedAgentSummary {
 export interface AgentDirectoryPayload {
   agents: AgentListItem[];
   derived_agents: DerivedAgentSummary[];
+  index?: RunIndexBlock;
   partial: boolean;
   errors: AgentScanError[];
 }
@@ -1130,7 +1187,13 @@ export interface AgentHeader {
   environment: string | null;
   source_host: string | null;
   derived: boolean;
+  // registered = 有注册配置；missing_configuration = 仅从运行数据可知。
+  config_status?: "registered" | "missing_configuration" | string;
+  description?: string | null;
+  tags?: string[];
+  enabled?: boolean | null;
   created_at: string | null;
+  updated_at?: string | null;
   last_run_at: string | null;
   last_run_status: string | null;
 }
@@ -1140,6 +1203,7 @@ export interface AgentDetailPayload {
   capabilities: string[];
   config: Record<string, unknown> | null;
   run_count: number;
+  index?: RunIndexBlock;
   partial: boolean;
   errors: AgentScanError[];
 }
@@ -1153,9 +1217,10 @@ export interface AgentModelMetric {
   total_tokens: number;
   average_latency_ms: number | null;
   error_count: number;
-  // 成本来源：observed 为观测值，estimated 必须标注「估算」，missing/null 显示「—」。
+  // 成本来源：observed 观测 / imported 导入 / estimated 估算（须标注）/
+  // mixed 多来源 / missing|null 显示「—」。
   cost: number | null;
-  cost_source: "observed" | "estimated" | "missing" | string | null;
+  cost_source: CostSource | null;
 }
 
 export interface AgentToolMetric {
@@ -1186,7 +1251,7 @@ export interface AgentKpis {
   completion_score: number | null;
   token_count: number | null;
   total_cost: number | null;
-  total_cost_source: "observed" | "estimated" | "missing" | string | null;
+  total_cost_source: CostSource | null;
   judge_evidence_coverage: number | null;
 }
 
@@ -1214,9 +1279,14 @@ export interface AgentRunRow {
   run_id: string;
   agent_id: string | null;
   case_id: string | null;
+  // Phase 2 SuiteJob 关联：旧 Run 没有 suite_ref 时全为 null，不伪造关联。
+  suite_id: string | null;
   job_id: string | null;
+  case_execution_id: string | null;
   attempt_id: string | null;
   retry_index: number | null;
+  attempt_count: number | null;
+  is_final_attempt: boolean | null;
   status: string;
   stale: boolean;
   judge_overall_status: string | null;
@@ -1229,6 +1299,9 @@ export interface AgentRunRow {
   high_severity_finding_count: number;
   has_evidence: boolean;
   legacy_inferred: boolean;
+  // 单次运行的成本汇总：null 表示无数据（missing），不用 0 冒充。
+  cost: number | null;
+  cost_source: CostSource;
 }
 
 export interface AgentOverview {
@@ -1240,6 +1313,8 @@ export interface AgentOverview {
   health: AgentHealth;
   recent_runs: AgentRunRow[];
   data_range: AgentOverviewRange | string;
+  index?: RunIndexBlock;
+  cost?: CostBlock;
   partial: boolean;
   errors: AgentScanError[];
 }
@@ -1251,6 +1326,7 @@ export interface AgentRunsPage {
   status: AgentRunStatusFilter | string;
   limit: number;
   offset: number;
+  index?: RunIndexBlock;
   partial: boolean;
   errors: AgentScanError[];
 }
@@ -1278,6 +1354,235 @@ export function fetchAgentRuns(
   search.set("limit", String(params.limit ?? 50));
   search.set("offset", String(params.offset ?? 0));
   return apiGet<AgentRunsPage>(`/api/agents/${encodeURIComponent(agentId)}/runs?${search.toString()}`);
+}
+
+// --- Phase 2：Run/SuiteJob 关联、成本数据与运行索引 ----------------------------------
+
+// 成本来源的中文展示标签；missing/null 由视图统一显示「—」或「暂无数据」。
+export const COST_SOURCE_LABELS: Record<string, string> = {
+  observed: "观测",
+  imported: "导入",
+  estimated: "估算",
+  missing: "无数据",
+  mixed: "多来源"
+};
+
+export function costSourceLabel(source: string | null | undefined): string {
+  if (!source || source === "missing") return "无数据";
+  return COST_SOURCE_LABELS[source] || source;
+}
+
+// GET /api/runs/{run_id}/context：run.json 为关联权威来源，不一致以 warnings 返回。
+export interface RunContextPayload {
+  run: RunStatusPayload & { suite_ref?: Record<string, unknown> | null };
+  agent: {
+    id: string | null;
+    name: string | null;
+    environment: string | null;
+    config_status: "registered" | "missing_configuration" | "missing" | "unknown" | string;
+    config: Record<string, unknown> | null;
+  };
+  suite: {
+    suite_id: string | null;
+    suite_version?: number | null;
+    suite_title?: string | null;
+    job_id: string | null;
+    job_status?: string | null;
+    case_execution_id?: string | null;
+    attempt_id?: string | null;
+    retry_index?: number | null;
+  };
+  case_execution: {
+    case_execution_id: string;
+    case_id: string | null;
+    case_title?: string | null;
+    attempt_count: number;
+    attempt_history: Array<{
+      attempt_id: string;
+      run_id: string | null;
+      retry_index: number;
+      status: string;
+      is_final_attempt: boolean;
+    }>;
+  } | null;
+  attempt: {
+    attempt_id: string;
+    retry_index: number;
+    status: string;
+    status_reason?: string | null;
+    run_id: string | null;
+    is_final_attempt: boolean;
+    started_at?: string | null;
+    finished_at?: string | null;
+  } | null;
+  related_runs: Array<{ run_id: string; status?: string | null; attempt_id?: string; retry_index?: number }>;
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface SuiteJobRunsPayload {
+  job_id: string;
+  status: string;
+  suite_ref: Record<string, unknown> | null;
+  agent: RunContextPayload["agent"];
+  case_executions: Array<{
+    case_execution_id: string;
+    order: number;
+    case_id: string | null;
+    case_title?: string | null;
+    attempt_count: number;
+    attempts: string[];
+    final_attempt_id: string;
+    final_status: string | null;
+  }>;
+  runs: Array<{
+    attempt_id: string;
+    case_execution_id: string;
+    case_id: string | null;
+    retry_index: number;
+    status: string;
+    run_id: string | null;
+    run: Record<string, unknown> | null;
+  }>;
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface SuiteJobAttemptPayload {
+  job_id: string;
+  attempt: {
+    attempt_id: string;
+    case_execution_id: string;
+    case_id: string | null;
+    retry_index: number;
+    status: string;
+    status_reason?: string | null;
+    run_id: string | null;
+    is_final_attempt: boolean;
+  };
+  attempt_history: Array<{
+    attempt_id: string;
+    retry_index: number;
+    status: string;
+    run_id: string | null;
+    is_final_attempt: boolean;
+    run: Record<string, unknown> | null;
+  }>;
+  suite_ref: Record<string, unknown> | null;
+  agent_ref: Record<string, unknown> | null;
+}
+
+export function fetchRunContext(runId: string): Promise<RunContextPayload> {
+  return apiGet<RunContextPayload>(`/api/runs/${encodeURIComponent(runId)}/context`);
+}
+
+export function fetchSuiteJobRuns(jobId: string): Promise<SuiteJobRunsPayload> {
+  return apiGet<SuiteJobRunsPayload>(`/api/suite-jobs/${encodeURIComponent(jobId)}/runs`);
+}
+
+export function fetchSuiteJobAttempt(jobId: string, attemptId: string): Promise<SuiteJobAttemptPayload> {
+  return apiGet<SuiteJobAttemptPayload>(
+    `/api/suite-jobs/${encodeURIComponent(jobId)}/attempts/${encodeURIComponent(attemptId)}`
+  );
+}
+
+// 统一成本记录：total_cost 永远带 currency；没有数据时是 null（missing），不是 0。
+export interface CostRecord {
+  record_id: string;
+  run_id: string | null;
+  agent_id: string | null;
+  provider: string | null;
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  input_cost: number | null;
+  output_cost: number | null;
+  total_cost: number | null;
+  currency: string | null;
+  source: CostSource;
+  source_system: string | null;
+  source_id: string | null;
+  observed_at: string | null;
+  imported_at?: string | null;
+  price_version?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface CostSummary {
+  total: number | null;
+  currency: string | null;
+  source: CostSource;
+  sources?: string[];
+  record_count: number;
+  conflict_count?: number;
+}
+
+export interface RunCostsPayload {
+  run_id: string;
+  records: CostRecord[];
+  summary: CostSummary;
+}
+
+export interface AgentCostsPayload {
+  agent_id: string;
+  records: CostRecord[];
+  summary: CostSummary;
+}
+
+export interface CostImportReport {
+  import_id: string;
+  status: "completed" | "completed_with_errors" | "failed" | "dry_run" | string;
+  source_system: string;
+  source_file: string;
+  dry_run: boolean;
+  total_records: number;
+  imported_records: number;
+  duplicate_records: number;
+  invalid_records: number;
+  errors: Array<{ line: number; error: string }>;
+  warnings: string[];
+  imported_at: string;
+}
+
+export function fetchRunCosts(runId: string): Promise<RunCostsPayload> {
+  return apiGet<RunCostsPayload>(`/api/runs/${encodeURIComponent(runId)}/costs`);
+}
+
+export function fetchAgentCosts(agentId: string): Promise<AgentCostsPayload> {
+  return apiGet<AgentCostsPayload>(`/api/agents/${encodeURIComponent(agentId)}/costs`);
+}
+
+export function importCosts(payload: {
+  source_system: string;
+  source_file: string;
+  dry_run?: boolean;
+  run_id?: string;
+  agent_id?: string;
+}): Promise<CostImportReport> {
+  return apiPostJson<CostImportReport>("/api/costs/import", payload);
+}
+
+export function fetchCostImport(importId: string): Promise<CostImportReport> {
+  return apiGet<CostImportReport>(`/api/costs/imports/${encodeURIComponent(importId)}`);
+}
+
+// 本地运行索引管理（无生产级权限控制，后端响应含 authority: "local"）。
+export interface RunIndexStatus {
+  schema_version: number;
+  status: "ready" | "missing" | "unavailable" | string;
+  last_scan_at: string | null;
+  indexed_count: number;
+  error_count: number;
+  errors: Array<{ run_id?: string; stage: string; message: string }>;
+  authority?: string;
+  note?: string;
+}
+
+export function fetchRunIndexStatus(): Promise<RunIndexStatus> {
+  return apiGet<RunIndexStatus>("/api/admin/run-index/status");
+}
+
+export function rebuildRunIndex(): Promise<RunIndexStatus> {
+  return apiPost<RunIndexStatus>("/api/admin/run-index/rebuild");
 }
 
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {

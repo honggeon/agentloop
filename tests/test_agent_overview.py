@@ -325,9 +325,10 @@ def test_overview_full_aggregation(monkeypatch, tmp_path):
     assert model["total_tokens"] == 165
     assert model["average_latency_ms"] == 1000.0
     assert model["error_count"] == 1
-    # one observed + one estimated -> aggregated source is estimated
-    assert model["cost_source"] == "estimated"
-    assert model["cost"] is not None and model["cost"] >= 0.001
+    # one observed cost; no price table configured -> no estimation, the
+    # aggregate stays observed and never invents a number for the second call
+    assert model["cost_source"] == "observed"
+    assert model["cost"] == 0.001
 
     tools = {item["tool_name"]: item for item in body["tools"]}
     assert tools["search"]["call_count"] == 1
@@ -343,8 +344,8 @@ def test_overview_full_aggregation(monkeypatch, tmp_path):
     assert kpis["error_rate"] == 0.0  # run completed; tool errors do not leak into run failure rate
     assert kpis["completion_score"] == 92
     assert kpis["token_count"] == 165
-    assert kpis["total_cost"] is not None
-    assert kpis["total_cost_source"] == "estimated"
+    assert kpis["total_cost"] == 0.001
+    assert kpis["total_cost_source"] == "observed"
     assert kpis["judge_evidence_coverage"] == 0.75
 
     health = body["health"]
@@ -412,7 +413,7 @@ def test_unknown_judge_status_not_counted_as_failure(monkeypatch, tmp_path):
     assert row["judge_overall_status"] == "unknown"
 
 
-def test_estimated_cost_marked_estimated(monkeypatch, tmp_path):
+def test_estimated_cost_requires_price_table(monkeypatch, tmp_path):
     client, settings = _client(monkeypatch, tmp_path)
     _register_agent(client)
     _make_run(
@@ -420,6 +421,27 @@ def test_estimated_cost_marked_estimated(monkeypatch, tmp_path):
         "run-cost",
         agent_id="agent-001",
         llm_calls=[{"model": "gpt-4o", "tokenUsage": {"inputTokens": 1000, "outputTokens": 500, "totalTokens": 1500}}],
+    )
+    # No price table configured: no estimate is invented.
+    model = client.get("/api/agents/agent-001/overview?range=all").json()["models"][0]
+    assert model["cost_source"] == "missing"
+    assert model["cost"] is None
+
+    # With a confirmed price the estimate is produced and stays "estimated".
+    _write(
+        settings.platform_dir / "price_table.json",
+        {
+            "schema_version": 1,
+            "price_version": "2026-01",
+            "models": {
+                "gpt-4o": {
+                    "currency": "USD",
+                    "input_cost_per_1m_tokens": 2.5,
+                    "output_cost_per_1m_tokens": 10.0,
+                    "effective_at": "2026-01-01T00:00:00Z",
+                }
+            },
+        },
     )
     model = client.get("/api/agents/agent-001/overview?range=all").json()["models"][0]
     assert model["cost_source"] == "estimated"

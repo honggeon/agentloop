@@ -473,6 +473,47 @@ SuiteJob stats count cases by their *final* attempt (`total/completed/failed/
 timed_out/cancelled/skipped`) and additionally report `runs` (attempts that
 produced a Run) and `retries`.
 
+## Agent Test Platform (Phase 2): Metadata, Linkage, Costs and Run Index
+
+Phase 2 adds data governance and scale-out observability on top of the same
+run artifacts, without changing the audit/judge/run lifecycle semantics:
+
+- **Agent metadata** — Agent configs carry `description`, `environment`
+  (`local/development/staging/production/unknown` or a preserved custom
+  value, `null` when undeclared — never defaulted to production), `tags`,
+  `enabled`, `created_at` (written only at creation; legacy configs keep
+  `null`) and `updated_at`. `metadata` rejects credentials and private
+  prompts, and endpoints with embedded credentials are rejected. New APIs:
+  `PUT /api/agents/{agent_id}` and `DELETE /api/agents/{agent_id}`; deleting
+  an Agent never deletes its historical runs — they keep their `run.json`
+  snapshot and show as `missing_configuration`/derived.
+- **Run linkage** — new runs snapshot `agent_ref` (id/name/environment),
+  `test_case_ref` (id/case_id/version) and, for batch runs, a `suite_ref`
+  with `suite_id/suite_version/job_id/case_execution_id/attempt_id/
+  retry_index`. New APIs: `GET /api/runs/{run_id}/context`,
+  `GET /api/suite-jobs/{job_id}/runs`,
+  `GET /api/suite-jobs/{job_id}/attempts/{attempt_id}`. `run.json` is
+  authoritative; disagreements surface as `warnings`, never as run failures.
+- **Cost records** — a unified record model with an explicit
+  `observed|imported|estimated|missing` source (`mixed` at aggregation).
+  Observed costs come from run artifacts (`llm_calls.json` cost fields) and
+  are never overwritten; external logs are imported via
+  `POST /api/costs/import` (idempotent on `source_system + source_id`,
+  `dry_run` supported, per-line errors bounded and redacted, import paths
+  confined to the runs/platform directories); estimates exist only when a
+  price is configured in `platform/price_table.json` and carry the
+  `price_version` they were computed with. Reads: `GET /api/runs/{id}/costs`,
+  `GET /api/agents/{id}/costs`, `GET /api/costs/imports/{import_id}`. Missing
+  cost is `null`, never `0`; token counts are never treated as dollars.
+- **Run index** — `platform/run_index.json` + `run_index_meta.json` cache
+  per-run summary fields (no prompts, no trajectory content) for fast
+  listing/attribution; the Agent overview and lists read the index first and
+  fall back to a safe directory scan (`index.used=false` in the response)
+  when it is unavailable or corrupt. Admin endpoints
+  `GET /api/admin/run-index/status` and `POST /api/admin/run-index/rebuild`
+  are local-only management capabilities (no production auth; gated by
+  `AUDITRAIL_LOCAL_ADMIN`, default on, responses state `authority: "local"`).
+
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.

@@ -24,6 +24,7 @@ interface AgentRow {
   run_count: number;
   last_run_at: string | null;
   last_run_status: string | null;
+  created_at: string | null;
 }
 
 const RUN_STATUS_LABELS: Record<string, string> = {
@@ -43,16 +44,19 @@ function runStatusLabel(status: string | null): string {
 }
 
 function fromConfig(agent: AgentListItem): AgentRow {
-  const env = agent.metadata && typeof agent.metadata.environment === "string" ? agent.metadata.environment : "";
+  // Phase 2：environment 优先读顶层正式字段，兼容旧配置的 metadata.environment。
+  const legacyEnv =
+    agent.metadata && typeof agent.metadata.environment === "string" ? agent.metadata.environment : "";
   return {
     agent_id: agent.agent_id,
     name: agent.name || agent.agent_id,
     type: agent.adapter || "—",
-    environment: env || "—",
+    environment: agent.environment || legacyEnv || "—",
     derived: false,
     run_count: agent.stats?.run_count ?? 0,
     last_run_at: agent.stats?.last_run_at ?? null,
-    last_run_status: agent.stats?.last_run_status ?? null
+    last_run_status: agent.stats?.last_run_status ?? null,
+    created_at: agent.created_at ?? null
   };
 }
 
@@ -65,7 +69,8 @@ function fromDerived(agent: DerivedAgentSummary): AgentRow {
     derived: true,
     run_count: agent.stats?.run_count ?? 0,
     last_run_at: agent.stats?.last_run_at ?? null,
-    last_run_status: agent.stats?.last_run_status ?? null
+    last_run_status: agent.stats?.last_run_status ?? null,
+    created_at: null
   };
 }
 
@@ -84,6 +89,17 @@ const partialWarning = computed(() => {
     return `部分运行数据扫描失败，当前展示为局部数据${suffix}`;
   }
   return "";
+});
+
+// Phase 2：索引不可用时明确提示当前为扫描结果，不伪装成索引加速。
+const indexHint = computed(() => {
+  const data = payload.value;
+  if (!data || !data.index) return "";
+  if (data.index.used) {
+    const count = data.index.indexed_count ?? 0;
+    return `运行索引就绪（已索引 ${count} 个 Run）`;
+  }
+  return "索引不可用，当前使用扫描结果";
 });
 
 function openAgent(agentId: string) {
@@ -123,6 +139,7 @@ onMounted(loadAgents);
 
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-else-if="partialWarning" class="banner error" role="status">{{ partialWarning }}</p>
+    <p v-if="indexHint" class="banner quiet" role="status">{{ indexHint }}</p>
     <p v-if="loading" class="banner loading">加载 Agent 列表中…</p>
 
     <section class="panel agent-panel" aria-label="Agent 列表">
@@ -136,6 +153,7 @@ onMounted(loadAgents);
             <th>名称</th>
             <th>类型</th>
             <th>环境</th>
+            <th>创建时间</th>
             <th>最近运行时间</th>
             <th>最近状态</th>
             <th>Run 数量</th>
@@ -159,6 +177,7 @@ onMounted(loadAgents);
             </td>
             <td>{{ row.type }}</td>
             <td>{{ row.environment }}</td>
+            <td>{{ formatTime(row.created_at) }}</td>
             <td>{{ formatTime(row.last_run_at) }}</td>
             <td>
               <span v-if="row.last_run_status" class="chip" :data-status="row.last_run_status">

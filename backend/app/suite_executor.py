@@ -368,11 +368,24 @@ def _execute_attempt(
 
     try:
         run_id = run_contract.new_run_id()
+        job_suite_ref = record.get("suite_ref") or {}
+        suite_id = job_suite_ref.get("id")
+        suite_version = job_suite_ref.get("version")
         suite_ref = {
-            "id": (record.get("suite_ref") or {}).get("id"),
-            "version": (record.get("suite_ref") or {}).get("version"),
+            # ``id``/``version`` are the Phase 1 keys; the explicit aliases
+            # make the Phase 2 linkage self-describing. All optional, never
+            # inferred from directory names.
+            "id": suite_id,
+            "suite_id": suite_id,
+            "version": suite_version,
+            "suite_version": suite_version,
             "job_id": job_id,
+            "case_execution_id": str(
+                attempt.get("case_execution_id")
+                or suite_mod.case_execution_id_for(job_id, int(attempt.get("order") or 0))
+            ),
             "attempt_id": attempt_id,
+            "retry_index": int(attempt.get("retry_index") or 0),
         }
         run_dir = create_platform_run(settings.runs_dir, run_id, agent=agent, test_case=case, suite_ref=suite_ref)
         suite_mod.advance_attempt(record, attempt_id, "running", run_id=run_id)

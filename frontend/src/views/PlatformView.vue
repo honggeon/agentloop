@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   cancelSuiteJob,
   createAgent,
   createPlatformRun,
   createTestCase,
   createTestSuite,
+  deleteAgent,
   deleteTestSuite,
   fetchAgents,
   fetchRunStatus,
@@ -16,6 +17,7 @@ import {
   fetchTestSuites,
   launchSuiteJob,
   recoverStaleSuiteJobs,
+  updateAgent,
   updateTestSuite,
   type AgentConfig,
   type RunStatusPayload,
@@ -25,6 +27,7 @@ import {
 } from "../api";
 
 const router = useRouter();
+const route = useRoute();
 
 const agents = ref<AgentConfig[]>([]);
 const testCases = ref<TestCase[]>([]);
@@ -34,14 +37,18 @@ const suiteJobs = ref<SuiteJob[]>([]);
 const loading = ref(false);
 const error = ref("");
 
-// 新建 Agent 表单
+// 新建 / 编辑 Agent 表单（Phase 2：environment/description/tags 正式元数据）
 const agentForm = ref({
   agent_id: "",
   name: "",
   version: "",
   endpoint: "",
-  capabilities: "session,chat"
+  capabilities: "session,chat",
+  environment: "",
+  description: "",
+  tags: ""
 });
+const editingAgentId = ref("");
 const agentBusy = ref(false);
 
 // 新建 TestCase 表单（http_session 适配器）
@@ -153,6 +160,9 @@ async function loadAll() {
     if (!batchAgentId.value && agents.value.length) batchAgentId.value = agents.value[0].agent_id;
     if (!batchSuiteId.value && enabledSuites.value.length) batchSuiteId.value = enabledSuites.value[0].suite_id;
     if (!activeJob.value && suiteJobs.value.length) activeJob.value = suiteJobs.value[0];
+    // 从 Agent 工作区跳转过来时（?job=...）直接定位到对应 SuiteJob。
+    const queryJob = String(route.query.job || "");
+    if (queryJob) await selectJob(queryJob);
     const current = activeJob.value;
     if (current && ["queued", "running"].includes(String(current.status))) startJobPolling(current.job_id);
   } catch (err) {
@@ -162,25 +172,75 @@ async function loadAll() {
   }
 }
 
+function resetAgentForm() {
+  agentForm.value = {
+    agent_id: "",
+    name: "",
+    version: "",
+    endpoint: "",
+    capabilities: "session,chat",
+    environment: "",
+    description: "",
+    tags: ""
+  };
+  editingAgentId.value = "";
+}
+
+function editAgent(agent: AgentConfig) {
+  editingAgentId.value = agent.agent_id;
+  agentForm.value = {
+    agent_id: agent.agent_id,
+    name: agent.name,
+    version: agent.version || "",
+    endpoint: agent.endpoint,
+    capabilities: (agent.capabilities || []).join(","),
+    environment: agent.environment || "",
+    description: agent.description || "",
+    tags: (agent.tags || []).join(",")
+  };
+}
+
 async function submitAgent() {
   agentBusy.value = true;
   error.value = "";
   try {
-    await createAgent({
+    const payload: Partial<AgentConfig> = {
       agent_id: agentForm.value.agent_id,
       name: agentForm.value.name || agentForm.value.agent_id,
       version: agentForm.value.version,
       adapter: "http_session",
       endpoint: agentForm.value.endpoint,
       capabilities: agentForm.value.capabilities.split(",").map((item) => item.trim()).filter(Boolean),
+      // 空字符串提交为 null，不默认成 production；自定义值原样保留。
+      environment: agentForm.value.environment.trim() || null,
+      description: agentForm.value.description,
+      tags: agentForm.value.tags.split(",").map((item) => item.trim()).filter(Boolean),
       metadata: {}
-    });
-    agentForm.value = { agent_id: "", name: "", version: "", endpoint: "", capabilities: "session,chat" };
+    };
+    if (editingAgentId.value) {
+      // 更新不影响历史 Run 的 agent_ref 快照，created_at 保持不变。
+      await updateAgent(editingAgentId.value, payload);
+    } else {
+      await createAgent(payload);
+    }
+    resetAgentForm();
     await loadAll();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     agentBusy.value = false;
+  }
+}
+
+// 删除 Agent 配置：历史 Run 保留，之后以 missing_configuration/derived 展示。
+async function removeAgent(agent: AgentConfig) {
+  error.value = "";
+  try {
+    await deleteAgent(agent.agent_id);
+    if (editingAgentId.value === agent.agent_id) resetAgentForm();
+    await loadAll();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
   }
 }
 
@@ -436,26 +496,37 @@ onUnmounted(() => {
       </div>
       <table v-if="agents.length" class="platform-table">
         <thead>
-          <tr><th>ID</th><th>名称</th><th>版本</th><th>Endpoint</th><th>能力</th></tr>
+          <tr><th>ID</th><th>名称</th><th>环境</th><th>版本</th><th>Endpoint</th><th>能力</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="agent in agents" :key="agent.agent_id">
             <td><code>{{ agent.agent_id }}</code></td>
             <td>{{ agent.name }}</td>
+            <td>{{ agent.environment || "—" }}</td>
             <td>{{ agent.version || "—" }}</td>
             <td><code>{{ agent.endpoint }}</code></td>
             <td>{{ (agent.capabilities || []).join(", ") }}</td>
+            <td>
+              <button class="ghost" type="button" @click="editAgent(agent)">编辑</button>
+              <button class="ghost" type="button" @click="removeAgent(agent)">删除</button>
+            </td>
           </tr>
         </tbody>
       </table>
       <p v-else class="empty">尚未配置 Agent。</p>
       <form class="platform-form" @submit.prevent="submitAgent">
-        <input v-model="agentForm.agent_id" placeholder="agent_id（如 xuanjian-local）" required />
+        <input v-model="agentForm.agent_id" placeholder="agent_id（如 xuanjian-local）" :disabled="!!editingAgentId" required />
         <input v-model="agentForm.name" placeholder="名称（可选）" />
         <input v-model="agentForm.version" placeholder="版本（如 git:abc123，可选）" />
         <input v-model="agentForm.endpoint" placeholder="endpoint（http(s)://host:port）" required />
         <input v-model="agentForm.capabilities" placeholder="能力（逗号分隔：session,chat）" />
-        <button class="primary" type="submit" :disabled="agentBusy">{{ agentBusy ? "保存中…" : "保存 Agent" }}</button>
+        <input v-model="agentForm.environment" placeholder="环境（local/development/staging/production，可选）" />
+        <input v-model="agentForm.description" placeholder="描述（可选）" />
+        <input v-model="agentForm.tags" placeholder="标签（逗号分隔，可选）" />
+        <button class="primary" type="submit" :disabled="agentBusy">
+          {{ agentBusy ? "保存中…" : editingAgentId ? "更新 Agent" : "保存 Agent" }}
+        </button>
+        <button v-if="editingAgentId" class="ghost" type="button" @click="resetAgentForm">取消编辑</button>
       </form>
       <p class="hint">endpoint 会经过 SSRF 校验：仅 http/https，默认拒绝 loopback、私网、link-local 与云 metadata 地址。</p>
     </section>
@@ -698,6 +769,11 @@ onUnmounted(() => {
         </p>
         <p v-if="activeJob.status_reason" class="hint">原因：{{ activeJob.status_reason }}</p>
         <p class="hint">
+          Agent：{{ activeJob.agent_name || activeJob.agent_id || "unknown" }}
+          <template v-if="activeJob.agent_environment">（环境：{{ activeJob.agent_environment }}）</template>
+          <template v-else-if="!activeJob.agent_id">（旧任务未记录 Agent，显示为 unknown）</template>
+        </p>
+        <p class="hint">
           统计：总数 {{ activeJob.stats.total }}，完成 {{ activeJob.stats.completed }}，失败
           {{ activeJob.stats.failed }}，超时 {{ activeJob.stats.timed_out }}，取消
           {{ activeJob.stats.cancelled }}，跳过 {{ activeJob.stats.skipped }}；运行
@@ -724,6 +800,10 @@ onUnmounted(() => {
               <td>
                 <code>{{ attempt.case_id }}</code> {{ attempt.case_title }}
                 <span v-if="attempt.retry_index" class="chip quiet">重试 #{{ attempt.retry_index }}</span>
+                <span v-if="attempt.attempt_count && attempt.attempt_count > 1" class="chip quiet">
+                  共 {{ attempt.attempt_count }} 次尝试
+                </span>
+                <span v-if="attempt.is_final_attempt" class="chip quiet">最终尝试</span>
               </td>
               <td>
                 <span class="chip" :data-status="attempt.status">{{ runStatusLabel(String(attempt.status)) }}</span>

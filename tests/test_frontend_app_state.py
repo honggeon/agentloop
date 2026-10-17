@@ -612,3 +612,106 @@ def test_agent_runs_view_filters_and_pagination():
     assert 'name: "run"' in source
     assert "fetchAgentRuns" in source
     assert "fetch(" not in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 2：Agent 元数据、成本来源、SuiteJob 关联与运行索引提示
+# ---------------------------------------------------------------------------
+
+
+def test_phase2_api_contracts_exist():
+    source = API_TS.read_text(encoding="utf-8")
+    for name in (
+        "RunIndexBlock",
+        "CostSource",
+        "CostBlock",
+        "CostRecord",
+        "CostSummary",
+        "CostImportReport",
+        "RunContextPayload",
+        "SuiteJobRunsPayload",
+        "SuiteJobAttemptPayload",
+        "RunCostsPayload",
+        "AgentCostsPayload",
+        "RunIndexStatus",
+    ):
+        assert name in source, name
+    for fn in (
+        "updateAgent",
+        "deleteAgent",
+        "fetchRunContext",
+        "fetchSuiteJobRuns",
+        "fetchSuiteJobAttempt",
+        "fetchRunCosts",
+        "fetchAgentCosts",
+        "importCosts",
+        "fetchCostImport",
+        "fetchRunIndexStatus",
+        "rebuildRunIndex",
+        "costSourceLabel",
+    ):
+        assert fn in source, fn
+    for path in (
+        "/context",
+        "/api/costs/import",
+        "/api/costs/imports/",
+        "/api/admin/run-index/status",
+        "/api/admin/run-index/rebuild",
+        "/runs?${",
+    ):
+        assert path in source, path
+    # 成本来源中文标签：观测/导入/估算/无数据/多来源
+    for label in ("观测", "导入", "估算", "无数据", "多来源"):
+        assert label in source, label
+
+
+def test_agent_list_view_shows_metadata_and_index_state():
+    source = AGENT_LIST_VIEW.read_text(encoding="utf-8")
+    assert "创建时间" in source
+    assert "环境" in source
+    assert "索引不可用，当前使用扫描结果" in source
+    assert "运行索引就绪" in source
+    assert "fetch(" not in source
+
+
+def test_agent_detail_view_phase2_semantics():
+    source = AGENT_DETAIL_VIEW.read_text(encoding="utf-8")
+    # 成本来源标注扩展：导入 / 多来源；估算必须显式标注
+    assert "costSourceLabel" in source
+    assert "多来源" in source
+    # 索引新鲜度与 fallback 提示
+    assert "索引不可用，当前使用扫描结果" in source
+    # Agent 元数据与配置状态
+    assert "创建时间" in source
+    assert "missing_configuration" in source
+    # SuiteJob 下钻链接
+    assert "openSuiteJob" in source
+    assert 'name: "platform"' in source
+    assert "fetch(" not in source
+
+
+def test_agent_runs_view_phase2_linkage_and_cost():
+    source = AGENT_RUNS_VIEW.read_text(encoding="utf-8")
+    assert "openSuiteJob" in source
+    assert "最终尝试" in source
+    assert "共 {{ row.attempt_count }} 次尝试" in source
+    assert "formatCost" in source
+    assert "索引不可用，当前使用扫描结果" in source
+    assert "fetch(" not in source
+
+
+def test_platform_view_agent_metadata_editing():
+    source = PLATFORM_VIEW.read_text(encoding="utf-8")
+    for field in ("environment", "description", "tags"):
+        assert "agentForm.value.%s" % field in source or 'agentForm.%s' % field in source, field
+    assert "editingAgentId" in source
+    assert "updateAgent" in source
+    assert "deleteAgent" in source
+    assert "更新 Agent" in source
+    assert "取消编辑" in source
+    # SuiteJob 详情展示 Agent 归属；旧任务明确 unknown
+    assert "agent_environment" in source
+    # 从 Agent 工作区经 query 定位 SuiteJob
+    assert "route.query.job" in source
+    assert "最终尝试" in source
+    assert "fetch(" not in source

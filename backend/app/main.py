@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import get_settings
-from backend.app.routes import dashboard, dsh, dsh_acp, dsh_chat, judge, live, platform, runs
+from backend.app.routes import costs, dashboard, dsh, dsh_acp, dsh_chat, judge, live, platform, runs
 
 
 settings = get_settings()
@@ -20,6 +20,7 @@ app.add_middleware(
 
 app.include_router(runs.router)
 app.include_router(platform.router)
+app.include_router(costs.router)
 app.include_router(judge.router)
 app.include_router(live.router)
 app.include_router(dsh.router)

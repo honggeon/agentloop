@@ -7,6 +7,7 @@ import { BarChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import {
+  costSourceLabel,
   fetchAgentDetail,
   fetchAgentOverview,
   type AgentDetailPayload,
@@ -167,18 +168,33 @@ function formatDuration(value: number | null): string {
   return formatLatency(value);
 }
 
-// cost_source=estimated 的成本必须标注「估算」；missing/null 显示「—」。
+// estimated 的成本必须标注「估算」；imported 标注「导入」；mixed 标注「多来源」；
+// missing/null 显示「—」。
 function formatCost(cost: number | null, source: string | null): string {
   if (cost === null || source === null || source === "missing") return "—";
   const amount = `$${cost.toFixed(4)}`;
-  return source === "estimated" ? `估算 ${amount}` : amount;
+  const label = costSourceLabel(source);
+  return source === "observed" ? amount : `${label} ${amount}`;
 }
 
 function costHint(source: string | null): string {
-  if (source === "estimated") return "按 token 估算的成本，非账单观测值";
+  if (source === "estimated") return "按价格表估算的成本，非账单观测值";
   if (source === "observed") return "运行产物中观测到的成本";
+  if (source === "imported") return "从外部日志导入的成本";
+  if (source === "mixed") return "成本来自多个来源（观测/导入/估算）";
   return "暂无成本数据";
 }
+
+// 索引新鲜度与 fallback 提示：索引是缓存，不是数据源。
+const indexHint = computed(() => {
+  const block = overview.value?.index || detail.value?.index;
+  if (!block) return "";
+  if (block.used) {
+    const fresh = block.last_scan_at ? `，最近扫描 ${block.last_scan_at}` : "";
+    return `运行索引就绪（已索引 ${block.indexed_count ?? 0} 个 Run${fresh}）`;
+  }
+  return "索引不可用，当前使用扫描结果";
+});
 
 function formatScore(value: number | null): string {
   return value === null ? "—" : String(value);
@@ -191,6 +207,11 @@ function setRange(value: AgentOverviewRange) {
 
 function openRun(row: AgentRunRow) {
   void router.push({ name: "run", params: { runId: row.run_id } });
+}
+
+// SuiteJob 详情嵌在测试平台页：通过 query 定位到对应 job。
+function openSuiteJob(jobId: string) {
+  void router.push({ name: "platform", query: { job: jobId } });
 }
 
 function openAllRuns() {
@@ -249,12 +270,18 @@ onMounted(loadAll);
         <p class="lede agent-header-meta">
           <span class="mono">{{ agent?.agent_id || agentId }}</span>
           <span v-if="agent?.type">类型：{{ agent.type }}</span>
-          <span v-if="agent?.environment">环境：{{ agent.environment }}</span>
+          <span>环境：{{ agent?.environment || "—" }}</span>
           <span v-if="agent?.source_host">来源主机：{{ agent.source_host }}</span>
+          <span v-if="agent?.config_status === 'missing_configuration'" class="chip quiet">配置已删除或从未注册</span>
+          <span>创建时间：{{ agent?.created_at || "—" }}</span>
           <span>最近运行：{{ agent?.last_run_at || "—" }}</span>
           <span v-if="agent?.last_run_status" class="chip" :data-status="agent.last_run_status">
             {{ runStatusLabel(agent.last_run_status) }}
           </span>
+        </p>
+        <p v-if="agent?.description" class="lede">{{ agent.description }}</p>
+        <p v-if="agent?.tags?.length" class="lede agent-header-meta">
+          <span v-for="tag in agent.tags" :key="tag" class="chip quiet">{{ tag }}</span>
         </p>
       </div>
       <div class="hero-actions">
@@ -277,6 +304,7 @@ onMounted(loadAll);
 
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-else-if="partialWarning" class="banner error" role="status">{{ partialWarning }}</p>
+    <p v-if="indexHint" class="banner quiet" role="status">{{ indexHint }}</p>
     <p v-if="loading" class="banner loading">加载 Agent 详情中…</p>
     <p v-else-if="overviewLoading" class="banner loading">刷新指标中…</p>
 
@@ -401,7 +429,7 @@ onMounted(loadAll);
               </div>
               <strong>{{ item.value }}</strong>
               <p>{{ item.detail }}</p>
-              <small>来源：{{ item.source }}</small>
+              <small>来源：{{ costSourceLabel(item.source) }}</small>
             </div>
           </div>
         </section>
@@ -416,8 +444,10 @@ onMounted(loadAll);
               <tr>
                 <th>Run ID</th>
                 <th>状态</th>
+                <th>SuiteJob</th>
                 <th>Judge overall</th>
                 <th>完成度</th>
+                <th>成本</th>
                 <th>开始时间</th>
                 <th>耗时</th>
                 <th>工具错误</th>
@@ -440,12 +470,25 @@ onMounted(loadAll);
                 </td>
                 <td><span class="chip" :data-status="row.status">{{ runStatusLabel(row.status) }}</span></td>
                 <td>
+                  <button
+                    v-if="row.job_id"
+                    type="button"
+                    class="ghost small"
+                    :aria-label="`查看批量任务 ${row.job_id}`"
+                    @click.stop="openSuiteJob(row.job_id)"
+                  >
+                    {{ row.job_id }}
+                  </button>
+                  <span v-else>—</span>
+                </td>
+                <td>
                   <span v-if="row.judge_overall_status" class="chip" :data-status="row.judge_overall_status">
                     {{ judgeStatusLabel(row.judge_overall_status) }}
                   </span>
                   <span v-else>—</span>
                 </td>
                 <td>{{ formatScore(row.completion_score) }}</td>
+                <td>{{ formatCost(row.cost, row.cost_source) }}</td>
                 <td>{{ row.started_at || "—" }}</td>
                 <td>{{ formatDuration(row.duration_ms) }}</td>
                 <td>{{ row.tool_error_count }}</td>

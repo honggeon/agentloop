@@ -28,7 +28,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from auditrail import costs as cost_mod
 from auditrail import run_contract
+from auditrail import run_index
 from auditrail import testsuites as suite_mod
 from auditrail.audit import DANGEROUS_TOOLS
 from auditrail.evaluation import load_evaluation
@@ -36,20 +38,21 @@ from auditrail.evaluation import load_evaluation
 from backend.app import platform_store
 from backend.app.config import Settings
 from backend.app.run_executor import is_stale
-# Reuse the single LLM cost rate table from the runs dashboard so the Agent
-# workspace never invents a second pricing source.
-from backend.app.routes.runs import _estimate_model_cost
 
 RANGE_DAYS = {"7d": 7, "30d": 30, "all": None}
 RUN_STATUS_FILTERS = ("all", "completed", "failed", "timed_out", "cancelled", "stale")
 DEFAULT_RUN_LIMIT = 50
 MAX_RUN_LIMIT = 200
 
-COST_SOURCES = ("observed", "imported", "estimated", "missing")
+#: Per-record sources come from ``auditrail.costs``; ``mixed`` is an
+#: aggregate-only value when several sources contribute.
+COST_SOURCES = cost_mod.COST_SOURCES
 HEALTH_LABELS = {"pass": "良好", "partial": "关注", "fail": "异常", "unknown": "未评估"}
 
 #: Run lifecycle statuses that count as errors for KPI / trend purposes.
 _ERROR_RUN_STATUSES = frozenset({"failed", "timed_out"})
+
+_COST_SOURCE_LABELS = {"observed": "观测", "imported": "导入", "estimated": "估算", "mixed": "多来源"}
 
 
 # ---------------------------------------------------------------------------
@@ -148,27 +151,63 @@ def _iter_run_dirs(settings: Settings):
             yield child
 
 
-def _retry_index_for(state: Dict[str, Any], settings: Settings, job_cache: Dict[str, Optional[Dict[str, Any]]]) -> Optional[int]:
+def _attempt_info(
+    state: Dict[str, Any], settings: Settings, job_cache: Dict[str, Optional[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    """retry_index / attempt_count / is_final_attempt for a suite-bound run.
+
+    Prefers the snapshot in ``run.json.suite_ref``; falls back to the SuiteJob
+    record for runs written before the snapshot existed. Returns all-None for
+    standalone runs — linkage is never fabricated.
+    """
     suite_ref = state.get("suite_ref") or {}
     job_id = str(suite_ref.get("job_id") or "")
     attempt_id = str(suite_ref.get("attempt_id") or "")
-    if not job_id or not attempt_id:
-        return None
+    empty = {"retry_index": None, "attempt_count": None, "is_final_attempt": None}
+    if not job_id:
+        return empty
+    snapshot_retry = suite_ref.get("retry_index")
     if job_id not in job_cache:
         try:
             job_cache[job_id] = platform_store.get_suite_job(job_id, settings)
         except Exception:
             job_cache[job_id] = None
     record = job_cache.get(job_id)
-    if not record:
-        return None
-    attempt = suite_mod.find_attempt(record, attempt_id)
+    retry_index = snapshot_retry if isinstance(snapshot_retry, int) else None
+    if record is None:
+        return {"retry_index": retry_index, "attempt_count": None, "is_final_attempt": None}
+    attempts = record.get("attempts") or []
+    attempt = suite_mod.find_attempt(record, attempt_id) if attempt_id else None
     if attempt is None:
-        return None
-    return _int_value(attempt.get("retry_index"))
+        return {"retry_index": retry_index, "attempt_count": None, "is_final_attempt": None}
+    order = attempt.get("order")
+    siblings = [
+        item
+        for item in attempts
+        if (item.get("order") if item.get("order") is not None else item.get("attempt_id"))
+        == (order if order is not None else attempt.get("attempt_id"))
+    ]
+    final = max(siblings, key=lambda item: int(item.get("retry_index") or 0)) if siblings else attempt
+    if retry_index is None:
+        retry_index = _int_value(attempt.get("retry_index"))
+    return {
+        "retry_index": retry_index,
+        "attempt_count": len(siblings),
+        "is_final_attempt": attempt.get("attempt_id") == final.get("attempt_id"),
+    }
 
 
-def _scan_one_run(run_dir: Path, settings: Settings, job_cache: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+def _cost_summary_for_run(run_dir: Path, cost_records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    combined = cost_mod.observed_records_for_run(run_dir) + cost_mod.records_for_run(cost_records, run_dir.name)
+    return cost_mod.summarize_records(combined)
+
+
+def _scan_one_run(
+    run_dir: Path,
+    settings: Settings,
+    job_cache: Dict[str, Optional[Dict[str, Any]]],
+    cost_records: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Light per-run row. Raises nothing for missing artifacts (legacy runs)."""
     state = run_contract.load_run_state(run_dir)
     agent_ref = state.get("agent_ref") or {}
@@ -224,14 +263,21 @@ def _scan_one_run(run_dir: Path, settings: Settings, job_cache: Dict[str, Option
     stale = bool(is_stale(run_dir)) if status in {"queued", "running"} else False
     manifest = state.get("artifact_manifest") or []
 
+    linkage = _attempt_info(state, settings, job_cache)
+    cost_summary = _cost_summary_for_run(run_dir, cost_records or [])
+
     total_evidence = judge_evidence_refs + evaluation_evidence_refs
     return {
         "run_id": str(state.get("run_id") or run_dir.name),
         "agent_id": str(agent_ref.get("id") or "") or None,
-        "case_id": str(test_case_ref.get("id") or "") or None,
+        "case_id": str(test_case_ref.get("id") or test_case_ref.get("case_id") or "") or None,
+        "suite_id": str(suite_ref.get("id") or suite_ref.get("suite_id") or "") or None,
         "job_id": str(suite_ref.get("job_id") or "") or None,
+        "case_execution_id": str(suite_ref.get("case_execution_id") or "") or None,
         "attempt_id": str(suite_ref.get("attempt_id") or "") or None,
-        "retry_index": _retry_index_for(state, settings, job_cache),
+        "retry_index": linkage["retry_index"],
+        "attempt_count": linkage["attempt_count"],
+        "is_final_attempt": linkage["is_final_attempt"],
         "status": status,
         "stale": stale,
         "judge_overall_status": judge_overall_status,
@@ -244,7 +290,11 @@ def _scan_one_run(run_dir: Path, settings: Settings, job_cache: Dict[str, Option
         "high_severity_finding_count": high_severity,
         "has_evidence": total_evidence > 0,
         "legacy_inferred": bool(state.get("legacy_inferred")),
+        "cost": cost_summary["total"],
+        "cost_source": cost_summary["source"],
         # internal aggregation payload (stripped before API serialization)
+        "_cost_total": cost_summary["total"],
+        "_cost_source": cost_summary["source"],
         "_effective_ts": started_dt or finished_dt,
         "_source_host": str(source.get("server_host") or "").lower(),
         "_has_trace": any(name in manifest for name in ("trajectory.jsonl", "session.json"))
@@ -264,9 +314,10 @@ def _scan_runs(settings: Settings) -> Tuple[List[Dict[str, Any]], List[Dict[str,
     rows: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
     job_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    cost_records = cost_mod.load_cost_records(Path(settings.platform_dir))
     for run_dir in _iter_run_dirs(settings):
         try:
-            rows.append(_scan_one_run(run_dir, settings, job_cache))
+            rows.append(_scan_one_run(run_dir, settings, job_cache, cost_records))
         except Exception as exc:  # one bad run must never abort the scan
             errors.append(
                 {
@@ -276,6 +327,80 @@ def _scan_runs(settings: Settings) -> Tuple[List[Dict[str, Any]], List[Dict[str,
                 }
             )
     return rows, errors
+
+
+def _scan_run_ids(
+    run_ids: List[str], settings: Settings, cost_records: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Build full rows for a known set of run ids (index-guided path).
+
+    Runs that vanished between the index scan and this read are skipped — the
+    next ``ensure_index`` drops their entries.
+    """
+    rows: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    job_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    root = Path(settings.runs_dir)
+    for run_id in run_ids:
+        run_dir = root / run_id
+        if not run_dir.is_dir():
+            continue
+        try:
+            rows.append(_scan_one_run(run_dir, settings, job_cache, cost_records))
+        except Exception as exc:
+            errors.append(
+                {
+                    "run_id": run_id,
+                    "stage": "scan",
+                    "message": "run aggregation failed: %s" % type(exc).__name__,
+                }
+            )
+    return rows, errors
+
+
+# ---------------------------------------------------------------------------
+# run index integration (Phase 2): index first, safe scan as fallback
+# ---------------------------------------------------------------------------
+
+
+def _index_snapshot(
+    settings: Settings, cost_records: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Dict[str, Any]]], Dict[str, Any]]:
+    """Ensure and load the run index; ``entries=None`` means fall back.
+
+    The index only accelerates attribution/listing; heavy per-run data is
+    still read from the formal run artifacts afterwards.
+    """
+    runs_dir = Path(settings.runs_dir)
+
+    def lookup(run_id: str) -> Dict[str, Any]:
+        return _cost_summary_for_run(runs_dir / run_id, cost_records)
+
+    try:
+        entries, block = run_index.ensure_index(runs_dir, Path(settings.platform_dir), cost_lookup=lookup)
+    except Exception as exc:  # index IO failure must never break the overview
+        return None, {
+            "used": False,
+            "status": "fallback",
+            "last_scan_at": None,
+            "indexed_count": 0,
+            "error_count": 1,
+            "errors": [{"stage": "index", "message": "index unavailable: %s" % type(exc).__name__}],
+        }
+    if entries is None:
+        block = dict(block)
+        block.setdefault("errors", [])
+        return None, block
+    return entries, block
+
+
+def _index_matches_agent(entry: Dict[str, Any], agent_id: str, endpoint_host: str) -> bool:
+    ref = entry.get("agent_id")
+    if ref:
+        return ref == agent_id
+    if endpoint_host and entry.get("source_host"):
+        return str(entry["source_host"]).lower() == endpoint_host
+    return False
 
 
 def _matches_agent(row: Dict[str, Any], agent_id: str, endpoint_host: str) -> bool:
@@ -369,8 +494,16 @@ def _normalize_llm_call(call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _aggregate_models(runs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Group normalized LLM calls by model. Returns (models, totals)."""
+def _aggregate_models(
+    runs: List[Dict[str, Any]], price_table: Optional[Dict[str, Any]] = None
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Group normalized LLM calls by model. Returns (models, totals).
+
+    Estimation uses only the configured price table: without a confirmed
+    price there is no estimate at all (``missing`` / ``null``), never an
+    invented rate. Estimated values are always marked ``estimated``.
+    """
+    table = price_table if price_table is not None else cost_mod.default_price_table()
     groups: Dict[str, Dict[str, Any]] = {}
     saw_llm_data = False
     for row in runs:
@@ -408,8 +541,10 @@ def _aggregate_models(runs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
                 bucket["_cost"] += call["cost"]
                 bucket["_cost_observed"] += 1
             elif call["total_tokens"] > 0:
-                bucket["_cost"] += _estimate_model_cost(call["model"], call["input_tokens"], call["output_tokens"])
-                bucket["_cost_estimated"] += 1
+                estimate = cost_mod.estimate_cost(table, call["model"], call["input_tokens"], call["output_tokens"])
+                if estimate is not None:
+                    bucket["_cost"] += float(estimate["total_cost"])
+                    bucket["_cost_estimated"] += 1
 
     models: List[Dict[str, Any]] = []
     totals = {"total_tokens": 0, "total_cost": 0.0, "cost_observed": 0, "cost_estimated": 0, "saw_llm_data": saw_llm_data}
@@ -418,10 +553,12 @@ def _aggregate_models(runs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]],
         cost = round(bucket.pop("_cost"), 6)
         observed = bucket.pop("_cost_observed")
         estimated = bucket.pop("_cost_estimated")
-        if observed and not estimated:
+        if observed and estimated:
+            cost_source = "mixed"
+        elif observed:
             cost_source = "observed"
-        elif observed or estimated:
-            cost_source = "estimated" if estimated else "observed"
+        elif estimated:
+            cost_source = "estimated"
         else:
             cost_source = "missing"
         if cost_source == "missing":
@@ -542,9 +679,20 @@ def _build_kpis(runs: List[Dict[str, Any]], totals: Dict[str, Any]) -> Dict[str,
         for row in runs
         if row.get("_judge_reliability")
     )
-    if totals["cost_observed"] or totals["cost_estimated"]:
-        total_cost: Optional[float] = totals["total_cost"]
-        total_cost_source = "observed" if not totals["cost_estimated"] else "estimated"
+    # Cost rollup comes from the per-run cost summaries (observed run data +
+    # imported/estimated records). Runs without usable cost contribute
+    # nothing; several contributing sources aggregate to ``mixed``.
+    cost_sources = []
+    total_cost_value = 0.0
+    for row in runs:
+        if row.get("_cost_total") is not None:
+            total_cost_value += float(row["_cost_total"])
+            source = str(row.get("_cost_source") or "missing")
+            if source != "missing" and source not in cost_sources:
+                cost_sources.append(source)
+    if cost_sources:
+        total_cost: Optional[float] = round(total_cost_value, 6)
+        total_cost_source = cost_sources[0] if len(cost_sources) == 1 else "mixed"
     else:
         total_cost = None
         total_cost_source = "missing"
@@ -596,7 +744,7 @@ def _build_health(runs: List[Dict[str, Any]], tools: List[Dict[str, Any]], kpis:
             cost_efficiency = _health_metric(None, "unknown", source, "有成本数据但没有已完成的 Run 可分摊")
         else:
             status = "pass" if per_run <= 0.5 else "partial" if per_run <= 2.0 else "fail"
-            detail = "每完成一次 Run 的平均成本（%s），阈值 0.5/2.0" % ("估算" if source == "estimated" else "观测")
+            detail = "每完成一次 Run 的平均成本（%s），阈值 0.5/2.0" % _COST_SOURCE_LABELS.get(source, "观测")
             cost_efficiency = _health_metric(per_run, status, source, detail)
     else:
         cost_efficiency = _health_metric(None, "unknown", "missing", "没有可靠的成本来源")
@@ -637,8 +785,13 @@ def _agent_header(
     latest = ordered[0] if ordered else None
     metadata = config.get("metadata") if config else None
     environment = None
-    if isinstance(metadata, dict) and metadata.get("environment"):
-        environment = str(metadata.get("environment"))
+    if config is not None:
+        # Phase 2: top-level ``environment``; legacy configs may only carry it
+        # inside ``metadata``. Never normalized, never defaulted to production.
+        if config.get("environment"):
+            environment = str(config.get("environment"))
+        elif isinstance(metadata, dict) and metadata.get("environment"):
+            environment = str(metadata.get("environment"))
     source_host = _endpoint_host(config.get("endpoint")) if config else None
     if not source_host and latest:
         source_host = latest.get("_source_host") or None
@@ -655,7 +808,16 @@ def _agent_header(
         "environment": environment,
         "source_host": source_host or None,
         "derived": config is None,
-        "created_at": None,
+        # registered = backed by a stored config; missing_configuration =
+        # known from run data only (deleted or never registered).
+        "config_status": "registered" if config is not None else "missing_configuration",
+        "description": str(config.get("description") or "") if config else None,
+        "tags": list(config.get("tags") or []) if config else [],
+        "enabled": bool(config.get("enabled", True)) if config else None,
+        # Legacy configs lack created_at; it stays null rather than being
+        # faked from the config file's mtime.
+        "created_at": (config.get("created_at") or None) if config else None,
+        "updated_at": (config.get("updated_at") or None) if config else None,
         "last_run_at": (latest.get("started_at") or latest.get("finished_at")) if latest else None,
         "last_run_status": latest.get("status") if latest else None,
     }
@@ -666,41 +828,75 @@ def _host_agent_id(source_host: str) -> str:
     return "host:%s" % source_host
 
 
-def resolve_agent(agent_id: str, settings: Settings) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, str]]]:
-    """Resolve (config, matched run rows, scan errors) for one agent.
+def resolve_agent(
+    agent_id: str, settings: Settings
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, str]], Dict[str, Any]]:
+    """Resolve (config, matched run rows, errors, index block) for one agent.
 
     ``config=None`` with non-empty rows means a derived agent (from run data);
     ``config=None`` with no rows means the agent does not exist at all.
     ``host:<hostname>`` ids address the last-resort identity in the
     attribution chain: legacy runs without ``agent_ref`` grouped by their
     ``source.json`` host.
+
+    Attribution prefers the run index (Phase 2): the index decides which runs
+    belong to the agent, then heavy per-run rows are read only for those runs.
+    When the index is unavailable the whole runs directory is scanned safely
+    and the index block reports the fallback.
     """
     agent_id = validate_agent_id(agent_id)
     config = platform_store.get_agent(agent_id, settings)
-    rows, errors = _scan_runs(settings)
-    if agent_id.startswith("host:"):
-        host = agent_id[len("host:") :].lower()
-        if not host:
-            return None, [], errors
-        matched = [row for row in rows if not row.get("agent_id") and row.get("_source_host") == host]
-        if not matched:
-            return None, [], errors
-        return None, matched, errors
     endpoint_host = _endpoint_host(config.get("endpoint")) if config else ""
-    matched = [row for row in rows if _matches_agent(row, agent_id, endpoint_host)]
-    if config is None and not matched:
-        return None, [], errors
-    return config, matched, errors
+    host_mode = agent_id.startswith("host:")
+    host_key = agent_id[len("host:") :].lower() if host_mode else ""
+    if host_mode and not host_key:
+        return None, [], [], {"used": False, "status": "fallback", "indexed_count": 0, "error_count": 0}
+
+    cost_records = cost_mod.load_cost_records(Path(settings.platform_dir))
+    entries, index_block = _index_snapshot(settings, cost_records)
+    if entries is not None:
+        if host_mode:
+            matched_ids = [
+                run_id
+                for run_id, entry in entries.items()
+                if not entry.get("agent_id") and str(entry.get("source_host") or "") == host_key
+            ]
+        else:
+            matched_ids = [
+                run_id
+                for run_id, entry in entries.items()
+                if _index_matches_agent(entry, agent_id, endpoint_host)
+            ]
+        rows, errors = _scan_run_ids(matched_ids, settings, cost_records)
+    else:
+        rows, errors = _scan_runs(settings)
+        if host_mode:
+            rows = [row for row in rows if not row.get("agent_id") and row.get("_source_host") == host_key]
+        else:
+            rows = [row for row in rows if _matches_agent(row, agent_id, endpoint_host)]
+    if config is None and not rows:
+        return None, [], errors, index_block
+    return config, rows, errors, index_block
+
+
+def _cost_block(kpis: Dict[str, Any]) -> Dict[str, Any]:
+    total = kpis.get("total_cost")
+    return {
+        "total": total,
+        "currency": "USD" if total is not None else None,
+        "source": kpis.get("total_cost_source") or "missing",
+    }
 
 
 def get_agent_detail(agent_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
-    config, rows, errors = resolve_agent(agent_id, settings)
+    config, rows, errors, index_block = resolve_agent(agent_id, settings)
     if config is None and not rows:
         return None
     detail: Dict[str, Any] = {
         "agent": _agent_header(agent_id, config, rows),
         "capabilities": list(config.get("capabilities") or []) if config else [],
         "run_count": len(rows),
+        "index": index_block,
         "partial": bool(errors),
         "errors": errors,
     }
@@ -713,6 +909,13 @@ def get_agent_detail(agent_id: str, settings: Settings) -> Optional[Dict[str, An
             "endpoint": config.get("endpoint"),
             "capabilities": list(config.get("capabilities") or []),
             "max_concurrency": config.get("max_concurrency"),
+            "description": config.get("description") or "",
+            "environment": config.get("environment"),
+            "tags": list(config.get("tags") or []),
+            "enabled": bool(config.get("enabled", True)),
+            "source_host": config.get("source_host"),
+            "created_at": config.get("created_at") or None,
+            "updated_at": config.get("updated_at") or None,
             "config_hash": config.get("config_hash"),
         }
     else:
@@ -721,14 +924,15 @@ def get_agent_detail(agent_id: str, settings: Settings) -> Optional[Dict[str, An
 
 
 def get_agent_overview(agent_id: str, range_key: str, settings: Settings, recent_limit: int = 5) -> Optional[Dict[str, Any]]:
-    config, rows, errors = resolve_agent(agent_id, settings)
+    config, rows, errors, index_block = resolve_agent(agent_id, settings)
     if config is None and not rows:
         return None
     now = datetime.now(timezone.utc)
     scoped = [row for row in rows if _in_range(row, range_key, now)]
     ordered = _sort_rows(scoped)
 
-    models, totals = _aggregate_models(scoped)
+    price_table = cost_mod.load_price_table(Path(settings.platform_dir))
+    models, totals = _aggregate_models(scoped, price_table)
     tools = _aggregate_tools(scoped)
     kpis = _build_kpis(scoped, totals)
     health = _build_health(scoped, tools, kpis)
@@ -742,6 +946,8 @@ def get_agent_overview(agent_id: str, range_key: str, settings: Settings, recent
         "health": health,
         "recent_runs": [_public_row(row) for row in ordered[: max(recent_limit, 0)]],
         "data_range": range_key,
+        "index": index_block,
+        "cost": _cost_block(kpis),
         "partial": bool(errors),
         "errors": errors,
     }
@@ -756,7 +962,7 @@ def list_agent_runs(
     limit: int = DEFAULT_RUN_LIMIT,
     offset: int = 0,
 ) -> Optional[Dict[str, Any]]:
-    config, rows, errors = resolve_agent(agent_id, settings)
+    config, rows, errors, index_block = resolve_agent(agent_id, settings)
     if config is None and not rows:
         return None
     now = datetime.now(timezone.utc)
@@ -775,6 +981,7 @@ def list_agent_runs(
         "status": status_filter,
         "limit": limit,
         "offset": offset,
+        "index": index_block,
         "partial": bool(errors),
         "errors": errors,
     }
@@ -785,10 +992,98 @@ def list_agents_with_stats(settings: Settings) -> Dict[str, Any]:
 
     ``agents`` keeps its original config semantics (additive ``derived`` and
     ``stats`` keys only); agents discoverable only from run data appear under
-    ``derived_agents`` and are never persisted as configs.
+    ``derived_agents`` and are never persisted as configs. Stats are computed
+    from the run index when available (no per-run artifact reads); otherwise
+    the safe directory scan is used and the index block says so.
     """
     configs = platform_store.list_agents(settings)
+    cost_records = cost_mod.load_cost_records(Path(settings.platform_dir))
+    entries, index_block = _index_snapshot(settings, cost_records)
+    if entries is not None:
+        return _list_from_index(configs, entries, index_block)
     rows, errors = _scan_runs(settings)
+    return _list_from_scan(configs, rows, errors, index_block)
+
+
+def _entry_stats(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _key(entry: Dict[str, Any]) -> str:
+        return str(entry.get("effective_ts") or "")
+
+    latest = max(entries, key=_key) if entries else None
+    return {
+        "run_count": len(entries),
+        "last_run_at": (latest.get("started_at") or latest.get("finished_at")) if latest else None,
+        "last_run_status": latest.get("status") if latest else None,
+    }
+
+
+def _list_from_index(
+    configs: List[Dict[str, Any]], entries: Dict[str, Dict[str, Any]], index_block: Dict[str, Any]
+) -> Dict[str, Any]:
+    by_ref: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in entries.values():
+        ref = entry.get("agent_id")
+        if ref:
+            by_ref.setdefault(str(ref), []).append(entry)
+
+    configured_ids = {str(config.get("agent_id")) for config in configs}
+    enriched: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    for config in configs:
+        agent_id = str(config.get("agent_id") or "")
+        agent_entries = by_ref.get(agent_id, [])
+        if not agent_entries:
+            host = _endpoint_host(config.get("endpoint"))
+            if host:
+                agent_entries = [
+                    entry
+                    for entry in entries.values()
+                    if not entry.get("agent_id") and str(entry.get("source_host") or "") == host
+                ]
+        enriched.append({**config, "derived": False, "stats": _entry_stats(agent_entries)})
+
+    derived: List[Dict[str, Any]] = []
+    for ref_id, agent_entries in sorted(by_ref.items()):
+        if ref_id in configured_ids:
+            continue
+        latest = max(agent_entries, key=lambda entry: str(entry.get("effective_ts") or ""))
+        derived.append(
+            {
+                "agent_id": ref_id,
+                "name": str(latest.get("agent_name") or ref_id),
+                "derived": True,
+                "source_host": latest.get("source_host"),
+                "stats": _entry_stats(agent_entries),
+            }
+        )
+
+    configured_hosts = {_endpoint_host(config.get("endpoint")) for config in configs}
+    configured_hosts.discard("")
+    by_host: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in entries.values():
+        host = str(entry.get("source_host") or "")
+        if entry.get("agent_id") or not host or host in configured_hosts or host == "unknown":
+            continue
+        by_host.setdefault(host, []).append(entry)
+    for host, host_entries in sorted(by_host.items()):
+        derived.append(
+            {
+                "agent_id": _host_agent_id(host),
+                "name": host,
+                "derived": True,
+                "source_host": host,
+                "stats": _entry_stats(host_entries),
+            }
+        )
+    return {"agents": enriched, "derived_agents": derived, "index": index_block, "partial": bool(errors), "errors": errors}
+
+
+def _list_from_scan(
+    configs: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+    errors: List[Dict[str, str]],
+    index_block: Dict[str, Any],
+) -> Dict[str, Any]:
     by_ref: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         ref = row.get("agent_id")
@@ -844,7 +1139,7 @@ def list_agents_with_stats(settings: Settings) -> Dict[str, Any]:
                 "stats": _stats_for(host_rows),
             }
         )
-    return {"agents": enriched, "derived_agents": derived, "partial": bool(errors), "errors": errors}
+    return {"agents": enriched, "derived_agents": derived, "index": index_block, "partial": bool(errors), "errors": errors}
 
 
 def _stats_for(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

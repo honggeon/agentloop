@@ -96,6 +96,12 @@ def new_attempt_id(order: int, retry_index: int = 0) -> str:
     return "attempt-%d-%s" % (order + 1, uuid.uuid4().hex[:8])
 
 
+def case_execution_id_for(job_id: str, order: int) -> str:
+    """Stable CaseExecution id: every attempt of one case (including retries)
+    shares it, so a retry chain can always be traced back to one execution."""
+    return "%s-case-%d" % (job_id, int(order) + 1)
+
+
 # ------------------------------------------------------------- suite config
 
 
@@ -246,6 +252,7 @@ def new_suite_job(
         attempts.append(
             {
                 "attempt_id": new_attempt_id(order),
+                "case_execution_id": case_execution_id_for(job_id, order),
                 "order": order,
                 "case_id": str(snapshot.get("case_id") or ""),
                 "case_title": str(snapshot.get("title") or ""),
@@ -278,6 +285,8 @@ def new_suite_job(
         },
         "agent_ref": {
             "id": agent.get("agent_id"),
+            "name": agent.get("name"),
+            "environment": agent.get("environment"),
             "version": agent.get("version"),
             "config_hash": agent.get("config_hash"),
         },
@@ -371,6 +380,9 @@ def append_retry_attempt(record: Dict[str, Any], attempt: Dict[str, Any]) -> Dic
     order = int(attempt.get("order") or 0)
     retry = {
         "attempt_id": new_attempt_id(order, retry_index),
+        "case_execution_id": str(
+            attempt.get("case_execution_id") or case_execution_id_for(str(record.get("job_id") or ""), order)
+        ),
         "order": order,
         "case_id": str(attempt.get("case_id") or ""),
         "case_title": str(attempt.get("case_title") or ""),

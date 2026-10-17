@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
+  costSourceLabel,
   fetchAgentRuns,
   type AgentOverviewRange,
   type AgentRunRow,
@@ -67,6 +68,20 @@ const partialWarning = computed(() => {
   return `部分运行数据扫描失败，当前展示为局部数据${suffix}`;
 });
 
+// Phase 2：索引不可用时明确提示，列表仍来自安全扫描。
+const indexHint = computed(() => {
+  const block = page.value?.index;
+  if (!block) return "";
+  return block.used ? "" : "索引不可用，当前使用扫描结果";
+});
+
+// estimated 标注「估算」，imported 标注「导入」，mixed 标注「多来源」；无数据显示「—」。
+function formatCost(cost: number | null, source: string | null): string {
+  if (cost === null || source === null || source === "missing") return "—";
+  const amount = `$${cost.toFixed(4)}`;
+  return source === "observed" ? amount : `${costSourceLabel(source)} ${amount}`;
+}
+
 function runStatusLabel(value: string | null): string {
   if (!value) return "—";
   return RUN_STATUS_LABELS[value] || value;
@@ -108,6 +123,11 @@ function nextPage() {
 
 function openRun(row: AgentRunRow) {
   void router.push({ name: "run", params: { runId: row.run_id } });
+}
+
+// SuiteJob 详情嵌在测试平台页：通过 query 定位到对应 job。
+function openSuiteJob(jobId: string) {
+  void router.push({ name: "platform", query: { job: jobId } });
 }
 
 function backToDetail() {
@@ -162,6 +182,7 @@ onMounted(loadRuns);
 
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-else-if="partialWarning" class="banner error" role="status">{{ partialWarning }}</p>
+    <p v-if="indexHint" class="banner quiet" role="status">{{ indexHint }}</p>
     <p v-if="loading" class="banner loading">加载运行记录中…</p>
 
     <section class="panel" aria-label="筛选与分页">
@@ -203,6 +224,7 @@ onMounted(loadRuns);
             <th>Run 状态</th>
             <th>Judge overall</th>
             <th>完成度</th>
+            <th>成本</th>
             <th>开始时间</th>
             <th>耗时</th>
             <th>工具错误</th>
@@ -228,9 +250,18 @@ onMounted(loadRuns);
             <td><span class="mono">{{ row.case_id || "—" }}</span></td>
             <td>
               <template v-if="row.job_id">
-                <span class="mono">{{ row.job_id }}</span>
+                <button
+                  type="button"
+                  class="ghost small mono"
+                  :aria-label="`查看批量任务 ${row.job_id}`"
+                  @click.stop="openSuiteJob(row.job_id)"
+                >
+                  {{ row.job_id }}
+                </button>
                 <br />
                 <span class="mono">{{ row.attempt_id || "—" }}</span>
+                <span v-if="row.attempt_count" class="chip quiet">共 {{ row.attempt_count }} 次尝试</span>
+                <span v-if="row.is_final_attempt" class="chip quiet">最终尝试</span>
               </template>
               <span v-else>—</span>
             </td>
@@ -242,6 +273,7 @@ onMounted(loadRuns);
               <span v-else>—</span>
             </td>
             <td>{{ formatScore(row.completion_score) }}</td>
+            <td>{{ formatCost(row.cost, row.cost_source) }}</td>
             <td>{{ row.started_at || "—" }}</td>
             <td>{{ formatDuration(row.duration_ms) }}</td>
             <td>{{ row.tool_error_count }}</td>

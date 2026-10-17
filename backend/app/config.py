@@ -77,6 +77,10 @@ class Settings:
     #: fixed at startup — no dynamic autoscaling.
     platform_max_concurrency: int = 4
     platform_agent_max_concurrency: int = 1
+    #: Phase 2 local admin endpoints (run-index rebuild/status). There is no
+    #: production auth in this deployment; these endpoints are local-only
+    #: management capabilities and say so in every response.
+    local_admin_enabled: bool = True
 
 
 @lru_cache(maxsize=1)
@@ -113,6 +117,7 @@ def get_settings() -> Settings:
         agent_allowed_ports=_port_values(os.getenv("AGENT_ALLOWED_PORTS", "80,443")),
         platform_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_MAX_CONCURRENCY", 4),
         platform_agent_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_AGENT_MAX_CONCURRENCY", 1),
+        local_admin_enabled=_env_bool("AUDITRAIL_LOCAL_ADMIN", True),
     )
 
 

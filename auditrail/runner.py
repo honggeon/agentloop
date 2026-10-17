@@ -64,17 +64,29 @@ def create_platform_run(
     test_case: Dict[str, Any],
     suite_ref: Optional[Dict[str, Any]] = None,
 ) -> Path:
-    """Create the run directory and its initial ``queued`` run.json."""
+    """Create the run directory and its initial ``queued`` run.json.
+
+    ``agent_ref`` snapshots the agent identity (id/name/environment/config
+    hash) at execution time; later Agent config updates never rewrite it.
+    ``suite_ref`` (Phase 1.1/2) pins the run to a SuiteJob / CaseExecution /
+    Attempt chain when the run belongs to a batch.
+    """
     run_dir = Path(runs_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     record = new_run_record(
         run_id,
         agent_ref={
             "id": agent.get("agent_id"),
+            "name": agent.get("name"),
+            "environment": agent.get("environment"),
             "version": agent.get("version"),
             "config_hash": agent.get("config_hash"),
         },
-        test_case_ref={"id": test_case.get("case_id"), "version": test_case.get("version")},
+        test_case_ref={
+            "id": test_case.get("case_id"),
+            "case_id": test_case.get("case_id"),
+            "version": test_case.get("version"),
+        },
     )
     if suite_ref:
         record["suite_ref"] = dict(suite_ref)

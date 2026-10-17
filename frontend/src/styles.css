@@ -579,6 +579,12 @@ a {
   background: var(--signal-soft);
 }
 
+.banner.quiet {
+  color: #5a6b7d;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px rgba(197, 208, 219, 0.7);
+}
+
 .import-strip,
 .panel,
 .metric,

@@ -20,7 +20,7 @@ from auditrail import run_contract
 from auditrail import testsuites as suite_mod
 from auditrail.netguard import EndpointRejected, validate_endpoint
 from auditrail.runner import create_platform_run
-from backend.app import agent_overview, platform_store, run_executor, suite_executor
+from backend.app import agent_overview, platform_store, run_context, run_executor, suite_executor
 from backend.app.config import build_endpoint_policy, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -113,6 +113,46 @@ def create_agent(payload: dict[str, Any]) -> dict[str, Any]:
             detail={"code": "invalid_agent", "message": str(exc)},
         ) from exc
     return {"agent": agent}
+
+
+@router.put("/agents/{agent_id}")
+def update_agent(agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Update editable Agent metadata (Phase 2). ``agent_id``/``created_at``
+    are immutable; historical runs keep their own ``agent_ref`` snapshot."""
+    settings = get_settings()
+    if payload.get("endpoint") is not None:
+        try:
+            payload = {**payload, "endpoint": validate_endpoint(payload.get("endpoint"), build_endpoint_policy(settings))}
+        except EndpointRejected as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "endpoint_rejected", "message": exc.reason},
+            ) from exc
+    try:
+        agent = platform_store.update_agent(agent_id, payload, settings)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_agent", "message": str(exc)},
+        ) from exc
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
+        )
+    return {"agent": agent}
+
+
+@router.delete("/agents/{agent_id}")
+def delete_agent(agent_id: str) -> dict[str, Any]:
+    """Delete an Agent config. Historical runs are preserved and keep their
+    ``run.json`` snapshot; the agent reappears as derived/missing config."""
+    if not platform_store.delete_agent(agent_id, get_settings()):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
+        )
+    return {"deleted": agent_id}
 
 
 # --------------------------------------------------------------- test cases
@@ -262,6 +302,25 @@ def _run_path_or_400_404(run_id: str) -> Path:
         raise HTTPException(status_code=400, detail={"code": "invalid_run_id", "message": str(exc)}) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail={"code": "run_not_found", "message": str(exc)}) from exc
+
+
+@router.get("/runs/{run_id}/context")
+def get_run_context(run_id: str) -> dict[str, Any]:
+    """Run <-> Agent / SuiteJob / CaseExecution / Attempt linkage (Phase 2).
+
+    ``run.json`` is authoritative for references; disagreements with the
+    SuiteJob record are returned as ``warnings`` and never fail the request.
+    """
+    settings = get_settings()
+    try:
+        context = run_context.get_run_context(run_id, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_run_id", "message": str(exc)}) from exc
+    if context is None:
+        raise HTTPException(
+            status_code=404, detail={"code": "run_not_found", "message": "unknown run %s" % run_id}
+        )
+    return context
 
 
 def _default_judge_runner(run_dir: Path) -> None:
@@ -481,6 +540,30 @@ def get_suite_job(job_id: str) -> dict[str, Any]:
     return _job_payload(record, settings)
 
 
+@router.get("/suite-jobs/{job_id}/runs")
+def get_suite_job_runs(job_id: str) -> dict[str, Any]:
+    """All runs of one SuiteJob, grouped by CaseExecution (Phase 2)."""
+    payload = run_context.list_job_runs(job_id, get_settings())
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "suite_job_not_found", "message": "unknown suite job %s" % job_id},
+        )
+    return payload
+
+
+@router.get("/suite-jobs/{job_id}/attempts/{attempt_id}")
+def get_suite_job_attempt(job_id: str, attempt_id: str) -> dict[str, Any]:
+    """One attempt plus its CaseExecution retry history (Phase 2)."""
+    payload = run_context.get_job_attempt(job_id, attempt_id, get_settings())
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "attempt_not_found", "message": "unknown attempt %s in suite job %s" % (attempt_id, job_id)},
+        )
+    return payload
+
+
 @router.post("/suite-jobs/{job_id}/cancel")
 def cancel_suite_job(job_id: str) -> dict[str, Any]:
     settings = get_settings()
@@ -522,11 +605,16 @@ def recover_stale_suite_jobs() -> list:
 
 
 def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
+    agent_ref = record.get("agent_ref") or {}
     return {
         "job_id": record.get("job_id"),
         "status": record.get("status"),
         "suite_ref": record.get("suite_ref"),
         "agent_ref": record.get("agent_ref"),
+        # Phase 2 display conveniences; legacy jobs without them stay null.
+        "agent_id": agent_ref.get("id"),
+        "agent_name": agent_ref.get("name"),
+        "agent_environment": agent_ref.get("environment"),
         "judge": bool(record.get("judge")),
         "max_retries": int(record.get("max_retries") or 0),
         "timeout_seconds": record.get("timeout_seconds"),
@@ -544,11 +632,28 @@ def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
 
 def _job_payload(record: dict[str, Any], settings) -> dict[str, Any]:
     attempts = []
-    for attempt in record.get("attempts") or []:
+    all_attempts = list(record.get("attempts") or [])
+    for attempt in all_attempts:
         entry = dict(attempt)
+        job_id = str(record.get("job_id") or "")
+        order = attempt.get("order")
+        entry.setdefault(
+            "case_execution_id", suite_mod.case_execution_id_for(job_id, int(order or 0))
+        )
+        siblings = [
+            item
+            for item in all_attempts
+            if (item.get("order") if item.get("order") is not None else item.get("attempt_id"))
+            == (order if order is not None else attempt.get("attempt_id"))
+        ]
+        final = max(siblings, key=lambda item: int(item.get("retry_index") or 0)) if siblings else attempt
+        entry["attempt_count"] = len(siblings)
+        entry["is_final_attempt"] = attempt.get("attempt_id") == final.get("attempt_id")
+        entry["attempt_history_url"] = "/api/suite-jobs/%s/attempts/%s" % (job_id, attempt.get("attempt_id"))
         run_id = attempt.get("run_id")
         if run_id:
             entry["run_status_url"] = "/api/runs/%s/status" % run_id
+            entry["run_context_url"] = "/api/runs/%s/context" % run_id
             _attach_run_evaluation(entry, str(run_id), settings)
         attempts.append(entry)
     payload = _job_summary(record)
