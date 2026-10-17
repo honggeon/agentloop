@@ -1066,6 +1066,220 @@ export function recoverStaleSuiteJobs(): Promise<{ resumed: string[] }> {
   return apiPost<{ resumed: string[] }>("/api/suite-jobs/recover");
 }
 
+// --- LangSmith 风格 Agent 详情工作区：只读聚合视图 ------------------------------
+//
+// 后端 GET /api/agents* 复用现有 run 产物聚合出 Agent 维度视图；前端只消费，
+// 不在组件内聚合 JSON。null 表示数据不存在或无法计算，[] 表示明确的空结果，
+// unknown 表示「未评估」，与失败严格区分。
+
+// 时间范围：7 天 / 30 天 / 全部。
+export type AgentOverviewRange = "7d" | "30d" | "all";
+
+// 运行状态筛选；stale 单独筛出执行器中断的运行。
+export type AgentRunStatusFilter = "all" | "completed" | "failed" | "timed_out" | "cancelled" | "stale";
+
+// 聚合阶段的局部错误：单条 run 扫描失败不应拖垮整个页面。
+export interface AgentScanError {
+  run_id?: string | null;
+  stage: string;
+  message: string;
+}
+
+export interface AgentRunStats {
+  run_count: number;
+  last_run_at: string | null;
+  last_run_status: string | null;
+}
+
+// /api/agents 中的注册 Agent：在 AgentConfig 基础上附加运行统计。
+export interface AgentListItem {
+  agent_id: string;
+  name: string;
+  version?: string;
+  adapter?: string;
+  endpoint?: string;
+  capabilities?: string[];
+  metadata?: Record<string, unknown>;
+  max_concurrency?: number | null;
+  config_hash?: string;
+  derived: boolean;
+  stats: AgentRunStats;
+}
+
+// 仅从运行数据派生出的 Agent（没有独立注册配置），界面必须标注来源。
+export interface DerivedAgentSummary {
+  agent_id: string;
+  name: string;
+  derived: true;
+  source_host: string | null;
+  stats: AgentRunStats;
+}
+
+export interface AgentDirectoryPayload {
+  agents: AgentListItem[];
+  derived_agents: DerivedAgentSummary[];
+  partial: boolean;
+  errors: AgentScanError[];
+}
+
+// Agent 详情页 Header 契约。
+export interface AgentHeader {
+  agent_id: string;
+  name: string;
+  type: string | null;
+  environment: string | null;
+  source_host: string | null;
+  derived: boolean;
+  created_at: string | null;
+  last_run_at: string | null;
+  last_run_status: string | null;
+}
+
+export interface AgentDetailPayload {
+  agent: AgentHeader;
+  capabilities: string[];
+  config: Record<string, unknown> | null;
+  run_count: number;
+  partial: boolean;
+  errors: AgentScanError[];
+}
+
+export interface AgentModelMetric {
+  model: string;
+  provider: string | null;
+  llm_call_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  average_latency_ms: number | null;
+  error_count: number;
+  // 成本来源：observed 为观测值，estimated 必须标注「估算」，missing/null 显示「—」。
+  cost: number | null;
+  cost_source: "observed" | "estimated" | "missing" | string | null;
+}
+
+export interface AgentToolMetric {
+  tool_name: string;
+  call_count: number;
+  success_count: number;
+  error_count: number;
+  // 工具调用错误率（分母是工具调用次数），不要误称为 run 失败率。
+  error_rate: number | null;
+  dangerous_count: number;
+  audit_source: string;
+}
+
+export interface AgentTraceDay {
+  date: string;
+  run_count: number;
+  completed_count: number;
+  failed_count: number;
+  timed_out_count: number;
+  cancelled_count: number;
+  error_count: number;
+}
+
+export interface AgentKpis {
+  trace_count: number;
+  run_count: number;
+  error_rate: number | null;
+  completion_score: number | null;
+  token_count: number | null;
+  total_cost: number | null;
+  total_cost_source: "observed" | "estimated" | "missing" | string | null;
+  judge_evidence_coverage: number | null;
+}
+
+// 单个健康指标：status 只有 pass/partial/fail/unknown；unknown 显示「未评估」，
+// 与 fail 区分；label/detail 由后端给出中文文案，界面不得只靠颜色传达状态。
+export interface AgentHealthMetric {
+  value: number | null;
+  status: "pass" | "partial" | "fail" | "unknown" | string;
+  source: "observed" | "imported" | "estimated" | "missing" | string;
+  label: string;
+  detail: string;
+}
+
+export interface AgentHealth {
+  task_completion: AgentHealthMetric;
+  tool_stability: AgentHealthMetric;
+  performance: AgentHealthMetric;
+  cost_efficiency: AgentHealthMetric;
+  deterministic_finding_count: AgentHealthMetric;
+  high_severity_finding_count: AgentHealthMetric;
+}
+
+// Agent 运行行：同时用于 overview 的 recent_runs 与 runs 分页列表。
+export interface AgentRunRow {
+  run_id: string;
+  agent_id: string | null;
+  case_id: string | null;
+  job_id: string | null;
+  attempt_id: string | null;
+  retry_index: number | null;
+  status: string;
+  stale: boolean;
+  judge_overall_status: string | null;
+  completion_score: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tool_error_count: number;
+  deterministic_finding_count: number;
+  high_severity_finding_count: number;
+  has_evidence: boolean;
+  legacy_inferred: boolean;
+}
+
+export interface AgentOverview {
+  agent: AgentHeader;
+  models: AgentModelMetric[];
+  tools: AgentToolMetric[];
+  traces: AgentTraceDay[];
+  kpis: AgentKpis;
+  health: AgentHealth;
+  recent_runs: AgentRunRow[];
+  data_range: AgentOverviewRange | string;
+  partial: boolean;
+  errors: AgentScanError[];
+}
+
+export interface AgentRunsPage {
+  items: AgentRunRow[];
+  total: number;
+  range: AgentOverviewRange | string;
+  status: AgentRunStatusFilter | string;
+  limit: number;
+  offset: number;
+  partial: boolean;
+  errors: AgentScanError[];
+}
+
+// 与 fetchAgents 指向同一端点，但返回完整工作区载荷（含派生 Agent 与局部错误）。
+export function fetchAgentDirectory(): Promise<AgentDirectoryPayload> {
+  return apiGet<AgentDirectoryPayload>("/api/agents");
+}
+
+export function fetchAgentDetail(agentId: string): Promise<AgentDetailPayload> {
+  return apiGet<AgentDetailPayload>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+export function fetchAgentOverview(agentId: string, range: AgentOverviewRange = "7d"): Promise<AgentOverview> {
+  return apiGet<AgentOverview>(`/api/agents/${encodeURIComponent(agentId)}/overview?range=${encodeURIComponent(range)}`);
+}
+
+export function fetchAgentRuns(
+  agentId: string,
+  params: { range?: AgentOverviewRange; status?: AgentRunStatusFilter; limit?: number; offset?: number } = {}
+): Promise<AgentRunsPage> {
+  const search = new URLSearchParams();
+  search.set("range", params.range || "7d");
+  search.set("status", params.status || "all");
+  search.set("limit", String(params.limit ?? 50));
+  search.set("offset", String(params.offset ?? 0));
+  return apiGet<AgentRunsPage>(`/api/agents/${encodeURIComponent(agentId)}/runs?${search.toString()}`);
+}
+
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",

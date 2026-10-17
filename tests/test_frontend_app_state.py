@@ -502,3 +502,113 @@ def test_platform_view_exposes_phase11_batch_reliability():
     assert "stats.retries" in source
     assert "hasStaleJobs" in source
     assert "已请求取消" in source
+
+
+AGENT_LIST_VIEW = Path("frontend/src/views/AgentListView.vue")
+AGENT_DETAIL_VIEW = Path("frontend/src/views/AgentDetailView.vue")
+AGENT_RUNS_VIEW = Path("frontend/src/views/AgentRunsView.vue")
+
+
+def test_agent_workspace_routes_exist_with_name_and_title():
+    source = ROUTER.read_text(encoding="utf-8")
+    assert 'path: "/agents"' in source
+    assert 'name: "agents"' in source
+    assert 'meta: { title: "Agent 列表" }' in source
+    assert 'path: "/agents/:agentId"' in source
+    assert 'name: "agent-detail"' in source
+    assert 'meta: { title: "Agent 详情" }' in source
+    assert 'path: "/agents/:agentId/runs"' in source
+    assert 'name: "agent-runs"' in source
+    assert 'meta: { title: "Agent 运行记录" }' in source
+    # 既有路由保持
+    assert 'path: "/runs/:runId"' in source
+    assert 'path: "/runs/:runId/trajectory"' in source
+    assert 'path: "/platform"' in source
+
+
+def test_agent_workspace_uses_centralized_api_contracts():
+    source = API_TS.read_text(encoding="utf-8")
+    for name in (
+        "AgentOverviewRange",
+        "AgentRunStatusFilter",
+        "AgentScanError",
+        "AgentRunStats",
+        "AgentListItem",
+        "DerivedAgentSummary",
+        "AgentDirectoryPayload",
+        "AgentHeader",
+        "AgentDetailPayload",
+        "AgentModelMetric",
+        "AgentToolMetric",
+        "AgentTraceDay",
+        "AgentKpis",
+        "AgentHealthMetric",
+        "AgentHealth",
+        "AgentRunRow",
+        "AgentOverview",
+        "AgentRunsPage",
+    ):
+        assert name in source, name
+    for fn in ("fetchAgentDirectory", "fetchAgentDetail", "fetchAgentOverview", "fetchAgentRuns"):
+        assert fn in source, fn
+    assert '"/api/agents"' in source
+    assert "/overview?range=" in source
+    assert "/runs?" in source
+
+
+def test_agent_workspace_sidebar_entry_exists():
+    source = APP_VUE.read_text(encoding="utf-8")
+    assert 'to="/agents"' in source
+    assert "Agent 工作区" in source
+    assert "agent-detail" in source
+    assert "agent-runs" in source
+
+
+def test_agent_list_view_states_and_derived_badge():
+    source = AGENT_LIST_VIEW.read_text(encoding="utf-8")
+    assert "来源于运行数据" in source
+    assert "加载 Agent 列表中" in source
+    assert "暂无 Agent" in source
+    assert "局部数据" in source
+    assert 'name: "agent-detail"' in source
+    assert 'class="mono"' in source
+    assert "aria-label" in source
+    assert "@keydown.enter" in source
+    assert "fetchAgentDirectory" in source
+    assert "fetch(" not in source  # 组件不直接 fetch
+
+
+def test_agent_detail_view_sections_and_semantics():
+    source = AGENT_DETAIL_VIEW.read_text(encoding="utf-8")
+    for section in ("Models", "Tools", "Traces per day", "Auditrail Health", "Recent Runs"):
+        assert section in source, section
+    # unknown/null/估算语义
+    assert "未评估" in source
+    assert '"—"' in source
+    assert "估算" in source
+    # 图表可访问性：数值摘要 + 表格
+    assert "chart-insight" in source
+    assert "chart-data-table" in source
+    # 工具错误率与 Run 失败率口径区分
+    assert "不是 run 失败率" in source
+    # 跳转：Recent Run -> RunView -> 全部运行 -> AgentRunsView
+    assert 'name: "run"' in source
+    assert 'name: "agent-runs"' in source
+    assert "查看全部运行" in source
+    assert "第 {{ row.retry_index }} 次重试" in source
+    assert "fetchAgentOverview" in source
+    assert "fetch(" not in source
+
+
+def test_agent_runs_view_filters_and_pagination():
+    source = AGENT_RUNS_VIEW.read_text(encoding="utf-8")
+    for label in ("近 7 天", "近 30 天", "全部", "全部状态", "已中断（stale）"):
+        assert label in source, label
+    assert "上一页" in source
+    assert "下一页" in source
+    assert "Judge overall" in source
+    assert "Run 状态" in source
+    assert "第 {{ row.retry_index }} 次重试" in source
+    assert 'name: "run"' in source
+    assert "fetchAgentRuns" in source
+    assert "fetch(" not in source

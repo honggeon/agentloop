@@ -181,6 +181,15 @@ onMounted(checkBackend);
           <span class="nav-label">测试平台</span>
           <small>Agent · TestCase · Run</small>
         </RouterLink>
+        <RouterLink
+          class="nav-link"
+          :class="{ active: route.name === 'agents' || route.name === 'agent-detail' || route.name === 'agent-runs' }"
+          to="/agents"
+        >
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">Agent 工作区</span>
+          <small>Agent 列表 · 详情 · 运行</small>
+        </RouterLink>
       </nav>
 
       <div class="sidebar-meta">

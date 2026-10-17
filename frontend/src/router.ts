@@ -1,4 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
+import AgentDetailView from "./views/AgentDetailView.vue";
+import AgentListView from "./views/AgentListView.vue";
+import AgentRunsView from "./views/AgentRunsView.vue";
 import BatchView from "./views/BatchView.vue";
 import LiveEvalView from "./views/LiveEvalView.vue";
 import PlatformView from "./views/PlatformView.vue";
@@ -37,6 +40,24 @@ const router = createRouter({
       name: "platform",
       component: PlatformView,
       meta: { title: "测试平台" }
+    },
+    {
+      path: "/agents",
+      name: "agents",
+      component: AgentListView,
+      meta: { title: "Agent 列表" }
+    },
+    {
+      path: "/agents/:agentId",
+      name: "agent-detail",
+      component: AgentDetailView,
+      meta: { title: "Agent 详情" }
+    },
+    {
+      path: "/agents/:agentId/runs",
+      name: "agent-runs",
+      component: AgentRunsView,
+      meta: { title: "Agent 运行记录" }
     },
     {
       path: "/:pathMatch(.*)*",

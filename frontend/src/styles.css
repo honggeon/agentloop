@@ -3616,3 +3616,163 @@ body {
 .platform-panel .batch-field input {
   width: 130px;
 }
+
+/* Agent 详情工作区：Agent 身份 -> 能力 -> 趋势 -> 指标 -> 下钻 */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.agent-span-6 {
+  grid-column: span 6;
+}
+
+.agent-span-12 {
+  grid-column: span 12;
+}
+
+.agent-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+
+.range-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-solid);
+}
+
+.range-switch .ghost.active {
+  color: var(--signal);
+  border-color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.derived-badge {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.health-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--surface-solid);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.health-item strong {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+}
+
+.health-item p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.health-item small {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.health-item[data-status="pass"] {
+  border-color: var(--signal);
+}
+
+.health-item[data-status="fail"] {
+  border-color: var(--ember);
+}
+
+.health-item[data-status="partial"] {
+  border-color: #b0760f;
+}
+
+.health-item[data-status="unknown"] {
+  border-style: dashed;
+}
+
+/* 状态必须同时有颜色和文字：chip 文案由视图给出，这里只补配色。 */
+.chip[data-status="pass"],
+.chip[data-status="completed"],
+.chip[data-status="success"] {
+  color: #0a5f57;
+  background: var(--signal-soft);
+}
+
+.chip[data-status="partial"],
+.chip[data-status="queued"],
+.chip[data-status="running"] {
+  color: #8a5a08;
+  background: rgba(176, 118, 20, 0.14);
+}
+
+.chip[data-status="timed_out"],
+.chip[data-status="fail"] {
+  color: #8e3b28;
+  background: var(--ember-soft);
+}
+
+.chip[data-status="unknown"],
+.chip[data-status="stale"],
+.chip[data-status="skipped"] {
+  color: var(--muted);
+  background: rgba(90, 107, 125, 0.12);
+}
+
+.agent-table td .derived-badge {
+  margin-left: 6px;
+}
+
+@media (max-width: 960px) {
+  .agent-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-span-6,
+  .agent-span-12 {
+    grid-column: span 1;
+  }
+
+  .range-switch {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+.runs-toolbar {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.runs-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+}
