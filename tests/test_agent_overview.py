@@ -215,6 +215,37 @@ def test_source_host_never_used_as_agent_name(monkeypatch, tmp_path):
     assert body["agent"]["name"] == "Demo Agent"
 
 
+def test_host_derived_agent_for_unattributed_legacy_runs(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    # no configured agent claims this host
+    _make_run(settings.runs_dir, "run-h1", agent_id=None, with_run_json=False, source_host="legacy.internal")
+    _make_run(settings.runs_dir, "run-h2", agent_id=None, with_run_json=False, source_host="legacy.internal")
+
+    body = client.get("/api/agents").json()
+    derived = {item["agent_id"]: item for item in body["derived_agents"]}
+    assert "host:legacy.internal" in derived
+    assert derived["host:legacy.internal"]["derived"] is True
+    assert derived["host:legacy.internal"]["stats"]["run_count"] == 2
+
+    detail = client.get("/api/agents/host:legacy.internal").json()
+    assert detail["agent"]["derived"] is True
+    assert detail["agent"]["name"] == "legacy.internal"
+    assert detail["agent"]["source_host"] == "legacy.internal"
+    assert detail["run_count"] == 2
+    runs = client.get("/api/agents/host:legacy.internal/runs?range=all").json()
+    assert runs["total"] == 2
+
+
+def test_host_derived_agent_skips_host_claimed_by_config(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    _register_agent(client)  # endpoint host agent.internal
+    _make_run(settings.runs_dir, "run-claimed", agent_id=None, with_run_json=False, source_host="agent.internal")
+
+    body = client.get("/api/agents").json()
+    assert all(item["agent_id"] != "host:agent.internal" for item in body["derived_agents"])
+    assert body["agents"][0]["stats"]["run_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # overview
 # ---------------------------------------------------------------------------

@@ -642,9 +642,15 @@ def _agent_header(
     source_host = _endpoint_host(config.get("endpoint")) if config else None
     if not source_host and latest:
         source_host = latest.get("_source_host") or None
+    if config is not None and config.get("name"):
+        name = str(config.get("name"))
+    elif agent_id.startswith("host:"):
+        name = agent_id[len("host:") :]
+    else:
+        name = agent_id
     return {
         "agent_id": agent_id,
-        "name": str(config.get("name")) if config and config.get("name") else agent_id,
+        "name": name,
         "type": str(config.get("adapter")) if config else None,
         "environment": environment,
         "source_host": source_host or None,
@@ -655,16 +661,32 @@ def _agent_header(
     }
 
 
+def _host_agent_id(source_host: str) -> str:
+    """Synthetic id for a host-derived agent (last-resort identity)."""
+    return "host:%s" % source_host
+
+
 def resolve_agent(agent_id: str, settings: Settings) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, str]]]:
     """Resolve (config, matched run rows, scan errors) for one agent.
 
     ``config=None`` with non-empty rows means a derived agent (from run data);
     ``config=None`` with no rows means the agent does not exist at all.
+    ``host:<hostname>`` ids address the last-resort identity in the
+    attribution chain: legacy runs without ``agent_ref`` grouped by their
+    ``source.json`` host.
     """
     agent_id = validate_agent_id(agent_id)
     config = platform_store.get_agent(agent_id, settings)
-    endpoint_host = _endpoint_host(config.get("endpoint")) if config else ""
     rows, errors = _scan_runs(settings)
+    if agent_id.startswith("host:"):
+        host = agent_id[len("host:") :].lower()
+        if not host:
+            return None, [], errors
+        matched = [row for row in rows if not row.get("agent_id") and row.get("_source_host") == host]
+        if not matched:
+            return None, [], errors
+        return None, matched, errors
+    endpoint_host = _endpoint_host(config.get("endpoint")) if config else ""
     matched = [row for row in rows if _matches_agent(row, agent_id, endpoint_host)]
     if config is None and not matched:
         return None, [], errors
@@ -798,6 +820,28 @@ def list_agents_with_stats(settings: Settings) -> Dict[str, Any]:
                 "derived": True,
                 "source_host": (latest.get("_source_host") or None) if latest else None,
                 "stats": stats,
+            }
+        )
+
+    # Last-resort identity: legacy runs without agent_ref, grouped by source
+    # host. Hosts claimed by a configured agent's endpoint stay with that
+    # agent; the host is shown via source_host, never invented as a name.
+    configured_hosts = {_endpoint_host(config.get("endpoint")) for config in configs}
+    configured_hosts.discard("")
+    by_host: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        host = row.get("_source_host") or ""
+        if row.get("agent_id") or not host or host in configured_hosts or host == "unknown":
+            continue
+        by_host.setdefault(host, []).append(row)
+    for host, host_rows in sorted(by_host.items()):
+        derived.append(
+            {
+                "agent_id": _host_agent_id(host),
+                "name": host,
+                "derived": True,
+                "source_host": host,
+                "stats": _stats_for(host_rows),
             }
         )
     return {"agents": enriched, "derived_agents": derived, "partial": bool(errors), "errors": errors}
