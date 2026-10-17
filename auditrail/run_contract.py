@@ -67,6 +67,7 @@ ERROR_CODES = {
     "agent_stream_error",
     "invalid_agent_response",
     "evaluation_invalid",
+    "cancelled",
     "internal_error",
 }
 

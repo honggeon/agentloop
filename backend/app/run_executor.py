@@ -35,6 +35,7 @@ def submit(
     judge: bool,
     policy,
     judge_runner: Optional[Callable[[Path], None]] = None,
+    cancel_event: Optional[Any] = None,
 ) -> str:
     """Submit one run for background execution; returns the run_id."""
     run_dir = Path(run_dir)
@@ -48,6 +49,7 @@ def submit(
             judge=judge,
             policy=policy,
             judge_runner=judge_runner,
+            cancel_event=cancel_event,
         )
     except Exception as exc:
         # The executor itself refused the task: the run must not sit queued.

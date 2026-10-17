@@ -1,8 +1,10 @@
-"""Phase 0 platform config store: Agents and TestCases as JSON files.
+"""Phase 0/1 platform config store: Agents, TestCases, TestSuites and SuiteJobs.
 
 No database, no queue: ``platform/agents.json`` and ``platform/test_cases.json``
-hold the Agent and unified TestCase configs; ``platform/idempotency.json``
-holds POST /api/runs idempotency keys for this single deployment. All writes
+hold the Agent and unified TestCase configs; ``platform/test_suites.json``
+holds TestSuite configs; ``platform/suite_jobs/<job_id>.json`` holds one
+SuiteJob record per batch launch; ``platform/idempotency.json`` holds
+POST /api/runs idempotency keys for this single deployment. All writes
 are atomic via ``auditrail.trajectory.write_json``. Credentials never enter
 these files — Agent configs reference endpoints only.
 
@@ -19,15 +21,18 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from auditrail import testsuites as suite_mod
 from auditrail.testcases import normalize_test_case
 from auditrail.trajectory import write_json
 
 from backend.app.config import PROJECT_ROOT, Settings, get_settings
 
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 _AGENTS_FILE = "agents.json"
 _TEST_CASES_FILE = "test_cases.json"
+_TEST_SUITES_FILE = "test_suites.json"
+_SUITE_JOBS_DIR = "suite_jobs"
 _IDEMPOTENCY_FILE = "idempotency.json"
 
 
@@ -181,8 +186,121 @@ def _legacy_cases() -> List[Dict[str, Any]]:
     return normalized
 
 
-# -------------------------------------------------------------- idempotency
+# -------------------------------------------------------------- test suites
 
+
+def list_test_suites(settings: Optional[Settings] = None) -> List[Dict[str, Any]]:
+    return _read_list(_platform_dir(settings) / _TEST_SUITES_FILE)
+
+
+def get_test_suite(suite_id: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
+    for suite in list_test_suites(settings):
+        if str(suite.get("suite_id") or "") == suite_id:
+            return suite
+    return None
+
+
+def create_test_suite(payload: Dict[str, Any], settings: Optional[Settings] = None) -> Dict[str, Any]:
+    """Validate and store a new TestSuite. Raises ``ValueError`` on problems."""
+    suite = suite_mod.normalize_test_suite(payload)
+    _validate_suite_case_refs(suite, settings)
+    with _LOCK:
+        suites = list_test_suites(settings)
+        if any(item.get("suite_id") == suite["suite_id"] for item in suites):
+            raise ValueError("test suite %s already exists" % suite["suite_id"])
+        suites.append(suite)
+        _write_list(_platform_dir(settings) / _TEST_SUITES_FILE, suites)
+    return suite
+
+
+def update_test_suite(
+    suite_id: str, payload: Dict[str, Any], settings: Optional[Settings] = None
+) -> Optional[Dict[str, Any]]:
+    """Replace a TestSuite's editable fields; ``None`` when the suite is unknown.
+
+    ``suite_id`` is immutable and ``version`` bumps on every update.
+    """
+    with _LOCK:
+        suites = list_test_suites(settings)
+        existing = next((item for item in suites if item.get("suite_id") == suite_id), None)
+        if existing is None:
+            return None
+        suite = suite_mod.normalize_test_suite({**payload, "suite_id": suite_id}, existing=existing)
+        _validate_suite_case_refs(suite, settings)
+        suites = [suite if item.get("suite_id") == suite_id else item for item in suites]
+        _write_list(_platform_dir(settings) / _TEST_SUITES_FILE, suites)
+    return suite
+
+
+def delete_test_suite(suite_id: str, settings: Optional[Settings] = None) -> bool:
+    with _LOCK:
+        suites = list_test_suites(settings)
+        remaining = [item for item in suites if item.get("suite_id") != suite_id]
+        if len(remaining) == len(suites):
+            return False
+        _write_list(_platform_dir(settings) / _TEST_SUITES_FILE, remaining)
+    return True
+
+
+def _validate_suite_case_refs(suite: Dict[str, Any], settings: Optional[Settings]) -> None:
+    unknown = [case_id for case_id in suite["case_ids"] if get_test_case(case_id, settings) is None]
+    if unknown:
+        raise ValueError("test suite %s references unknown test cases: %s" % (suite["suite_id"], ", ".join(unknown)))
+
+
+# --------------------------------------------------------------- suite jobs
+
+
+def _suite_job_path(job_id: str, settings: Optional[Settings] = None) -> Path:
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        raise ValueError("invalid suite job id")
+    return _platform_dir(settings) / _SUITE_JOBS_DIR / ("%s.json" % job_id)
+
+
+def save_suite_job(record: Dict[str, Any], settings: Optional[Settings] = None) -> Dict[str, Any]:
+    """Create or replace one SuiteJob record atomically."""
+    job_id = str(record.get("job_id") or "")
+    path = _suite_job_path(job_id, settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        suite_mod.write_suite_job(path, record)
+    return record
+
+
+def get_suite_job(job_id: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
+    try:
+        path = _suite_job_path(job_id, settings)
+    except ValueError:
+        return None
+    return suite_mod.read_suite_job(path)
+
+
+def list_suite_jobs(settings: Optional[Settings] = None) -> List[Dict[str, Any]]:
+    jobs_dir = _platform_dir(settings) / _SUITE_JOBS_DIR
+    if not jobs_dir.is_dir():
+        return []
+    jobs = []
+    for path in sorted(jobs_dir.glob("*.json")):
+        record = suite_mod.read_suite_job(path)
+        if record is not None:
+            jobs.append(record)
+    jobs.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return jobs
+
+
+def request_suite_job_cancel(job_id: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
+    """Set ``cancel_requested`` on a queued/running job; ``None`` when unknown."""
+    with _LOCK:
+        record = get_suite_job(job_id, settings)
+        if record is None:
+            return None
+        if suite_mod.is_active_job_status(record.get("status")):
+            record["cancel_requested"] = True
+            save_suite_job(record, settings)
+    return record
+
+
+# -------------------------------------------------------------- idempotency
 
 def lookup_idempotency(key: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
     with _LOCK:

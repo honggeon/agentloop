@@ -408,6 +408,36 @@ failures also write `error.json`. All artifact writes are atomic
 minimum wins) and forces judge `overall_status=failed` — an LLM judge cannot
 override it; dimensions without evidence stay `unknown` with a null score.
 
+## Agent Test Platform (Phase 1): Test Suites and Batch Runs
+
+Phase 1 adds TestSuite CRUD and sequential batch execution on the same
+platform page (sidebar「测试平台」), following the model
+`SuiteJob -> CaseAttempt -> Run`:
+
+- `GET/POST /api/test-suites`, `GET/PUT/DELETE /api/test-suites/{suite_id}` —
+  a TestSuite is `{suite_id, version, title, description, case_ids, enabled,
+  created_at, updated_at}`; `case_ids` defines the execution order, updates
+  bump `version`, and unknown case references are rejected at save time.
+- `POST /api/test-suites/{suite_id}/runs` — `202 Accepted` with
+  `{job_id, status, status_url}`; launches one SuiteJob that runs each case
+  in order against one Agent, producing an independent Run per case (the
+  run's `run.json.suite_ref` links back to the job and attempt).
+- `GET /api/suite-jobs`, `GET /api/suite-jobs/{job_id}` — job status
+  (`queued/running/completed/failed/cancelled`), per-case attempt status
+  (Run lifecycle, including `skipped`), Run links, deterministic evaluation
+  per finished case, and stats counted by final case status.
+- `POST /api/suite-jobs/{job_id}/cancel` — cooperative cancellation: the
+  in-flight case finishes as `cancelled`, cases that have not started are
+  marked `skipped`, and completed Runs keep all artifacts.
+
+A failed case never blocks the rest of the suite. Stats keep `skipped` and
+`unknown` quality separate from passes — the pass-rate denominator only
+includes completed cases. Phase 1 has no automatic retry, no idempotent
+suite-job submission and no cross-process recovery: a queued/running job
+whose executor is gone is flagged `stale` instead of pretending to progress.
+SuiteJob records live in `platform/suite_jobs/<job_id>.json` and are written
+atomically like all other platform files.
+
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.

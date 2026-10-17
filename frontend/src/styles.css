@@ -3572,3 +3572,27 @@ body {
 .platform-run-status[data-status="timed_out"] {
   color: #d35a2a;
 }
+
+/* Phase 1 测试集与批量运行 */
+.platform-panel .suite-case-picker {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line, #d7dde1);
+  border-radius: 6px;
+}
+
+.platform-panel .platform-table tr.selected td {
+  background: rgba(70, 120, 200, 0.08);
+}
+
+.platform-panel .jobs-table tbody tr {
+  cursor: pointer;
+}
+
+.run-status-card[data-status="cancelled"] {
+  border-color: #b08a2a;
+}
+

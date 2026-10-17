@@ -1,8 +1,9 @@
-"""Phase 0 platform routes: Agents, TestCases and single asynchronous Runs.
+"""Phase 0/1 platform routes: Agents, TestCases, TestSuites, Runs and SuiteJobs.
 
 This module only assembles HTTP: validation lives in ``auditrail.netguard`` /
-``auditrail.testcases``, execution in ``auditrail.runner`` (driven by
-``backend.app.run_executor``), and run state in ``auditrail.run_contract``.
+``auditrail.testcases`` / ``auditrail.testsuites``, execution in
+``auditrail.runner`` (driven by ``backend.app.run_executor`` and
+``backend.app.suite_executor``), and run state in ``auditrail.run_contract``.
 Nothing here re-implements collection, audit or judge logic.
 """
 
@@ -16,9 +17,10 @@ from fastapi.responses import JSONResponse
 
 from auditrail import evaluation as evaluation_mod
 from auditrail import run_contract
+from auditrail import testsuites as suite_mod
 from auditrail.netguard import EndpointRejected, validate_endpoint
 from auditrail.runner import create_platform_run
-from backend.app import platform_store, run_executor
+from backend.app import platform_store, run_executor, suite_executor
 from backend.app.config import build_endpoint_policy, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -216,3 +218,225 @@ def _default_judge_runner(run_dir: Path) -> None:
         judge_metadata={**dict(result.metadata), "engine": result.engine},
         judge_engine=result.engine,
     )
+
+
+# -------------------------------------------------------------- test suites
+
+
+@router.get("/test-suites")
+def list_test_suites() -> dict[str, Any]:
+    return {"test_suites": platform_store.list_test_suites(get_settings())}
+
+
+@router.post("/test-suites", status_code=201)
+def create_test_suite(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        suite = platform_store.create_test_suite(payload, get_settings())
+    except ValueError as exc:
+        message = str(exc)
+        code = "suite_exists" if "already exists" in message else "invalid_test_suite"
+        status_code = 409 if code == "suite_exists" else 400
+        raise HTTPException(status_code=status_code, detail={"code": code, "message": message}) from exc
+    return {"test_suite": suite}
+
+
+@router.get("/test-suites/{suite_id}")
+def get_test_suite(suite_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    suite = platform_store.get_test_suite(suite_id, settings)
+    if suite is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "test_suite_not_found", "message": "unknown test suite %s" % suite_id},
+        )
+    cases = []
+    missing = []
+    for case_id in suite.get("case_ids") or []:
+        case = platform_store.get_test_case(case_id, settings)
+        if case is None:
+            missing.append(case_id)
+        else:
+            cases.append(case)
+    return {"test_suite": suite, "test_cases": cases, "missing_case_ids": missing}
+
+
+@router.put("/test-suites/{suite_id}")
+def update_test_suite(suite_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        suite = platform_store.update_test_suite(suite_id, payload, get_settings())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_test_suite", "message": str(exc)},
+        ) from exc
+    if suite is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "test_suite_not_found", "message": "unknown test suite %s" % suite_id},
+        )
+    return {"test_suite": suite}
+
+
+@router.delete("/test-suites/{suite_id}")
+def delete_test_suite(suite_id: str) -> dict[str, Any]:
+    if not platform_store.delete_test_suite(suite_id, get_settings()):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "test_suite_not_found", "message": "unknown test suite %s" % suite_id},
+        )
+    return {"deleted": suite_id}
+
+
+# --------------------------------------------------------------- suite jobs
+
+
+@router.post("/test-suites/{suite_id}/runs")
+def create_suite_job(suite_id: str, payload: dict[str, Any]):
+    """Launch one sequential batch job (SuiteJob -> CaseAttempt -> Run)."""
+    settings = get_settings()
+    suite = platform_store.get_test_suite(suite_id, settings)
+    if suite is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "test_suite_not_found", "message": "unknown test suite %s" % suite_id},
+        )
+    if not suite.get("enabled", True):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "suite_disabled", "message": "test suite %s is disabled" % suite_id},
+        )
+    case_ids = list(suite.get("case_ids") or [])
+    if not case_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "empty_suite", "message": "test suite %s has no cases" % suite_id},
+        )
+    agent_id = str(payload.get("agent_id") or "").strip()
+    if not agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_request", "message": "agent_id is required"},
+        )
+    agent = platform_store.get_agent(agent_id, settings)
+    if agent is None:
+        raise HTTPException(status_code=404, detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id})
+    try:
+        validate_endpoint(agent.get("endpoint"), build_endpoint_policy(settings))
+    except EndpointRejected as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "endpoint_rejected", "message": exc.reason},
+        ) from exc
+
+    judge = bool(payload.get("judge"))
+    snapshots = []
+    for case_id in case_ids:
+        case = platform_store.get_test_case(case_id, settings)
+        snapshots.append(case or {"case_id": case_id, "title": "", "version": None})
+    job_id = suite_mod.new_suite_job_id()
+    record = suite_mod.new_suite_job(job_id, suite=suite, agent=agent, judge=judge, case_snapshots=snapshots)
+    platform_store.save_suite_job(record, settings)
+    suite_executor.submit(
+        job_id,
+        settings=settings,
+        agent=agent,
+        policy=build_endpoint_policy(settings),
+        judge_runner=_default_judge_runner if judge else None,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "status": "queued",
+            "status_url": "/api/suite-jobs/%s" % job_id,
+        },
+    )
+
+
+@router.get("/suite-jobs")
+def list_suite_jobs() -> dict[str, Any]:
+    settings = get_settings()
+    jobs = []
+    for record in platform_store.list_suite_jobs(settings):
+        jobs.append(_job_summary(record))
+    return {"suite_jobs": jobs}
+
+
+@router.get("/suite-jobs/{job_id}")
+def get_suite_job(job_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    record = platform_store.get_suite_job(job_id, settings)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "suite_job_not_found", "message": "unknown suite job %s" % job_id},
+        )
+    return _job_payload(record, settings)
+
+
+@router.post("/suite-jobs/{job_id}/cancel")
+def cancel_suite_job(job_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    record = platform_store.get_suite_job(job_id, settings)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "suite_job_not_found", "message": "unknown suite job %s" % job_id},
+        )
+    if not suite_mod.is_active_job_status(record.get("status")):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "suite_job_not_cancellable", "message": "suite job %s is already %s" % (job_id, record.get("status"))},
+        )
+    record = platform_store.request_suite_job_cancel(job_id, settings)
+    suite_executor.request_cancel(job_id)
+    return _job_payload(record, settings)
+
+
+def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": record.get("job_id"),
+        "status": record.get("status"),
+        "suite_ref": record.get("suite_ref"),
+        "agent_ref": record.get("agent_ref"),
+        "judge": bool(record.get("judge")),
+        "created_at": record.get("created_at"),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "stats": record.get("stats") or suite_mod.compute_job_stats(record),
+        "stale": suite_executor.is_stale(record),
+    }
+
+
+def _job_payload(record: dict[str, Any], settings) -> dict[str, Any]:
+    attempts = []
+    for attempt in record.get("attempts") or []:
+        entry = dict(attempt)
+        run_id = attempt.get("run_id")
+        if run_id:
+            entry["run_status_url"] = "/api/runs/%s/status" % run_id
+            _attach_run_evaluation(entry, str(run_id), settings)
+        attempts.append(entry)
+    payload = _job_summary(record)
+    payload.update(
+        {
+            "status_reason": record.get("status_reason"),
+            "cancel_requested": bool(record.get("cancel_requested")),
+            "attempts": attempts,
+        }
+    )
+    return {"suite_job": payload}
+
+
+def _attach_run_evaluation(entry: dict[str, Any], run_id: str, settings) -> None:
+    """Expose the deterministic quality of a finished case run, never gating."""
+    try:
+        run_dir = resolve_run_path(run_id, settings)
+    except (ValueError, FileNotFoundError):
+        return
+    envelope = evaluation_mod.load_evaluation(run_dir)
+    if envelope is None:
+        return
+    entry["evaluation_status"] = envelope.get("status")
+    final_quality = envelope.get("final_quality") or {}
+    entry["final_quality_status"] = final_quality.get("status")

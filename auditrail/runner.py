@@ -60,6 +60,7 @@ def create_platform_run(
     *,
     agent: Dict[str, Any],
     test_case: Dict[str, Any],
+    suite_ref: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Create the run directory and its initial ``queued`` run.json."""
     run_dir = Path(runs_dir) / run_id
@@ -73,6 +74,8 @@ def create_platform_run(
         },
         test_case_ref={"id": test_case.get("case_id"), "version": test_case.get("version")},
     )
+    if suite_ref:
+        record["suite_ref"] = dict(suite_ref)
     write_run_record(run_dir, record)
     return run_dir
 
@@ -86,12 +89,17 @@ def execute_run(
     policy: Optional[EndpointPolicy] = None,
     client_factory: Optional[Callable[..., AgentClient]] = None,
     judge_runner: Optional[Callable[[Path], None]] = None,
+    cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute one queued run to a terminal lifecycle state.
 
     Returns the final ``run.json`` record. Failures advance the state machine
     to ``failed``/``timed_out`` with ``status_reason`` and, when the run failed
     before complete reports existed, an ``error.json``; they never raise.
+
+    ``cancel_event`` (a ``threading.Event``-like object) enables cooperative
+    cancellation, used by the Phase 1 suite executor: the run checks it between
+    collection steps and finishes as ``cancelled`` instead of writing reports.
     """
     run_dir = Path(run_dir)
     case = normalize_test_case(test_case)
@@ -105,7 +113,8 @@ def execute_run(
                 retryable=False,
             )
         update_run_status(run_dir, "running")
-        _execute_http_case(run_dir, agent, case, policy=policy, client_factory=client_factory)
+        _raise_if_cancelled(cancel_event, phase="collect")
+        _execute_http_case(run_dir, agent, case, policy=policy, client_factory=client_factory, cancel_event=cancel_event)
         envelope = build_evaluation_envelope(run_dir, case)
         written = evaluation_mod.write_evaluation(run_dir, envelope)
         if written.get("status") == "invalid":
@@ -173,6 +182,17 @@ def _fail_run(run_dir: Path, failure: RunFailure) -> None:
     update_run_status(run_dir, failure.status, status_reason="%s: %s" % (failure.code, failure))
 
 
+def _raise_if_cancelled(cancel_event: Optional[Any], *, phase: str) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RunFailure(
+            "cancelled",
+            "cancelled",
+            "run cancelled before completion",
+            phase=phase,
+            retryable=False,
+        )
+
+
 def _execute_http_case(
     run_dir: Path,
     agent: Dict[str, Any],
@@ -180,6 +200,7 @@ def _execute_http_case(
     *,
     policy: Optional[EndpointPolicy],
     client_factory: Optional[Callable[..., AgentClient]],
+    cancel_event: Optional[Any] = None,
 ) -> None:
     endpoint = agent.get("endpoint")
     try:
@@ -212,7 +233,7 @@ def _execute_http_case(
                     phase="validate",
                     retryable=False,
                 )
-            session_id = _chat_flow(client, input_spec, case, deadline)
+            session_id = _chat_flow(client, input_spec, case, deadline, cancel_event=cancel_event)
         else:
             session_id = str(input_spec.get("session_id") or "")
         session_response = client.fetch_session(session_id)
@@ -259,10 +280,18 @@ def _execute_http_case(
             phase="collect",
             retryable=True,
         )
+    _raise_if_cancelled(cancel_event, phase="collect")
     _write_run_outputs(run_dir, session_response, source=_source_meta(endpoint, user_id))
 
 
-def _chat_flow(client: AgentClient, input_spec: Dict[str, Any], case: Dict[str, Any], deadline: float) -> str:
+def _chat_flow(
+    client: AgentClient,
+    input_spec: Dict[str, Any],
+    case: Dict[str, Any],
+    deadline: float,
+    *,
+    cancel_event: Optional[Any] = None,
+) -> str:
     message = str(input_spec.get("message") or "")
     created = client.create_session(title="auditrail: %s" % case.get("title", case["case_id"]))
     session = created.get("session") or {}
@@ -286,6 +315,7 @@ def _chat_flow(client: AgentClient, input_spec: Dict[str, Any], case: Dict[str, 
             retryable=True,
         )
     for event_name, payload in client.stream_events(stream_id):
+        _raise_if_cancelled(cancel_event, phase="collect")
         if time.monotonic() > deadline:
             raise RunFailure(
                 "timed_out", "agent_timeout", "chat stream exceeded the case timeout", phase="collect", retryable=True

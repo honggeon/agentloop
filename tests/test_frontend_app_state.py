@@ -414,3 +414,50 @@ def test_run_view_shows_platform_run_status():
     # 无证据维度 score 允许 null，不显示 0
     assert "score: number | null" in api_source
     assert 'row.score ?? "—"' in source
+
+
+def test_platform_view_exposes_test_suites_and_suite_jobs():
+    source = PLATFORM_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    # api.ts 集中定义 Phase 1 契约：TestSuite CRUD + SuiteJob 批量运行
+    assert "export interface TestSuite" in api_source
+    assert "export interface SuiteJobAttempt" in api_source
+    assert "export interface SuiteJobStats" in api_source
+    assert "export interface SuiteJob" in api_source
+    assert "export interface CreateSuiteJobResult" in api_source
+    assert "export type SuiteJobStatus" in api_source
+    assert "fetchTestSuites" in api_source
+    assert "createTestSuite" in api_source
+    assert "fetchTestSuite" in api_source
+    assert "updateTestSuite" in api_source
+    assert "deleteTestSuite" in api_source
+    assert "launchSuiteJob" in api_source
+    assert "fetchSuiteJobs" in api_source
+    assert "fetchSuiteJob" in api_source
+    assert "cancelSuiteJob" in api_source
+    assert "/api/test-suites" in api_source
+    assert "/api/suite-jobs" in api_source
+    assert "/cancel" in api_source
+
+    # 测试集 CRUD 面板
+    assert "Test Suites" in source
+    assert "保存测试集" in source
+    assert "更新测试集" in source
+    assert "toggleSuiteCase" in source
+    assert "editSuite" in source
+    assert "removeSuite" in source
+
+    # 批量运行面板：顺序执行、单 case 失败不阻断、取消与 skipped 展示
+    assert "批量运行" in source
+    assert "发起批量运行" in source
+    assert "取消批量运行" in source
+    assert "SUITE_JOB_STATUS_LABELS" in source
+    assert "activeJobAttempts" in source
+    assert "launchSuite" in source
+    assert "cancelActiveJob" in source
+    assert "已跳过" in source
+    assert "未评估" in source
+    assert "cancel_requested" in source
+    assert "stale" in source
+    assert "打开运行详情" in source

@@ -898,6 +898,120 @@ export function fetchRunStatus(runId: string): Promise<RunStatusPayload> {
   return apiGet<RunStatusPayload>(`/api/runs/${encodeURIComponent(runId)}/status`);
 }
 
+// --- Phase 1 平台切片：TestSuite CRUD 与 SuiteJob 顺序批量运行 --------------------
+
+// 统一 TestSuite：case_ids 的顺序即批量执行顺序；enabled=false 的测试集不能发起运行。
+export interface TestSuite {
+  suite_id: string;
+  version: number;
+  title: string;
+  description: string;
+  case_ids: string[];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// SuiteJob 生命周期与 Run 生命周期严格不同：没有 timed_out / skipped。
+export type SuiteJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+// CaseAttempt 复用 Run 生命周期状态；skipped 表示因取消而未开始。
+export interface SuiteJobAttempt {
+  attempt_id: string;
+  order: number;
+  case_id: string;
+  case_title: string;
+  case_version?: number | null;
+  status: PlatformRunStatus | string;
+  run_id?: string | null;
+  status_reason?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  run_status_url?: string;
+  evaluation_status?: string;
+  final_quality_status?: string;
+}
+
+// 按最终 case 状态计数；skipped/queued 永远不算 pass，通过率分母只含 completed。
+export interface SuiteJobStats {
+  total: number;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  timed_out: number;
+  cancelled: number;
+  skipped: number;
+}
+
+export interface SuiteJob {
+  job_id: string;
+  status: SuiteJobStatus | string;
+  status_reason?: string | null;
+  cancel_requested?: boolean;
+  judge: boolean;
+  suite_ref?: { id?: string; version?: number; title?: string } | null;
+  agent_ref?: { id?: string; version?: string; config_hash?: string } | null;
+  attempts?: SuiteJobAttempt[];
+  created_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  stats: SuiteJobStats;
+  stale: boolean;
+}
+
+export interface CreateSuiteJobResult {
+  job_id: string;
+  status: SuiteJobStatus | string;
+  status_url: string;
+}
+
+export function fetchTestSuites(): Promise<{ test_suites: TestSuite[] }> {
+  return apiGet<{ test_suites: TestSuite[] }>("/api/test-suites");
+}
+
+export function createTestSuite(payload: Partial<TestSuite>): Promise<{ test_suite: TestSuite }> {
+  return apiPostJson<{ test_suite: TestSuite }>("/api/test-suites", payload);
+}
+
+export function fetchTestSuite(
+  suiteId: string
+): Promise<{ test_suite: TestSuite; test_cases: TestCase[]; missing_case_ids: string[] }> {
+  return apiGet<{ test_suite: TestSuite; test_cases: TestCase[]; missing_case_ids: string[] }>(
+    `/api/test-suites/${encodeURIComponent(suiteId)}`
+  );
+}
+
+export function updateTestSuite(suiteId: string, payload: Partial<TestSuite>): Promise<{ test_suite: TestSuite }> {
+  return apiPutJson<{ test_suite: TestSuite }>(`/api/test-suites/${encodeURIComponent(suiteId)}`, payload);
+}
+
+export function deleteTestSuite(suiteId: string): Promise<{ deleted: string }> {
+  return apiDelete<{ deleted: string }>(`/api/test-suites/${encodeURIComponent(suiteId)}`);
+}
+
+// 发起一个 SuiteJob：后端按 case_ids 顺序逐个执行，单 case 失败不阻断后续 case。
+export function launchSuiteJob(
+  suiteId: string,
+  payload: { agent_id: string; judge?: boolean }
+): Promise<CreateSuiteJobResult> {
+  return apiPostJson<CreateSuiteJobResult>(`/api/test-suites/${encodeURIComponent(suiteId)}/runs`, payload);
+}
+
+export function fetchSuiteJobs(): Promise<{ suite_jobs: SuiteJob[] }> {
+  return apiGet<{ suite_jobs: SuiteJob[] }>("/api/suite-jobs");
+}
+
+export function fetchSuiteJob(jobId: string): Promise<{ suite_job: SuiteJob }> {
+  return apiGet<{ suite_job: SuiteJob }>(`/api/suite-jobs/${encodeURIComponent(jobId)}`);
+}
+
+// 取消是协作式的：进行中的 case 收为 cancelled，未开始的 case 标记 skipped，
+// 已完成的 Run 与全部证据保留。
+export function cancelSuiteJob(jobId: string): Promise<{ suite_job: SuiteJob }> {
+  return apiPost<{ suite_job: SuiteJob }>(`/api/suite-jobs/${encodeURIComponent(jobId)}/cancel`);
+}
+
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
@@ -957,6 +1071,18 @@ export async function apiPost<T>(path: string): Promise<T> {
 
 export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
   return apiPostJsonWithHeaders<T>(path, body, {});
+}
+
+export async function apiPutJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json() as Promise<T>;
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {

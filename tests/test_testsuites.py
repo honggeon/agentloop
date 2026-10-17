@@ -1,0 +1,147 @@
+"""Phase 1 core: TestSuite normalization and the SuiteJob/CaseAttempt contract."""
+
+import pytest
+
+from auditrail import testsuites as suite_mod
+
+
+def _suite_payload(**overrides):
+    payload = {
+        "suite_id": "suite-001",
+        "version": 1,
+        "title": "工具恢复回归集",
+        "description": "回归",
+        "case_ids": ["case-001", "case-002"],
+        "enabled": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _agent():
+    return {"agent_id": "agent-1", "version": "git:abc", "config_hash": "deadbeef"}
+
+
+def _snapshots():
+    return [
+        {"case_id": "case-001", "title": "用例一", "version": 1},
+        {"case_id": "case-002", "title": "用例二", "version": 2},
+    ]
+
+
+# ------------------------------------------------------------- suite config
+
+
+def test_normalize_test_suite_happy_path():
+    suite = suite_mod.normalize_test_suite(_suite_payload())
+    assert suite["suite_id"] == "suite-001"
+    assert suite["version"] == 1
+    assert suite["case_ids"] == ["case-001", "case-002"]
+    assert suite["enabled"] is True
+    assert suite["created_at"] and suite["updated_at"]
+
+
+def test_normalize_test_suite_rejects_bad_payloads():
+    for payload in (
+        {},
+        {"suite_id": "x"},
+        _suite_payload(suite_id="../escape"),
+        _suite_payload(suite_id="a/b"),
+        _suite_payload(case_ids="case-001"),
+        _suite_payload(case_ids=["ok", ""]),
+        _suite_payload(enabled="yes"),
+        _suite_payload(version=0),
+    ):
+        with pytest.raises(ValueError):
+            suite_mod.normalize_test_suite(payload)
+
+
+def test_normalize_test_suite_update_bumps_version_and_keeps_created_at():
+    existing = suite_mod.normalize_test_suite(_suite_payload())
+    updated = suite_mod.normalize_test_suite(
+        _suite_payload(title="新标题", version=None), existing=existing
+    )
+    assert updated["version"] == 2
+    assert updated["title"] == "新标题"
+    assert updated["created_at"] == existing["created_at"]
+
+
+# --------------------------------------------------------------- suite jobs
+
+
+def test_new_suite_job_creates_queued_attempts_in_order():
+    suite = suite_mod.normalize_test_suite(_suite_payload())
+    record = suite_mod.new_suite_job(
+        "suitejob-1", suite=suite, agent=_agent(), judge=True, case_snapshots=_snapshots()
+    )
+    assert record["status"] == "queued"
+    assert record["judge"] is True
+    assert record["suite_ref"]["id"] == "suite-001"
+    assert record["agent_ref"]["id"] == "agent-1"
+    assert [a["case_id"] for a in record["attempts"]] == ["case-001", "case-002"]
+    assert [a["order"] for a in record["attempts"]] == [0, 1]
+    assert all(a["status"] == "queued" and a["run_id"] is None for a in record["attempts"])
+    assert len({a["attempt_id"] for a in record["attempts"]}) == 2
+
+
+def test_job_status_enums_are_distinct_and_validated():
+    assert set(suite_mod.SUITE_JOB_STATUSES) == {"queued", "running", "completed", "failed", "cancelled"}
+    with pytest.raises(ValueError):
+        suite_mod.validate_job_status("skipped")  # skipped is attempt-only
+    with pytest.raises(ValueError):
+        suite_mod.validate_attempt_status("nope")
+    assert suite_mod.validate_attempt_status("skipped") == "skipped"
+
+
+def test_advance_attempt_and_stats(tmp_path):
+    suite = suite_mod.normalize_test_suite(_suite_payload())
+    record = suite_mod.new_suite_job(
+        "suitejob-1", suite=suite, agent=_agent(), judge=False, case_snapshots=_snapshots()
+    )
+    suite_mod.mark_job_running(record)
+    first, second = record["attempts"]
+    suite_mod.advance_attempt(record, first["attempt_id"], "running", run_id="run-1")
+    suite_mod.advance_attempt(record, first["attempt_id"], "failed", status_reason="agent_unreachable: x")
+    suite_mod.advance_attempt(record, second["attempt_id"], "completed", run_id="run-2")
+    suite_mod.finalize_job(record, "completed")
+
+    path = tmp_path / "job.json"
+    suite_mod.write_suite_job(path, record)
+    loaded = suite_mod.read_suite_job(path)
+    assert loaded["status"] == "completed"
+    assert loaded["finished_at"]
+    assert loaded["attempts"][0]["status"] == "failed"
+    assert loaded["attempts"][0]["run_id"] == "run-1"
+    assert loaded["attempts"][0]["status_reason"] == "agent_unreachable: x"
+    assert loaded["attempts"][1]["status"] == "completed"
+    stats = loaded["stats"]
+    assert stats["total"] == 2
+    assert stats["completed"] == 1
+    assert stats["failed"] == 1
+    assert stats["skipped"] == 0
+
+
+def test_skip_pending_attempts_only_marks_queued():
+    suite = suite_mod.normalize_test_suite(_suite_payload())
+    record = suite_mod.new_suite_job(
+        "suitejob-1", suite=suite, agent=_agent(), judge=False, case_snapshots=_snapshots()
+    )
+    first = record["attempts"][0]
+    suite_mod.advance_attempt(record, first["attempt_id"], "completed", run_id="run-1")
+    skipped = suite_mod.skip_pending_attempts(record, reason="suite job cancelled")
+    assert skipped == 1
+    assert record["attempts"][0]["status"] == "completed"  # finished evidence preserved
+    assert record["attempts"][1]["status"] == "skipped"
+    assert record["attempts"][1]["run_id"] is None
+    stats = suite_mod.compute_job_stats(record)
+    assert stats["completed"] == 1 and stats["skipped"] == 1
+
+
+def test_read_suite_job_rejects_malformed(tmp_path):
+    assert suite_mod.read_suite_job(tmp_path / "missing.json") is None
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert suite_mod.read_suite_job(bad) is None
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text('{"status": "bogus", "attempts": []}', encoding="utf-8")
+    assert suite_mod.read_suite_job(wrong) is None

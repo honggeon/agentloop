@@ -385,3 +385,38 @@ def test_render_and_judge_preserve_run_json(tmp_path):
     write_judge_report(str(run_dir), proposal)
     record = run_contract.read_run_record(run_dir)
     assert record["run_id"] == run_dir.name
+
+
+def test_execute_run_cancel_event_finishes_as_cancelled(tmp_path, monkeypatch):
+    import threading
+
+    _reset_fake()
+    monkeypatch.setattr("auditrail.runner.AgentClient", FakeClient)
+    run_dir, agent, case = _new_run(tmp_path)
+
+    # cancelled before collection starts: no reports, diagnosable error.json
+    cancel_event = threading.Event()
+    cancel_event.set()
+    record = execute_run(run_dir, agent=agent, test_case=case, policy=_policy(), cancel_event=cancel_event)
+    assert record["status"] == "cancelled"
+    assert "cancelled" in record["status_reason"]
+    assert not (run_dir / "summary.json").exists()
+    error = run_contract.read_error(run_dir)
+    assert error["error_type"] == "cancelled"
+    assert error["retryable"] is False
+
+
+def test_create_platform_run_records_suite_ref(tmp_path):
+    run_dir = create_platform_run(
+        tmp_path,
+        "run-suite-1",
+        agent=_agent(),
+        test_case=_case(),
+        suite_ref={"id": "suite-001", "version": 1, "job_id": "suitejob-1", "attempt_id": "attempt-1-x"},
+    )
+    record = run_contract.read_run_record(run_dir)
+    assert record["suite_ref"]["id"] == "suite-001"
+    assert record["suite_ref"]["job_id"] == "suitejob-1"
+    # runs without a suite keep the null reference
+    plain = create_platform_run(tmp_path, "run-suite-2", agent=_agent(), test_case=_case())
+    assert run_contract.read_run_record(plain)["suite_ref"] is None
