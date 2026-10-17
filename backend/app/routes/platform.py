@@ -20,7 +20,7 @@ from auditrail import run_contract
 from auditrail import testsuites as suite_mod
 from auditrail.netguard import EndpointRejected, validate_endpoint
 from auditrail.runner import create_platform_run
-from backend.app import platform_store, run_executor, suite_executor
+from backend.app import agent_overview, platform_store, run_executor, suite_executor
 from backend.app.config import build_endpoint_policy, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -31,7 +31,68 @@ router = APIRouter(prefix="/api")
 
 @router.get("/agents")
 def list_agents() -> dict[str, Any]:
-    return {"agents": platform_store.list_agents(get_settings())}
+    """Agent configs with additive run stats, plus run-derived agents.
+
+    The original config-list semantics are preserved: ``agents`` keeps every
+    existing field and only gains ``derived``/``stats``. Agents visible only
+    through run data appear under ``derived_agents`` and are never persisted.
+    """
+    return agent_overview.list_agents_with_stats(get_settings())
+
+
+@router.get("/agents/{agent_id}")
+def get_agent(agent_id: str) -> dict[str, Any]:
+    try:
+        detail = agent_overview.get_agent_detail(agent_id, get_settings())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_agent_id", "message": str(exc)}) from exc
+    if detail is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
+        )
+    return detail
+
+
+@router.get("/agents/{agent_id}/overview")
+def get_agent_overview(agent_id: str, range: str = "7d") -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        range_key = agent_overview.validate_range(range)
+        overview = agent_overview.get_agent_overview(agent_id, range_key, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": str(exc)}) from exc
+    if overview is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
+        )
+    return overview
+
+
+@router.get("/agents/{agent_id}/runs")
+def get_agent_runs(
+    agent_id: str,
+    range: str = "7d",
+    status: str = "all",
+    limit: int = agent_overview.DEFAULT_RUN_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        range_key = agent_overview.validate_range(range)
+        status_filter = agent_overview.validate_status_filter(status)
+        result = agent_overview.list_agent_runs(
+            agent_id, range_key, status_filter, settings, limit=limit, offset=offset
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_request", "message": str(exc)}) from exc
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id},
+        )
+    return result
 
 
 @router.post("/agents", status_code=201)
