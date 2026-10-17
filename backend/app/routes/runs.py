@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Response
 
 from auditrail.cli import _run_dir, _source_meta, _write_run_outputs
+from auditrail import evaluation as evaluation_mod
+from auditrail import run_contract
 from auditrail.agents.schemas import render_dimensions_markdown, render_reliability_markdown
 from auditrail.agents.tools import build_chart_data, list_runs, load_audit, load_run_summary
 from auditrail.client import AgentClient
@@ -88,7 +90,12 @@ def import_remote_session(payload: dict[str, Any]) -> dict[str, Any]:
         run_dir = _run_dir(settings.runs_dir, session_id)
         _write_run_outputs(run_dir, session_response, source=_source_meta(base_url, user_id))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Never leak raw exception text (it may embed URLs or credentials);
+        # the 502 semantics are preserved with a safe, structured detail.
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "agent_import_failed", "message": "failed to import session from the agent: %s" % type(exc).__name__},
+        ) from exc
 
     return {
         "run": _enrich_run_item(_run_item(run_dir)),
@@ -106,7 +113,14 @@ def delete_run(run_id: str) -> dict[str, Any]:
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     path = _run_path_or_404(run_id)
-    return {"run_id": run_id, "summary": load_run_summary(str(path))}
+    state = run_contract.load_run_state(path)
+    evaluation = evaluation_mod.load_evaluation(path)
+    return {
+        "run_id": run_id,
+        "summary": load_run_summary(str(path)),
+        "run": run_contract.safe_status_subset(state),
+        "evaluation": evaluation,
+    }
 
 
 @router.get("/runs/{run_id}/trajectory")
@@ -795,11 +809,16 @@ def _run_item(path: Path) -> dict[str, Any]:
 def _enrich_run_item(item: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(item.get("path") or ""))
     source = _source_from_run(path)
+    state = run_contract.load_run_state(path) if path.is_dir() else {}
     return {
         **item,
         "server_host": source.get("server_host") or "",
         "source_base_url": source.get("source_base_url") or "",
         "server_netloc": source.get("server_netloc") or "",
+        # Run Contract v1 lifecycle status; legacy runs are inferred as
+        # completed from their report files (never rewritten on read).
+        "run_status": state.get("status"),
+        "status_reason": state.get("status_reason"),
     }
 
 

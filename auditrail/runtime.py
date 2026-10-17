@@ -229,9 +229,10 @@ def build_runtime_trace(
 
 
 def save_expectations(run_dir: Path, acceptance_criteria: str) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
+    from .trajectory import write_json
+
     payload = {"acceptance_criteria": str(acceptance_criteria or "").strip()}
-    (run_dir / "expectations.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(run_dir / "expectations.json", payload)
 
 
 def _span(

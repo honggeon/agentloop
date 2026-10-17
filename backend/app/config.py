@@ -62,6 +62,15 @@ class Settings:
     #: top of ``dsh_runtime_enabled``. Both must be true for any ACP route to be
     #: reachable, so enabling the master switch alone never exposes ACP.
     dsh_acp_enabled: bool = False
+    #: Phase 0 platform slice: Agent/TestCase config store (JSON files, no DB).
+    platform_dir: Path = PROJECT_ROOT / "platform"
+    #: SSRF policy for Agent endpoints. Hosts in ``agent_allowed_hosts`` are
+    #: explicitly trusted (still scheme/port checked); otherwise private,
+    #: loopback, link-local and metadata addresses are rejected unless
+    #: ``agent_allow_private_endpoints`` is enabled.
+    agent_allowed_hosts: tuple[str, ...] = ()
+    agent_allow_private_endpoints: bool = False
+    agent_allowed_ports: tuple[int, ...] = (80, 443)
 
 
 @lru_cache(maxsize=1)
@@ -92,6 +101,10 @@ def get_settings() -> Settings:
         dsh_judge_profile=os.getenv("DSH_JUDGE_PROFILE", "").strip(),
         dsh_judge_workspace=_optional_path(os.getenv("DSH_JUDGE_WORKSPACE")),
         dsh_acp_enabled=_env_bool("DSH_ACP_ENABLED", False),
+        platform_dir=Path(os.getenv("AUDITRAIL_PLATFORM_DIR", str(PROJECT_ROOT / "platform"))).expanduser(),
+        agent_allowed_hosts=_csv_values(os.getenv("AGENT_ALLOWED_HOSTS", "")),
+        agent_allow_private_endpoints=_env_bool("AGENT_ALLOW_PRIVATE_ENDPOINTS", False),
+        agent_allowed_ports=_port_values(os.getenv("AGENT_ALLOWED_PORTS", "80,443")),
     )
 
 
@@ -150,6 +163,16 @@ def _csv_values(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _port_values(value: str) -> tuple[int, ...]:
+    ports = []
+    for item in _csv_values(value):
+        port = int(item)
+        if not (1 <= port <= 65535):
+            raise ValueError("AGENT_ALLOWED_PORTS entries must be 1-65535")
+        ports.append(port)
+    return tuple(sorted(set(ports)))
+
+
 def _optional_path(value: str | None) -> Path | None:
     text = str(value or "").strip()
     return Path(text).expanduser() if text else None
@@ -172,6 +195,18 @@ def _positive_int(name: str, default: int) -> int:
     if value <= 0:
         raise ValueError("%s must be positive" % name)
     return value
+
+
+def build_endpoint_policy(settings: Settings | None = None) -> EndpointPolicy:
+    """Build the SSRF endpoint policy from server-owned settings."""
+    from auditrail.netguard import EndpointPolicy
+
+    current = settings or get_settings()
+    return EndpointPolicy(
+        allowed_hosts=tuple(host.lower() for host in current.agent_allowed_hosts),
+        allow_private=current.agent_allow_private_endpoints,
+        allowed_ports=current.agent_allowed_ports,
+    )
 
 
 def resolve_run_path(run_id: str, settings: Settings | None = None) -> Path:

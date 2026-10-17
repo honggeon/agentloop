@@ -8,6 +8,7 @@ VITE_CONFIG = Path("frontend/vite.config.ts")
 BATCH_VIEW = Path("frontend/src/views/BatchView.vue")
 RUN_VIEW = Path("frontend/src/views/RunView.vue")
 LIVE_VIEW = Path("frontend/src/views/LiveEvalView.vue")
+PLATFORM_VIEW = Path("frontend/src/views/PlatformView.vue")
 
 
 def test_batch_overview_is_home_route():
@@ -350,3 +351,66 @@ def test_backend_down_shows_launcher_prompt():
     assert "/__launcher/start" in api_source
     assert "/__launcher/start" in vite_source
     assert "./start.sh" in vite_source
+
+
+def test_platform_view_route_and_sidebar_entry_exist():
+    router_source = ROUTER.read_text(encoding="utf-8")
+    app_source = APP_VUE.read_text(encoding="utf-8")
+
+    assert PLATFORM_VIEW.exists()
+    assert 'path: "/platform"' in router_source
+    assert 'name: "platform"' in router_source
+    assert "PlatformView" in router_source
+    assert "测试平台" in app_source
+    assert 'to="/platform"' in app_source
+
+
+def test_platform_view_uses_centralized_api_contracts():
+    source = PLATFORM_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    # api.ts 类型与请求函数集中定义
+    assert "export interface AgentConfig" in api_source
+    assert "export interface TestCase" in api_source
+    assert "export interface RunStatusPayload" in api_source
+    assert "export interface CreateRunResult" in api_source
+    assert "export type PlatformRunStatus" in api_source
+    assert "fetchAgents" in api_source
+    assert "createAgent" in api_source
+    assert "fetchTestCases" in api_source
+    assert "createTestCase" in api_source
+    assert "fetchTestCase" in api_source
+    assert "createPlatformRun" in api_source
+    assert "fetchRunStatus" in api_source
+    assert "/api/agents" in api_source
+    assert "/api/test-cases" in api_source
+    assert '"/api/runs"' in api_source
+    assert "/status" in api_source
+    assert "Idempotency-Key" in api_source
+
+    # 页面关键文案与元素
+    assert "Agents" in source
+    assert "Test Cases" in source
+    assert "发起运行" in source
+    assert "发起单次运行" in source
+    assert "打开运行详情" in source
+    assert "排队中" in source
+    assert "运行中" in source
+    assert "超时" in source
+    assert "stale" in source
+    assert "executeRun" not in source  # 视图不直接执行，只调 API
+
+
+def test_run_view_shows_platform_run_status():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "platform-run-status" in source
+    assert "runState" in source
+    assert "runStatusLabel" in source
+    assert "PLATFORM_RUN_STATUS_LABELS" in source
+    assert "legacy_inferred" in source
+    assert "RunStatusPayload" in api_source
+    # 无证据维度 score 允许 null，不显示 0
+    assert "score: number | null" in api_source
+    assert 'row.score ?? "—"' in source

@@ -488,7 +488,7 @@ def _normalize_dimension(value: object) -> Dict[str, Any]:
     for row in evidence:
         normalized_evidence.extend(_normalize_evidence(row))
     return {
-        "score": _score(item.get("score", 0)),
+        "score": _score(item.get("score")),
         "status": _dimension_status(item.get("status")),
         "summary": str(item.get("summary") or ""),
         "evidence": normalized_evidence,
@@ -628,7 +628,10 @@ _CHOICE_SYNONYMS = {
 }
 
 
-def _score(value: object) -> int:
+def _score(value: object) -> int | None:
+    """Normalize a 0-100 score; ``None`` stays ``None`` (never fabricate a 0)."""
+    if value is None:
+        return None
     return max(0, min(100, int(value)))
 
 

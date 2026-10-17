@@ -2923,6 +2923,139 @@ body {
   }
 }
 
+/* --- 运行详情页：首屏诊断层级 --- */
+.run-page .page-hero {
+  align-items: flex-start;
+  gap: 28px;
+}
+
+.run-page .hero-copy {
+  min-width: 0;
+  max-width: min(620px, 48%);
+}
+
+.run-kicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.run-kicker .eyebrow {
+  margin: 0;
+}
+
+.run-title {
+  margin-bottom: 0;
+}
+
+.run-id {
+  max-width: 100%;
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.run-page .lede {
+  margin-top: 7px;
+}
+
+.run-page .hero-actions {
+  align-items: stretch;
+  max-width: 760px;
+  gap: 8px;
+}
+
+.hero-action-group,
+.judge-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hero-action-group {
+  padding-right: 8px;
+  border-right: 1px solid var(--line);
+}
+
+.judge-action-group {
+  padding-left: 0;
+}
+
+.judge-action-group .primary {
+  min-width: 156px;
+}
+
+.run-page .judge-engine-picker {
+  min-height: 34px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.run-page .runtime-health-dashboard {
+  border-color: #cbd9e5;
+}
+
+.run-page .runtime-health-dashboard .panel-head {
+  background: linear-gradient(90deg, #f8fbfd, #fff);
+}
+
+.run-page .runtime-health-dashboard .runtime-summary-cell:first-child {
+  background: #fff8f5;
+  box-shadow: inset 3px 0 0 var(--ember), inset 0 0 0 1px #f0ded8;
+}
+
+.run-page .runtime-health-dashboard .runtime-summary-cell:first-child strong[data-status="failed"] {
+  color: var(--ember);
+}
+
+.run-page .llm-dashboard {
+  background: #fcfdff;
+}
+
+.run-page .llm-observability-grid {
+  margin-top: 18px;
+}
+
+@media (max-width: 1180px) {
+  .run-page .hero-copy {
+    max-width: 100%;
+  }
+
+  .run-page .page-hero {
+    flex-direction: column;
+  }
+
+  .run-page .hero-actions {
+    max-width: none;
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 960px) {
+  .run-page .hero-action-group {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .run-page .judge-action-group {
+    width: 100%;
+  }
+
+  .run-page .judge-engine-picker,
+  .run-page .judge-action-group .primary {
+    flex: 1 1 220px;
+  }
+}
+
 .launcher-overlay {
   position: fixed;
   inset: 0;
@@ -3365,4 +3498,77 @@ body {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+/* Phase 0 测试平台页 */
+.platform-panel .platform-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin-bottom: 12px;
+}
+
+.platform-panel .platform-table th,
+.platform-panel .platform-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line, #e3e7ea);
+}
+
+.platform-panel .platform-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.platform-panel .platform-form input,
+.platform-panel .platform-form select {
+  padding: 6px 10px;
+  border: 1px solid var(--line, #d7dde1);
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+.platform-panel .hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.platform-panel .legacy-cases {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.platform-panel .judge-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.82rem;
+}
+
+.run-status-card {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #d7dde1);
+  border-radius: 8px;
+  font-size: 0.84rem;
+}
+
+.run-status-card[data-status="failed"],
+.run-status-card[data-status="timed_out"] {
+  border-color: #d35a2a;
+}
+
+.platform-run-status {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.platform-run-status[data-status="failed"],
+.platform-run-status[data-status="timed_out"] {
+  color: #d35a2a;
 }

@@ -36,3 +36,6 @@ npm-debug.log*
 auditrail.egg-info/
 .deepeval/
 .superpowers/
+
+# Platform runtime state (agents/test-cases/idempotency store)
+platform/

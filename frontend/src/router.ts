@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 import BatchView from "./views/BatchView.vue";
 import LiveEvalView from "./views/LiveEvalView.vue";
+import PlatformView from "./views/PlatformView.vue";
 import RunView from "./views/RunView.vue";
 import TrajectoryView from "./views/TrajectoryView.vue";
 
@@ -30,6 +31,12 @@ const router = createRouter({
       name: "live",
       component: LiveEvalView,
       meta: { title: "运行时评测" }
+    },
+    {
+      path: "/platform",
+      name: "platform",
+      component: PlatformView,
+      meta: { title: "测试平台" }
     },
     {
       path: "/:pathMatch(.*)*",

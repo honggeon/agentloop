@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -63,16 +65,36 @@ def normalize_messages(messages: Iterable[Dict]) -> List[Dict]:
 
 
 def write_json(path: Path, payload: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def write_jsonl(path: Path, rows: Iterable[Dict]) -> None:
+    lines = [json.dumps(row, ensure_ascii=False, default=str) for row in rows]
+    write_text(path, "".join(line + "\n" for line in lines))
+
+
+def write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically: same-dir temp file + fsync + os.replace.
+
+    This is the single write entry for run artifacts (JSON, JSONL and
+    Markdown): a reader only ever observes the previous complete file or the
+    new complete file, never a truncated one, and an interrupted process
+    leaves at most a ``.<name>.*.tmp`` staging file that readers and the
+    artifact manifest ignore.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, default=str))
-            handle.write("\n")
+    staging = path.parent / (".%s.%d.%d.tmp" % (path.name, os.getpid(), int(time.time() * 1e6)))
+    try:
+        with open(staging, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(staging), str(path))
+    finally:
+        try:
+            staging.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def session_summary(session_response: Dict) -> Dict:

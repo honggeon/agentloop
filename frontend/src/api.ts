@@ -12,6 +12,9 @@ export interface RunItem {
   server_host?: string;
   source_base_url?: string;
   server_netloc?: string;
+  // Run Contract v1 生命周期状态；旧 run 由后端按报告文件推断为 completed。
+  run_status?: string | null;
+  status_reason?: string | null;
 }
 
 export interface JudgeEvidence {
@@ -33,7 +36,8 @@ export interface Finding {
 }
 
 export interface JudgeDimension {
-  score: number;
+  // Phase 0 起允许 null：无证据维度不伪造 0 分，界面显示「未评估」。
+  score: number | null;
   status: string;
   summary: string;
   evidence: JudgeEvidence[];
@@ -779,6 +783,134 @@ export async function apiGet<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// --- Phase 0 平台切片：Agent / TestCase / 单次异步 Run --------------------------
+
+// Agent 配置只保存 endpoint 与能力声明；凭据永远通过环境变量传递，不入库。
+export interface AgentConfig {
+  agent_id: string;
+  name: string;
+  version: string;
+  adapter: string;
+  endpoint: string;
+  capabilities: string[];
+  metadata: Record<string, unknown>;
+  config_hash?: string;
+}
+
+export interface TestCaseExpectation {
+  id: string;
+  type: string;
+  required?: boolean;
+  path?: string;
+  [key: string]: unknown;
+}
+
+// 统一 TestCase：adapter=http_session 由平台执行；adapter=command 是
+// auditrail.cases 旧格式的兼容视图（legacy=true），只能在 CLI 执行。
+export interface TestCase {
+  case_id: string;
+  version: number;
+  title: string;
+  adapter: string;
+  input: Record<string, unknown>;
+  fixtures: Array<{ path: string; content?: unknown }>;
+  expectations: TestCaseExpectation[];
+  timeout_seconds: number;
+  adapter_config?: Record<string, unknown>;
+  legacy?: boolean;
+  xfail?: boolean;
+  defect?: string;
+}
+
+// Run 生命周期枚举与 Judge overall（success/partial/failed/unknown）严格不同。
+export type PlatformRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "skipped";
+
+export interface RunErrorInfo {
+  phase: string;
+  error_type: string;
+  retryable: boolean;
+  safe_message: string;
+  external_status?: number | null;
+  timestamp?: string;
+}
+
+export interface RunStatusPayload {
+  run_id: string;
+  status: PlatformRunStatus | string;
+  status_reason?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  agent_ref?: { id?: string; version?: string; config_hash?: string } | null;
+  test_case_ref?: { id?: string; version?: number } | null;
+  artifact_manifest: string[];
+  legacy_inferred: boolean;
+  stale: boolean;
+  error?: RunErrorInfo;
+  evaluation_status?: string;
+  evaluation_error?: string;
+}
+
+export interface CreateRunResult {
+  run_id: string;
+  status: PlatformRunStatus | string;
+  status_url: string;
+}
+
+export function fetchAgents(): Promise<{ agents: AgentConfig[] }> {
+  return apiGet<{ agents: AgentConfig[] }>("/api/agents");
+}
+
+export function createAgent(payload: Partial<AgentConfig>): Promise<{ agent: AgentConfig }> {
+  return apiPostJson<{ agent: AgentConfig }>("/api/agents", payload);
+}
+
+export function fetchTestCases(): Promise<{ test_cases: TestCase[]; errors: Array<{ case_id: string; error: string }> }> {
+  return apiGet<{ test_cases: TestCase[]; errors: Array<{ case_id: string; error: string }> }>("/api/test-cases");
+}
+
+export function createTestCase(payload: Partial<TestCase>): Promise<{ test_case: TestCase }> {
+  return apiPostJson<{ test_case: TestCase }>("/api/test-cases", payload);
+}
+
+export function fetchTestCase(caseId: string): Promise<{ test_case: TestCase }> {
+  return apiGet<{ test_case: TestCase }>(`/api/test-cases/${encodeURIComponent(caseId)}`);
+}
+
+export function createPlatformRun(
+  payload: { agent_id: string; test_case_id: string; judge?: boolean },
+  idempotencyKey?: string
+): Promise<CreateRunResult> {
+  return apiPostJsonWithHeaders<CreateRunResult>(
+    "/api/runs",
+    payload,
+    idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}
+  );
+}
+
+export function fetchRunStatus(runId: string): Promise<RunStatusPayload> {
+  return apiGet<RunStatusPayload>(`/api/runs/${encodeURIComponent(runId)}/status`);
+}
+
+export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json() as Promise<T>;
+}
+
+
 // 本地一键启动能力仅在 dev server 同源模式下可用：
 // 直连远程后端（设置了 VITE_API_BASE_URL）时，/api 不走本机 Vite 代理，
 // 页面上启动本地服务也无法让远程后端恢复，因此隐藏启动入口。
@@ -824,15 +956,7 @@ export async function apiPost<T>(path: string): Promise<T> {
 }
 
 export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  return response.json() as Promise<T>;
+  return apiPostJsonWithHeaders<T>(path, body, {});
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {

@@ -17,6 +17,7 @@ from .trajectory import (
     session_summary,
     write_json,
     write_jsonl,
+    write_text,
 )
 from .runtime import build_agent_judge_prompt
 
@@ -391,7 +392,7 @@ def _write_run_outputs(
         write_json(run_dir / "llm_calls.json", {"llm_calls": llm_calls})
     else:
         _import_configured_llm_calls(run_dir)
-    (run_dir / "tool_audit.md").write_text(render_markdown_report(summary, audit), encoding="utf-8")
+    write_text(run_dir / "tool_audit.md", render_markdown_report(summary, audit))
 
 
 def _source_meta(base_url: str, user_id: str = "") -> Dict:

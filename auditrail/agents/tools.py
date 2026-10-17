@@ -164,7 +164,16 @@ def build_chart_data(run_path: str) -> Dict[str, Any]:
 
 
 def assess_run_quality(run_path: str) -> Dict[str, Any]:
-    """Assess completion, deliverables, and evidence chain from run artifacts."""
+    """Assess completion, deliverables, and evidence chain from run artifacts.
+
+    Deterministic quality, findings and ``score_cap`` are computed here only.
+    When a valid ``evaluation.json`` (EvaluationEnvelope v1) exists, its
+    blocking checks, required expectation failures and required artifact
+    failures add caps (60/60/40 respectively; several caps combine by
+    minimum). Runs without an envelope keep the legacy summary/audit/
+    trajectory inference path unchanged; an ``invalid`` envelope is reported
+    but never used for gating.
+    """
     run_dir = _resolve_run_dir(run_path)
     summary = load_run_summary(str(run_dir))
     audit = load_audit(str(run_dir))
@@ -215,12 +224,80 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
             }
         )
 
+    envelope_status, envelope_note, envelope_caps, envelope_findings = _envelope_quality(run_dir)
+    for cap in envelope_caps:
+        score_cap = min(score_cap, cap)
+    if envelope_caps:
+        status = "failed"
+    findings.extend(envelope_findings)
+
     return {
         "completion": {"status": status, "score_cap": score_cap},
         "deliverables": {"requested": requested, "produced": produced, "missing": missing},
         "evidence_chain": evidence_chain,
         "findings": findings,
+        "evaluation": {"status": envelope_status, "note": envelope_note},
     }
+
+
+def _envelope_quality(run_dir: Path) -> "tuple[str, str, List[int], List[Dict[str, Any]]]":
+    """Read evaluation.json and derive caps/findings; never gate on invalid data."""
+    from ..evaluation import (
+        CAP_BLOCKING_CHECK,
+        CAP_MISSING_ARTIFACT,
+        CAP_REQUIRED_EXPECTATION,
+        load_evaluation,
+    )
+
+    envelope = load_evaluation(run_dir)
+    if envelope is None:
+        return "missing", "", [], []
+    if envelope.get("status") != "completed":
+        note = "evaluation.json is %s: %s" % (envelope.get("status"), envelope.get("error") or "not usable for gating")
+        return str(envelope.get("status") or "unknown"), note, [], []
+
+    caps: List[int] = []
+    findings: List[Dict[str, Any]] = []
+    for check in envelope.get("deterministic_checks") or []:
+        if check.get("blocking") and check.get("status") == "fail":
+            caps.append(CAP_BLOCKING_CHECK)
+            findings.append(
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "Blocking deterministic check failed: %s" % check.get("id"),
+                    "type": "fact",
+                    "evidence": [{"source": name, "quote": str(check.get("message") or check.get("kind") or "")} for name in (check.get("evidence_refs") or ["audit.json"])],
+                    "recommendation": "Resolve the blocking audit finding before trusting the run.",
+                }
+            )
+    for result in envelope.get("expectation_results") or []:
+        if result.get("required") and result.get("status") == "fail":
+            caps.append(CAP_REQUIRED_EXPECTATION)
+            findings.append(
+                {
+                    "severity": "high",
+                    "category": "completion",
+                    "title": "Required expectation failed: %s" % result.get("id"),
+                    "type": "fact",
+                    "evidence": [{"source": name, "quote": str(result.get("message") or result.get("id") or "")} for name in (result.get("evidence_refs") or ["evaluation.json"])],
+                    "recommendation": "Treat required expectations as hard gates; an unknown result is not a failure.",
+                }
+            )
+    for check in envelope.get("artifact_checks") or []:
+        if check.get("required") and check.get("status") == "fail":
+            caps.append(CAP_MISSING_ARTIFACT)
+            findings.append(
+                {
+                    "severity": "critical",
+                    "category": "delivery",
+                    "title": "Required artifact missing: %s" % check.get("path"),
+                    "type": "fact",
+                    "evidence": [{"source": "evaluation.json", "quote": "artifact %s missing" % check.get("path")}],
+                    "recommendation": "Produce the required artifact before reporting success.",
+                }
+            )
+    return "completed", "", caps, findings
 
 
 def _downgrade_unsupported_facts(normalized: Dict[str, Any], reliability: Dict[str, Any]) -> int:
@@ -349,8 +426,12 @@ def _merge_quality_report(report: Dict[str, Any], quality: Dict[str, Any]) -> Di
     merged = dict(report)
     completion = quality.get("completion") or {}
     score_cap = _int_or(completion.get("score_cap"), 100)
-    if score_cap < _int_or(merged.get("completion_score"), 0):
-        merged["completion_score"] = score_cap
+    proposed_score = merged.get("completion_score")
+    # The cap only constrains a numeric proposal score; with no proposal (null)
+    # there is nothing to cap and no score is fabricated.
+    if isinstance(proposed_score, (int, float)) and not isinstance(proposed_score, bool):
+        if score_cap < int(proposed_score):
+            merged["completion_score"] = score_cap
     quality_status = completion.get("status")
     if quality_status in {"success", "partial", "failed"}:
         merged["overall_status"] = _worst_status(str(merged.get("overall_status") or "unknown"), quality_status)

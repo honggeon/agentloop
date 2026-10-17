@@ -22,6 +22,7 @@ import {
   type JudgeReportList,
   type LlmCallDetail,
   type RunItem,
+  type RunStatusPayload,
   type RuntimeMetrics,
   type RuntimeTrends
 } from "../api";
@@ -35,6 +36,8 @@ const deleteRunById = inject<(runId: string, confirm?: boolean) => Promise<boole
 const runs = inject<Ref<RunItem[]>>("runs")!;
 
 const summary = ref<Record<string, unknown> | null>(null);
+const runState = ref<RunStatusPayload | null>(null);
+const evaluationStatus = ref<string>("");
 const audit = ref<Record<string, any> | null>(null);
 const charts = ref<Record<string, any> | null>(null);
 const judge = ref<JudgeReport | null>(null);
@@ -251,7 +254,8 @@ const dimensionRows = computed(() =>
   Object.entries(judge.value?.dimensions || {}).map(([key, item]) => ({
     key,
     label: DIMENSION_LABELS[key] || key,
-    score: Number(item.score || 0),
+    // 无证据维度 score 为 null（未评估），不回退成 0
+    score: item.score == null ? null : Number(item.score),
     status: item.status || "unknown",
     source: item.source || "missing",
     summary: item.summary || "",
@@ -554,7 +558,7 @@ async function loadRun(id: string) {
   loading.value = true;
   try {
     const [runData, auditData, chartData, judgeData, runtimeData, trendData] = await Promise.all([
-      apiGet<{ summary: Record<string, unknown> }>(`/api/runs/${id}`),
+      apiGet<{ summary: Record<string, unknown>; run?: RunStatusPayload | null; evaluation?: { status?: string } | null }>(`/api/runs/${id}`),
       apiGet<Record<string, any>>(`/api/runs/${id}/audit`),
       apiGet<Record<string, any>>(`/api/runs/${id}/charts`),
       apiGet<JudgeReport>(`/api/runs/${id}/judge`),
@@ -562,6 +566,8 @@ async function loadRun(id: string) {
       apiGet<RuntimeTrends>("/api/runtime-trends")
     ]);
     summary.value = runData.summary;
+    runState.value = runData.run || null;
+    evaluationStatus.value = runData.evaluation?.status || "";
     audit.value = auditData;
     charts.value = chartData;
     judge.value = judgeData.status === "missing" ? null : judgeData;
@@ -571,6 +577,8 @@ async function loadRun(id: string) {
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     summary.value = null;
+    runState.value = null;
+    evaluationStatus.value = "";
     audit.value = null;
     charts.value = null;
     judge.value = null;
@@ -715,10 +723,29 @@ function formatPercent(value: number | undefined) {
 }
 
 function statusLabel(status: string) {
-  if (status === "success") return "Success";
-  if (status === "failed") return "Failed";
-  if (status === "running") return "Running";
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  if (status === "running") return "运行中";
+  if (status === "judged") return "已分析";
+  if (status === "pending") return "待分析";
+  if (status === "timeout") return "超时";
+  if (status === "cancelled") return "已取消";
   return status || "-";
+}
+
+// Run 生命周期状态（run.json）：与 Judge overall 的 success/partial/failed 是不同枚举。
+const PLATFORM_RUN_STATUS_LABELS: Record<string, string> = {
+  queued: "排队中",
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  timed_out: "超时",
+  cancelled: "已取消",
+  skipped: "已跳过"
+};
+
+function runStatusLabel(status: string) {
+  return PLATFORM_RUN_STATUS_LABELS[status] || status || "-";
 }
 
 function formatTime(value: string) {
@@ -779,36 +806,53 @@ onMounted(() => {
         <button class="back-link" type="button" @click="router.push({ name: 'batch' })">
           ← 返回批量总览
         </button>
-        <p class="eyebrow">Run inspection · {{ serverHost }}</p>
-        <h2 class="run-title">{{ runId || "暂无运行" }}</h2>
+        <div class="run-kicker">
+          <p class="eyebrow">运行详情 · {{ serverHost }}</p>
+          <span class="chip" :data-status="runtime?.status || (selectedMeta?.has_judge ? 'judged' : 'pending')">
+            {{ statusLabel(runtime?.status || (selectedMeta?.has_judge ? "judged" : "pending")) }}
+          </span>
+        </div>
+        <h2 class="run-title">运行详情</h2>
+        <p class="run-id" :title="runId">{{ runId || "暂无运行" }}</p>
         <p class="lede">
-          {{ selectedMeta?.has_judge ? "已生成裁判分析" : "尚未分析 · 可运行裁判评测" }}
+          {{ selectedMeta?.has_judge ? "已生成裁判分析，可继续查看轨迹与诊断" : "尚未分析，可运行裁判评测" }}
+        </p>
+        <p v-if="runState" class="platform-run-status" :data-status="runState.status">
+          平台状态：{{ runStatusLabel(String(runState.status)) }}
+          <template v-if="runState.legacy_inferred">（旧运行，由报告推断）</template>
+          <template v-if="runState.stale">（执行器已中断）</template>
+          <template v-if="runState.status_reason">— {{ runState.status_reason }}</template>
+          <template v-if="evaluationStatus">｜评测包络：{{ evaluationStatus }}</template>
         </p>
       </div>
       <div class="hero-actions">
-        <button class="ghost" type="button" :disabled="!runId" @click="router.push({ name: 'trajectory', params: { runId } })">
-          查看轨迹
-        </button>
-        <button class="ghost danger" type="button" :disabled="!runId || deleting" @click="deleteCurrentRun">
-          {{ deleting ? "删除中" : "删除运行" }}
-        </button>
-        <button class="ghost" type="button" :disabled="!runId || loading" @click="loadRun(runId)">
-          {{ loading ? "加载中" : "重新加载" }}
-        </button>
-        <button class="ghost" type="button" :disabled="!runId || exporting" @click="exportMarkdown">
-          {{ exporting ? "导出中" : "导出 Markdown" }}
-        </button>
-        <label class="judge-engine-picker">
-          <span class="judge-engine-label">裁判引擎</span>
-          <select v-model="judgeEngine" class="judge-engine-select" :disabled="!runId || judging" aria-label="裁判引擎">
-            <option v-for="item in judgeEngineChoices" :key="item.id" :value="item.id">
-              {{ item.label }}
-            </option>
-          </select>
-        </label>
-        <button class="primary" type="button" :disabled="!runId || judging" @click="runJudge">
-          {{ judging ? "分析中" : `运行 ${judgeEngineLabel} 分析` }}
-        </button>
+        <div class="hero-action-group">
+          <button class="ghost" type="button" :disabled="!runId" @click="router.push({ name: 'trajectory', params: { runId } })">
+            查看轨迹
+          </button>
+          <button class="ghost" type="button" :disabled="!runId || loading" @click="loadRun(runId)">
+            {{ loading ? "加载中" : "重新加载" }}
+          </button>
+          <button class="ghost" type="button" :disabled="!runId || exporting" @click="exportMarkdown">
+            {{ exporting ? "导出中" : "导出 Markdown" }}
+          </button>
+          <button class="ghost danger" type="button" :disabled="!runId || deleting" @click="deleteCurrentRun">
+            {{ deleting ? "删除中" : "删除运行" }}
+          </button>
+        </div>
+        <div class="judge-action-group">
+          <label class="judge-engine-picker">
+            <span class="judge-engine-label">裁判引擎</span>
+            <select v-model="judgeEngine" class="judge-engine-select" :disabled="!runId || judging" aria-label="裁判引擎">
+              <option v-for="item in judgeEngineChoices" :key="item.id" :value="item.id">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
+          <button class="primary" type="button" :disabled="!runId || judging" @click="runJudge">
+            {{ judging ? "分析中" : `运行 ${judgeEngineLabel} 分析` }}
+          </button>
+        </div>
       </div>
     </header>
 
@@ -1313,7 +1357,7 @@ onMounted(() => {
               class="dimension-row"
             >
               <span>{{ row.label }}</span>
-              <strong v-if="row.status !== 'unknown'">{{ row.score }}</strong>
+              <strong v-if="row.status !== 'unknown'">{{ row.score ?? "—" }}</strong>
               <strong v-else>—</strong>
               <em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
               <small>{{ row.summary || row.recommendation || row.source }}</small>

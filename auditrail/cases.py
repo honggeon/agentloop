@@ -57,7 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .trajectory import write_json
+from .testcases import resolve_within, validate_case_relpath
+from .trajectory import write_json, write_text
 
 
 # Assertion keys accepted in ``expect``. An unknown key is a hard error: a
@@ -152,6 +153,8 @@ def _validate_case(case: Any, index: int, seen: set[str]) -> None:
     files = case.get("files")
     if files is not None and not isinstance(files, dict):
         raise ValueError("%s (%s) files must be an object of path -> content" % (where, case_id))
+    for relpath in (files or {}):
+        _validate_fixture_path(relpath, where, case_id)
     env = case.get("env")
     if env is not None and (
         not isinstance(env, dict) or not all(isinstance(key, str) for key in env)
@@ -263,12 +266,18 @@ def _as_list(value: Any) -> List[str]:
 
 def _validate_expect_path(relpath: str, where: str, case_id: str) -> None:
     """Expect paths must stay inside the case workspace."""
-    path = Path(relpath)
-    if not relpath or path.is_absolute() or ".." in path.parts:
-        raise ValueError(
-            "%s (%s) expect path must be relative and stay inside the workspace: %r"
-            % (where, case_id, relpath)
-        )
+    try:
+        validate_case_relpath(relpath)
+    except ValueError as exc:
+        raise ValueError("%s (%s) expect path: %s" % (where, case_id, exc)) from exc
+
+
+def _validate_fixture_path(relpath: Any, where: str, case_id: str) -> None:
+    """``files`` fixture keys get the same safety validation as deliverable paths."""
+    try:
+        validate_case_relpath(relpath)
+    except ValueError as exc:
+        raise ValueError("%s (%s) files key: %s" % (where, case_id, exc)) from exc
 
 
 def evaluate_file_checks(case: Dict[str, Any], workspace: Path) -> List[Dict[str, Any]]:
@@ -410,7 +419,9 @@ def run_case(case: Dict[str, Any], runner: Runner, binary: str, workspace_root: 
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     for relpath, content in (case.get("files") or {}).items():
-        target = workspace / relpath
+        # resolve_within re-validates the key and refuses symlink traversal or
+        # workspace escapes even if the fixture dir was pre-populated.
+        target = resolve_within(workspace, relpath)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(str(content), encoding="utf-8")
 
@@ -421,7 +432,19 @@ def run_case(case: Dict[str, Any], runner: Runner, binary: str, workspace_root: 
     }
     timeout_s = float(case.get("timeout_s") or 30)
     session_before = snapshot_session_files(env) if case.get("session") else None
-    outcome = runner(argv, workspace, timeout_s, env)
+    try:
+        outcome = runner(argv, workspace, timeout_s, env)
+    except Exception as exc:
+        # A runner exception is an infrastructure error, never absorbable by
+        # xfail and never silently converted into an assertion failure.
+        outcome = {
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "timed_out": False,
+            "duration_s": 0.0,
+            "runner_error": "%s: %s" % (type(exc).__name__, exc),
+        }
     checks = evaluate_case(case, outcome)
     checks.extend(evaluate_file_checks(case, workspace))
     session_path = ""
@@ -444,6 +467,7 @@ def run_case(case: Dict[str, Any], runner: Runner, binary: str, workspace_root: 
         "notes": case.get("notes") or "",
         "exit_code": outcome.get("exit_code"),
         "timed_out": bool(outcome.get("timed_out")),
+        "runner_error": str(outcome.get("runner_error") or ""),
         "duration_s": round(float(outcome.get("duration_s") or 0.0), 3),
         "checks": checks,
         "failed_assertions": [check["assertion"] for check in checks if not check["ok"]],
@@ -454,9 +478,14 @@ def run_case(case: Dict[str, Any], runner: Runner, binary: str, workspace_root: 
 
 
 def _verdict(checks: List[Dict[str, Any]], outcome: Dict[str, Any], xfail: bool) -> str:
-    if outcome.get("timed_out") or outcome.get("spawn_error"):
+    # Infrastructure problems are always ``error`` and can never be absorbed
+    # by xfail: timeout, spawn failure, runner exception, and session
+    # recording read/parse failures (the ``session.parse`` check).
+    if outcome.get("timed_out") or outcome.get("spawn_error") or outcome.get("runner_error"):
         return "error"
     failed = [check for check in checks if not check["ok"]]
+    if any(check["assertion"] == "session.parse" for check in failed):
+        return "error"
     if not failed:
         return "xpass" if xfail else "passed"
     return "xfail" if xfail else "failed"
@@ -570,7 +599,7 @@ def write_report(report: Dict[str, Any], out_dir: str | Path) -> Dict[str, str]:
     json_path = directory / ("%s-%s.json" % (slug, stamp))
     markdown_path = directory / ("%s-%s.md" % (slug, stamp))
     write_json(json_path, report)
-    markdown_path.write_text(render_report_markdown(report), encoding="utf-8")
+    write_text(markdown_path, render_report_markdown(report))
     return {"json_path": str(json_path), "markdown_path": str(markdown_path)}
 
 

@@ -17,6 +17,23 @@ class AuditrailHTTPError(RuntimeError):
         self.body = body
 
 
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect target before following it.
+
+    Without this, an allowlisted endpoint could 302 the client to a restricted
+    (loopback/private/metadata) address. The guard raises before the request
+    is sent, so the redirect chain stays inside the endpoint policy.
+    """
+
+    def __init__(self, guard):
+        self._guard = guard
+        super().__init__()
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self._guard(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _transport_error(url: str, exc: urllib.error.URLError) -> "AuditrailHTTPError":
     """Wrap a connection-level failure with an explicit, readable message."""
     return AuditrailHTTPError(0, "cannot connect to %s (%s)" % (url, exc.reason))
@@ -28,9 +45,19 @@ class AgentClient:
     user_id: str
     token: Optional[str] = None
     timeout: float = 60.0
+    #: Optional callable(url) -> None that validates each redirect target;
+    #: raising inside the guard aborts the request. ``None`` keeps the
+    #: historical behaviour (urllib default redirect handling).
+    url_guard: Optional[object] = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+
+    def _open(self, request: urllib.request.Request):
+        if self.url_guard is None:
+            return urllib.request.urlopen(request, timeout=self.timeout)
+        opener = urllib.request.build_opener(_GuardedRedirectHandler(self.url_guard))
+        return opener.open(request, timeout=self.timeout)
 
     def _headers(self, json_body: bool = False) -> Dict[str, str]:
         headers = {
@@ -61,7 +88,7 @@ class AgentClient:
             headers=self._headers(json_body=body is not None),
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
@@ -93,7 +120,7 @@ class AgentClient:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
@@ -165,7 +192,7 @@ class AgentClient:
         event_name = "message"
         data_lines = []
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._open(request) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                     if not line:

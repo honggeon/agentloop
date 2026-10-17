@@ -176,6 +176,11 @@ onMounted(checkBackend);
           <span class="nav-label">运行时评测</span>
           <small>Prompt → Agent Judge</small>
         </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'platform' }" to="/platform">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">测试平台</span>
+          <small>Agent · TestCase · Run</small>
+        </RouterLink>
       </nav>
 
       <div class="sidebar-meta">

@@ -412,3 +412,111 @@ def test_write_report_writes_json_and_markdown(tmp_path):
     payload = json.loads(Path(paths["json_path"]).read_text(encoding="utf-8"))
     assert payload["suite"] == "probe"
     assert payload["cases"][0]["id"] == "C-1"
+
+
+# --- fixture path security ---------------------------------------------------------
+
+
+def test_load_suite_rejects_unsafe_files_fixture_keys(tmp_path):
+    path = tmp_path / "suite.json"
+    for bad_key in ("/abs/path", "../escape", "a\\b.txt"):
+        suite = _suite([_case(files={bad_key: "x"})])
+        path.write_text(json.dumps(suite), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_suite(path)
+
+
+def test_load_suite_rejects_nul_in_fixture_key(tmp_path):
+    suite = _suite([_case(files={"a\x00b.txt": "x"})])
+    path = tmp_path / "suite.json"
+    path.write_text(json.dumps(suite), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_suite(path)
+
+
+def test_run_case_refuses_escaping_fixture_key_at_write_time(tmp_path):
+    # a case dict that bypassed load_suite validation must still be stopped
+    # when the fixture is materialized
+    workspace = tmp_path / "ws"
+    case = _case(files={"../pwned.txt": "x"})
+    with pytest.raises(ValueError):
+        run_case(case, _runner(), "probe-bin", workspace)
+    assert not (tmp_path / "pwned.txt").exists()
+
+
+def test_run_case_refuses_symlink_fixture_escape(tmp_path):
+    # defence in depth: a symlink planted inside an existing workspace must not
+    # be followed when the fixture path traverses it
+    from auditrail.testcases import resolve_within
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        resolve_within(workspace, "link/pwned.txt")
+    assert not (outside / "pwned.txt").exists()
+
+
+def test_run_case_writes_nested_fixture_files(tmp_path):
+    workspace = tmp_path / "ws"
+    recorder = []
+    case = _case(files={"home/profiles/web/package.json": "{}"}, expect={"exit_code": 0})
+    result = run_case(case, _runner(recorder=recorder), "probe-bin", workspace)
+    assert result["verdict"] == "passed"
+    assert (workspace / "C-1" / "home/profiles/web/package.json").is_file()
+
+
+def test_run_case_runner_exception_is_an_error_not_an_xfail(tmp_path):
+    def exploding_runner(argv, cwd, timeout_s, env):
+        raise RuntimeError("runner blew up")
+
+    result = run_case(_case(xfail=True, defect="DSH-9"), exploding_runner, "probe-bin", tmp_path)
+    assert result["verdict"] == "error"
+    assert "runner blew up" in result["runner_error"]
+
+
+def test_run_case_session_parse_failure_is_an_error_not_an_xfail(tmp_path):
+    import zstandard
+
+    home = tmp_path / "dsh-home"
+    recording = home / "sessions" / "ws" / "session-broken" / "session.jsonl.zstd"
+    recording.parent.mkdir(parents=True)
+
+    case = _case(
+        args=["--flag"],
+        env={"DSH_HOME": str(home)},
+        session={"recorded": True},
+        xfail=True,
+        defect="DSH-10",
+        expect={"exit_code": 0},
+    )
+
+    def writing_runner(argv, cwd, timeout_s, env):
+        recording.write_bytes(zstandard.ZstdCompressor().compress(b"not-json-at-all\n"))
+        return _outcome()
+
+    result = run_case(case, writing_runner, "probe-bin", tmp_path)
+    assert result["verdict"] == "error"
+    assert "session.parse" in result["failed_assertions"]
+
+
+def test_run_case_xfail_still_absorbs_session_assertion_mismatch(tmp_path):
+    home = tmp_path / "dsh-home"
+    case = _case(
+        args=["--flag"],
+        env={"DSH_HOME": str(home)},
+        session={"recorded": True, "trajectory_contains": ["不存在的文本"]},
+        xfail=True,
+        defect="DSH-11",
+        expect={"exit_code": 0},
+    )
+
+    def writing_runner(argv, cwd, timeout_s, env):
+        _write_dsh_session(home, _probe_events())
+        return _outcome()
+
+    result = run_case(case, writing_runner, "probe-bin", tmp_path)
+    assert result["verdict"] == "xfail"
+    assert "session.trajectory_contains" in result["failed_assertions"]

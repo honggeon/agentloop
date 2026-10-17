@@ -379,6 +379,35 @@ http://localhost:5173
 
 For LAN access, replace `localhost` with the host machine IP.
 
+## Agent Test Platform (Phase 0)
+
+The platform slice manages HTTP/SSE Agents and unified TestCases, and runs a
+single asynchronous case through the API/Web console (sidebar「测试平台」).
+
+- `GET/POST /api/agents` — register an Agent (`adapter=http_session`, endpoint,
+  capabilities). Endpoints pass SSRF validation: http/https only, no URL
+  credentials, allowlisted ports, and no loopback/private/link-local/metadata
+  addresses unless explicitly allowed (`AGENT_ALLOWED_HOSTS`,
+  `AGENT_ALLOWED_PORTS`, `AGENT_ALLOW_PRIVATE_ENDPOINTS`).
+- `GET/POST /api/test-cases`, `GET /api/test-cases/{case_id}` — unified
+  TestCases; legacy `cases/*.json` suites are exposed read-only as
+  `adapter=command` (executed by `run-cases`, not by the platform runner).
+- `POST /api/runs` — `202 Accepted` with `{run_id, status, status_url}`;
+  executes in the background (`queued -> running -> completed|failed|timed_out`).
+  `Idempotency-Key` replays the same request to the original run and conflicts
+  (`409`) on a different body.
+- `GET /api/runs/{run_id}/status` — the `run.json` safe subset; stale
+  queued/running records are flagged instead of pretending to progress.
+
+Runs write the Run Contract v1 `run.json` (platform state only) plus the
+existing artifacts (`session.json`, `summary.json`, `trajectory.jsonl`,
+`audit.json`, ...) and a versioned `evaluation.json` envelope; pre-collection
+failures also write `error.json`. All artifact writes are atomic
+(temp file + fsync + replace). A blocking deterministic failure caps the judge
+`completion_score` (missing artifact 40, blocking check/required expectation 60,
+minimum wins) and forces judge `overall_status=failed` — an LLM judge cannot
+override it; dimensions without evidence stay `unknown` with a null score.
+
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.

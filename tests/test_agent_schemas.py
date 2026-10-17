@@ -390,8 +390,10 @@ def test_normalize_judge_report_adds_default_dimensions_and_reliability():
 
     assert "intent_recognition" in report["dimensions"]
     assert "verification" in report["dimensions"]
+    # Phase 0 contract: a dimension with no judge evidence and no deterministic
+    # result is unknown with a null score — never a fabricated 0.
     assert report["dimensions"]["intent_recognition"] == {
-        "score": 0,
+        "score": None,
         "status": "unknown",
         "summary": "",
         "evidence": [],
