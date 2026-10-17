@@ -212,6 +212,7 @@ def test_suite_job_executes_cases_in_order_with_independent_runs(tmp_path, monke
     assert job["stats"] == {
         "total": 2, "queued": 0, "running": 0,
         "completed": 2, "failed": 0, "timed_out": 0, "cancelled": 0, "skipped": 0,
+        "runs": 2, "retries": 0,
     }
     # cases ran strictly in suite order, each producing its own Run
     assert FakeClient.calls == ["s1", "s2"]

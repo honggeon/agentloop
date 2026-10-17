@@ -28,6 +28,10 @@ app.include_router(dsh_acp.router)
 app.include_router(dashboard.router)
 app.router.add_event_handler("shutdown", dsh_chat.shutdown_active_operations)
 app.router.add_event_handler("shutdown", dsh_acp.shutdown_acp_runtime)
+# Phase 1.1: resume SuiteJobs left queued/running by a previous process so a
+# restart never strands a batch; per-case evidence is preserved and orphaned
+# in-flight attempts are reconciled (failed/executor_interrupted, retryable).
+app.router.add_event_handler("startup", platform.recover_stale_suite_jobs)
 
 
 @app.get("/api/health")

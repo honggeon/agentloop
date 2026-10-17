@@ -1,12 +1,14 @@
 """Single-run executor for POST /api/runs (Phase 0).
 
-A run is created ``queued`` and immediately submitted to a single-worker
-executor thread, which atomically advances ``queued -> running`` and finally
-``completed|failed|timed_out`` (see ``auditrail.runner``). Phase 0 has no
-queue, no auto-retry and no cross-process recovery: the in-process
-``_ACTIVE`` registry is the source of truth for "is anyone executing this
-run", and a queued/running record whose executor is gone is reported as
-``stale`` by the status endpoint instead of pretending to progress.
+A run is created ``queued`` and immediately submitted to a bounded executor
+pool, which atomically advances ``queued -> running`` and finally
+``completed|failed|timed_out|cancelled`` (see ``auditrail.runner``). There is
+no queue, no auto-retry and no cross-process recovery for standalone runs:
+the in-process ``_ACTIVE`` registry is the source of truth for "is anyone
+executing this run", and a queued/running record whose executor is gone is
+reported as ``stale`` by the status endpoint instead of pretending to
+progress. Suite-driven retries and recovery live in
+``backend.app.suite_executor`` (Phase 1.1) and always create new Runs.
 
 Executor startup failure itself must still push the run out of ``queued``
 into ``failed`` with an ``error.json``.
@@ -22,7 +24,11 @@ from typing import Any, Callable, Dict, Optional
 from auditrail import runner as core_runner
 from auditrail.run_contract import read_run_record, update_run_status, write_error
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="auditrail-run")
+#: Bounded worker pool. Real concurrency is governed by the suite executor's
+#: global/per-agent limiters (Phase 1.1); this pool is sized generously so it
+#: never becomes the hidden bottleneck, and workers still serialize on the
+#: limiters before touching the agent.
+_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="auditrail-run")
 _ACTIVE: Dict[str, Any] = {}
 _LOCK = threading.Lock()
 

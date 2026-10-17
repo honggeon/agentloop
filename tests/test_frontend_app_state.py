@@ -461,3 +461,44 @@ def test_platform_view_exposes_test_suites_and_suite_jobs():
     assert "cancel_requested" in source
     assert "stale" in source
     assert "打开运行详情" in source
+
+
+def test_platform_view_exposes_phase11_batch_reliability():
+    source = PLATFORM_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    # api.ts 集中定义 Phase 1.1 契约：重试 / 预算 / 限流 / 恢复 / 幂等
+    assert "export interface SuiteJobBudget" in api_source
+    assert "export interface SuiteJobBudgetUsed" in api_source
+    assert "export interface SuiteJobLimits" in api_source
+    assert "export interface LaunchSuiteJobPayload" in api_source
+    assert "retry_index" in api_source
+    assert "idempotent_replay" in api_source
+    assert "max_retries" in api_source
+    assert "budget_used" in api_source
+    assert "recovered" in api_source
+    assert "recoverStaleSuiteJobs" in api_source
+    assert "/api/suite-jobs/recover" in api_source
+    assert "Idempotency-Key" in api_source
+
+    # 批量运行表单：重试次数、套件总超时、执行/成本预算、幂等键
+    assert "失败重试次数" in source
+    assert "套件总超时" in source
+    assert "执行预算" in source
+    assert "成本预算" in source
+    assert "batchMaxRetries" in source
+    assert "batchTimeoutSeconds" in source
+    assert "batchBudgetAttempts" in source
+    assert "batchBudgetTokens" in source
+    assert "batchIdempotencyKey" in source
+
+    # Job 展示：限流上限、预算用量、恢复与取消状态、重试徽标
+    assert "并发上限" in source
+    assert "预算" in source
+    assert "已恢复" in source
+    assert "恢复中断的批量任务" in source
+    assert "recoverJobs" in source
+    assert "重试 #" in source
+    assert "stats.retries" in source
+    assert "hasStaleJobs" in source
+    assert "已请求取消" in source

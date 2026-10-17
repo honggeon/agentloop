@@ -915,13 +915,16 @@ export interface TestSuite {
 // SuiteJob 生命周期与 Run 生命周期严格不同：没有 timed_out / skipped。
 export type SuiteJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
-// CaseAttempt 复用 Run 生命周期状态；skipped 表示因取消而未开始。
+// CaseAttempt 复用 Run 生命周期状态；skipped 表示因取消/超时/预算耗尽而未开始。
+// Phase 1.1：同一 case 的多次重试是多个 attempt（retry_index 递增），
+// 每次重试绑定一个全新的 Run，不覆盖旧证据。
 export interface SuiteJobAttempt {
   attempt_id: string;
   order: number;
   case_id: string;
   case_title: string;
   case_version?: number | null;
+  retry_index?: number;
   status: PlatformRunStatus | string;
   run_id?: string | null;
   status_reason?: string | null;
@@ -932,7 +935,8 @@ export interface SuiteJobAttempt {
   final_quality_status?: string;
 }
 
-// 按最终 case 状态计数；skipped/queued 永远不算 pass，通过率分母只含 completed。
+// 按 case 最终 attempt 状态计数；skipped/queued 永远不算 pass，通过率分母只含 completed。
+// runs 统计产生了 Run 的 attempt 总数，retries 统计 retry_index>0 的重试次数。
 export interface SuiteJobStats {
   total: number;
   queued: number;
@@ -942,6 +946,25 @@ export interface SuiteJobStats {
   timed_out: number;
   cancelled: number;
   skipped: number;
+  runs: number;
+  retries: number;
+}
+
+// Phase 1.1 执行预算：max_attempts 为执行预算（含重试），max_total_tokens 为
+// 成本预算（按运行产物的观测 token 计）。null 表示不限制。
+export interface SuiteJobBudget {
+  max_attempts?: number | null;
+  max_total_tokens?: number | null;
+}
+
+export interface SuiteJobBudgetUsed {
+  attempts: number;
+  total_tokens: number;
+}
+
+export interface SuiteJobLimits {
+  global: number;
+  agent: number;
 }
 
 export interface SuiteJob {
@@ -950,6 +973,13 @@ export interface SuiteJob {
   status_reason?: string | null;
   cancel_requested?: boolean;
   judge: boolean;
+  max_retries?: number;
+  timeout_seconds?: number | null;
+  budget?: SuiteJobBudget;
+  budget_used?: SuiteJobBudgetUsed;
+  limits?: SuiteJobLimits | null;
+  // 进程重启后被恢复续跑的 job 标记 recovered=true，与正常执行区分展示。
+  recovered?: boolean;
   suite_ref?: { id?: string; version?: number; title?: string } | null;
   agent_ref?: { id?: string; version?: string; config_hash?: string } | null;
   attempts?: SuiteJobAttempt[];
@@ -964,6 +994,8 @@ export interface CreateSuiteJobResult {
   job_id: string;
   status: SuiteJobStatus | string;
   status_url: string;
+  // 相同 Idempotency-Key + 相同请求的重复提交返回 true，不创建第二个 job。
+  idempotent_replay?: boolean;
 }
 
 export function fetchTestSuites(): Promise<{ test_suites: TestSuite[] }> {
@@ -990,12 +1022,28 @@ export function deleteTestSuite(suiteId: string): Promise<{ deleted: string }> {
   return apiDelete<{ deleted: string }>(`/api/test-suites/${encodeURIComponent(suiteId)}`);
 }
 
-// 发起一个 SuiteJob：后端按 case_ids 顺序逐个执行，单 case 失败不阻断后续 case。
+// Phase 1.1 批量运行启动选项：重试、套件总超时、执行/成本预算。
+export interface LaunchSuiteJobPayload {
+  agent_id: string;
+  judge?: boolean;
+  max_retries?: number;
+  timeout_seconds?: number | null;
+  budget?: SuiteJobBudget;
+}
+
+// 发起一个 SuiteJob：后端按 case_ids 顺序逐个执行，单 case 失败不阻断后续 case；
+// 失败且可重试的 case 按 max_retries 自动重试（每次重试创建新 Run）。
+// 传入 Idempotency-Key 时，相同 key + 相同请求的重复提交返回原 job（不重复执行）。
 export function launchSuiteJob(
   suiteId: string,
-  payload: { agent_id: string; judge?: boolean }
+  payload: LaunchSuiteJobPayload,
+  idempotencyKey?: string
 ): Promise<CreateSuiteJobResult> {
-  return apiPostJson<CreateSuiteJobResult>(`/api/test-suites/${encodeURIComponent(suiteId)}/runs`, payload);
+  return apiPostJsonWithHeaders<CreateSuiteJobResult>(
+    `/api/test-suites/${encodeURIComponent(suiteId)}/runs`,
+    payload,
+    idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}
+  );
 }
 
 export function fetchSuiteJobs(): Promise<{ suite_jobs: SuiteJob[] }> {
@@ -1010,6 +1058,12 @@ export function fetchSuiteJob(jobId: string): Promise<{ suite_job: SuiteJob }> {
 // 已完成的 Run 与全部证据保留。
 export function cancelSuiteJob(jobId: string): Promise<{ suite_job: SuiteJob }> {
   return apiPost<{ suite_job: SuiteJob }>(`/api/suite-jobs/${encodeURIComponent(jobId)}/cancel`);
+}
+
+// 恢复 stale 的 SuiteJob（进程重启后遗留的 queued/running 任务）：孤儿 attempt
+// 标记为 failed/executor_interrupted（可重试），未完成的 case 从新 Run 继续执行。
+export function recoverStaleSuiteJobs(): Promise<{ resumed: string[] }> {
+  return apiPost<{ resumed: string[] }>("/api/suite-jobs/recover");
 }
 
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {

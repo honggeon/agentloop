@@ -3,8 +3,9 @@
 No database, no queue: ``platform/agents.json`` and ``platform/test_cases.json``
 hold the Agent and unified TestCase configs; ``platform/test_suites.json``
 holds TestSuite configs; ``platform/suite_jobs/<job_id>.json`` holds one
-SuiteJob record per batch launch; ``platform/idempotency.json`` holds
-POST /api/runs idempotency keys for this single deployment. All writes
+SuiteJob record per batch launch; ``platform/idempotency.json`` and
+``platform/suite_idempotency.json`` hold POST /api/runs and SuiteJob launch
+idempotency keys for this single deployment. All writes
 are atomic via ``auditrail.trajectory.write_json``. Credentials never enter
 these files — Agent configs reference endpoints only.
 
@@ -94,6 +95,16 @@ def create_agent(payload: Dict[str, Any], settings: Optional[Settings] = None) -
     for value in metadata.values():
         if isinstance(value, str) and _looks_like_secret(value):
             raise ValueError("credentials must not be stored in agent metadata; use environment variables")
+    max_concurrency = payload.get("max_concurrency")
+    if max_concurrency is not None:
+        if isinstance(max_concurrency, bool):
+            raise ValueError("max_concurrency must be a positive integer")
+        try:
+            max_concurrency = int(max_concurrency)
+        except (TypeError, ValueError):
+            raise ValueError("max_concurrency must be a positive integer")
+        if not 1 <= max_concurrency <= 64:
+            raise ValueError("max_concurrency must be between 1 and 64")
 
     agent = {
         "agent_id": agent_id,
@@ -103,6 +114,7 @@ def create_agent(payload: Dict[str, Any], settings: Optional[Settings] = None) -
         "endpoint": endpoint,
         "capabilities": capabilities,
         "metadata": metadata,
+        "max_concurrency": max_concurrency,
         "config_hash": _config_hash(agent_id, endpoint, capabilities),
     }
     with _LOCK:
@@ -304,16 +316,16 @@ def request_suite_job_cancel(job_id: str, settings: Optional[Settings] = None) -
 
 def lookup_idempotency(key: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
     with _LOCK:
-        data = _read_idempotency(settings)
+        data = _read_idempotency(_IDEMPOTENCY_FILE, settings)
         entry = data.get(key)
         return dict(entry) if isinstance(entry, dict) else None
 
 
 def store_idempotency(key: str, fingerprint: str, run_id: str, settings: Optional[Settings] = None) -> None:
     with _LOCK:
-        data = _read_idempotency(settings)
+        data = _read_idempotency(_IDEMPOTENCY_FILE, settings)
         data[key] = {"fingerprint": fingerprint, "run_id": run_id}
-        _write_idempotency(data, settings)
+        _write_idempotency(_IDEMPOTENCY_FILE, data, settings)
 
 
 def run_fingerprint(agent_id: str, test_case_id: str, judge: bool) -> str:
@@ -325,8 +337,49 @@ def run_fingerprint(agent_id: str, test_case_id: str, judge: bool) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _read_idempotency(settings: Optional[Settings]) -> Dict[str, Any]:
-    path = _platform_dir(settings) / _IDEMPOTENCY_FILE
+# ---------------------------------------------------- suite job idempotency
+
+_SUITE_IDEMPOTENCY_FILE = "suite_idempotency.json"
+
+
+def lookup_suite_idempotency(key: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:
+    with _LOCK:
+        data = _read_idempotency(_SUITE_IDEMPOTENCY_FILE, settings)
+        entry = data.get(key)
+        return dict(entry) if isinstance(entry, dict) else None
+
+
+def store_suite_idempotency(key: str, fingerprint: str, job_id: str, settings: Optional[Settings] = None) -> None:
+    with _LOCK:
+        data = _read_idempotency(_SUITE_IDEMPOTENCY_FILE, settings)
+        data[key] = {"fingerprint": fingerprint, "job_id": job_id}
+        _write_idempotency(_SUITE_IDEMPOTENCY_FILE, data, settings)
+
+
+def suite_fingerprint(
+    suite_id: str,
+    suite_version: Any,
+    agent_id: str,
+    judge: bool,
+    options: Dict[str, Any],
+) -> str:
+    """Fingerprint of one SuiteJob launch request for Idempotency-Key replay."""
+    text = json.dumps(
+        {
+            "suite_id": suite_id,
+            "suite_version": suite_version,
+            "agent_id": agent_id,
+            "judge": bool(judge),
+            "options": options,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_idempotency(filename: str, settings: Optional[Settings]) -> Dict[str, Any]:
+    path = _platform_dir(settings) / filename
     if not path.exists():
         return {}
     try:
@@ -336,5 +389,5 @@ def _read_idempotency(settings: Optional[Settings]) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_idempotency(data: Dict[str, Any], settings: Optional[Settings]) -> None:
-    write_json(_platform_dir(settings) / _IDEMPOTENCY_FILE, data)
+def _write_idempotency(filename: str, data: Dict[str, Any], settings: Optional[Settings]) -> None:
+    write_json(_platform_dir(settings) / filename, data)

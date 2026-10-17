@@ -24,7 +24,9 @@ from .cli import _source_meta, _write_run_outputs
 from .client import AgentClient, AuditrailHTTPError
 from .netguard import EndpointPolicy, EndpointRejected, redirect_guard, validate_endpoint
 from .run_contract import (
+    TERMINAL_STATUSES,
     new_run_record,
+    read_run_record,
     safe_message_for,
     update_run_status,
     write_error,
@@ -100,10 +102,18 @@ def execute_run(
     ``cancel_event`` (a ``threading.Event``-like object) enables cooperative
     cancellation, used by the Phase 1 suite executor: the run checks it between
     collection steps and finishes as ``cancelled`` instead of writing reports.
+
+    Phase 1.1: a suite-level watchdog or a recovery sweep may finalize the run
+    (``timed_out``/``failed``) while this executor is still stuck in a blocking
+    call; this function never resurrects a run that already reached a terminal
+    state.
     """
     run_dir = Path(run_dir)
     case = normalize_test_case(test_case)
     try:
+        existing = read_run_record(run_dir)
+        if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+            return existing
         if case["adapter"] != "http_session":
             raise RunFailure(
                 "failed",
@@ -115,18 +125,19 @@ def execute_run(
         update_run_status(run_dir, "running")
         _raise_if_cancelled(cancel_event, phase="collect")
         _execute_http_case(run_dir, agent, case, policy=policy, client_factory=client_factory, cancel_event=cancel_event)
+        _raise_if_cancelled(cancel_event, phase="evaluate")
         envelope = build_evaluation_envelope(run_dir, case)
         written = evaluation_mod.write_evaluation(run_dir, envelope)
         if written.get("status") == "invalid":
             # The envelope itself is malformed: keep artifacts, note the reason,
             # but do not fail the run lifecycle over an evaluation-side defect.
-            update_run_status(
+            _finalize_run(
                 run_dir,
                 "completed",
                 status_reason="evaluation.json invalid: %s" % written.get("error"),
             )
         else:
-            update_run_status(run_dir, "completed")
+            _finalize_run(run_dir, "completed")
     except RunFailure as exc:
         _fail_run(run_dir, exc)
     except Exception as exc:  # runner exception: never absorbed, always visible
@@ -163,12 +174,23 @@ def _record_judge_outcome(run_dir: Path, note: Optional[str]) -> None:
 
 
 def _reload(run_dir: Path) -> Dict[str, Any]:
-    from .run_contract import read_run_record
-
     return read_run_record(run_dir) or {}
 
 
+def _finalize_run(run_dir: Path, status: str, *, status_reason: Optional[str] = None) -> Dict[str, Any]:
+    """Write a terminal state unless a watchdog/recovery already finalized it."""
+    existing = read_run_record(run_dir)
+    if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+        return existing
+    return update_run_status(run_dir, status, status_reason=status_reason)
+
+
 def _fail_run(run_dir: Path, failure: RunFailure) -> None:
+    existing = read_run_record(run_dir)
+    if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+        # A watchdog or recovery sweep already decided this run's terminal
+        # state (e.g. timed_out while the executor was stuck); never overwrite.
+        return
     has_reports = (run_dir / "summary.json").exists() and (run_dir / "audit.json").exists()
     if not has_reports:
         write_error(

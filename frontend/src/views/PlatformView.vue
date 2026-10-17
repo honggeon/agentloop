@@ -15,6 +15,7 @@ import {
   fetchTestCases,
   fetchTestSuites,
   launchSuiteJob,
+  recoverStaleSuiteJobs,
   updateTestSuite,
   type AgentConfig,
   type RunStatusPayload,
@@ -74,10 +75,16 @@ const launchBusy = ref(false);
 const lastRun = ref<RunStatusPayload | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-// 发起批量运行（SuiteJob -> CaseAttempt -> Run）
+// 发起批量运行（SuiteJob -> CaseExecution -> Attempt N -> Run）
 const batchAgentId = ref("");
 const batchSuiteId = ref("");
 const batchJudge = ref(false);
+// Phase 1.1 可靠性控制：重试、套件总超时、执行/成本预算、幂等提交
+const batchMaxRetries = ref(0);
+const batchTimeoutSeconds = ref<number | null>(null);
+const batchBudgetAttempts = ref<number | null>(null);
+const batchBudgetTokens = ref<number | null>(null);
+const batchIdempotencyKey = ref("");
 const batchBusy = ref(false);
 const activeJob = ref<SuiteJob | null>(null);
 let jobPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -87,6 +94,7 @@ const legacyCases = computed(() => testCases.value.filter((item) => item.legacy)
 const selectedCase = computed(() => testCases.value.find((item) => item.case_id === selectedCaseId.value) || null);
 const enabledSuites = computed(() => suites.value.filter((item) => item.enabled && item.case_ids.length));
 const activeJobAttempts = computed(() => activeJob.value?.attempts || []);
+const hasStaleJobs = computed(() => suiteJobs.value.some((job) => job.stale));
 
 const RUN_STATUS_LABELS: Record<string, string> = {
   queued: "排队中",
@@ -272,10 +280,20 @@ async function launchSuite() {
   error.value = "";
   stopJobPolling();
   try {
-    const result = await launchSuiteJob(batchSuiteId.value, {
-      agent_id: batchAgentId.value,
-      judge: batchJudge.value
-    });
+    const budget: { max_attempts?: number | null; max_total_tokens?: number | null } = {};
+    if (batchBudgetAttempts.value) budget.max_attempts = batchBudgetAttempts.value;
+    if (batchBudgetTokens.value) budget.max_total_tokens = batchBudgetTokens.value;
+    const result = await launchSuiteJob(
+      batchSuiteId.value,
+      {
+        agent_id: batchAgentId.value,
+        judge: batchJudge.value,
+        max_retries: batchMaxRetries.value || 0,
+        timeout_seconds: batchTimeoutSeconds.value || null,
+        ...(Object.keys(budget).length ? { budget } : {})
+      },
+      batchIdempotencyKey.value.trim() || undefined
+    );
     const payload = await fetchSuiteJob(result.job_id);
     activeJob.value = payload.suite_job;
     startJobPolling(result.job_id);
@@ -284,6 +302,21 @@ async function launchSuite() {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     batchBusy.value = false;
+  }
+}
+
+// 恢复进程重启后遗留的 stale SuiteJob：孤儿 attempt 标记为失败（可重试），
+// 未完成的 case 用新 Run 继续执行，已完成证据保留。
+async function recoverJobs() {
+  error.value = "";
+  try {
+    const result = await recoverStaleSuiteJobs();
+    await loadAll();
+    if (result.resumed.length && activeJob.value && result.resumed.includes(activeJob.value.job_id)) {
+      startJobPolling(activeJob.value.job_id);
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
   }
 }
 
@@ -588,6 +621,28 @@ onUnmounted(() => {
           <input v-model="batchJudge" type="checkbox" />
           每个用例运行后执行 LLM Judge（需要模型凭据；失败不影响运行产物）
         </label>
+        <div class="batch-controls">
+          <label class="batch-field">
+            失败重试次数
+            <input v-model.number="batchMaxRetries" type="number" min="0" max="5" placeholder="0" />
+          </label>
+          <label class="batch-field">
+            套件总超时（秒）
+            <input v-model.number="batchTimeoutSeconds" type="number" min="1" placeholder="不限" />
+          </label>
+          <label class="batch-field">
+            执行预算（最大运行次数）
+            <input v-model.number="batchBudgetAttempts" type="number" min="1" placeholder="不限" />
+          </label>
+          <label class="batch-field">
+            成本预算（最大 token）
+            <input v-model.number="batchBudgetTokens" type="number" min="1" placeholder="不限" />
+          </label>
+          <label class="batch-field">
+            Idempotency-Key（可选）
+            <input v-model="batchIdempotencyKey" placeholder="防止重复提交同一批量任务" />
+          </label>
+        </div>
         <button
           class="primary"
           type="button"
@@ -596,7 +651,13 @@ onUnmounted(() => {
         >
           {{ batchBusy ? "提交中…" : "发起批量运行" }}
         </button>
-        <p class="hint">按测试集定义顺序逐个执行；单个 case 失败不会阻断后续 case。</p>
+        <button v-if="hasStaleJobs" class="ghost" type="button" @click="recoverJobs">
+          恢复中断的批量任务
+        </button>
+        <p class="hint">
+          按测试集定义顺序逐个执行；单个 case 失败不会阻断后续 case。可重试的失败（超时、连接失败、5xx）按重试次数自动重试，每次重试创建新
+          Run，不覆盖旧证据；并发受全局与单 Agent 上限约束。
+        </p>
       </div>
 
       <table v-if="suiteJobs.length" class="platform-table jobs-table">
@@ -615,8 +676,12 @@ onUnmounted(() => {
             <td>
               <span class="chip" :data-status="job.status">{{ jobStatusLabel(String(job.status)) }}</span>
               <span v-if="job.stale" class="chip quiet">执行器已中断（stale）</span>
+              <span v-else-if="job.recovered" class="chip quiet">已恢复</span>
             </td>
-            <td>{{ job.stats.completed }}/{{ job.stats.total }} 完成</td>
+            <td>
+              {{ job.stats.completed }}/{{ job.stats.total }} 完成
+              <span v-if="job.stats.retries" class="hint">（重试 {{ job.stats.retries }} 次）</span>
+            </td>
             <td>{{ job.created_at || "—" }}</td>
           </tr>
         </tbody>
@@ -629,12 +694,25 @@ onUnmounted(() => {
           <span class="chip" :data-status="activeJob.status">{{ jobStatusLabel(String(activeJob.status)) }}</span>
           <span v-if="activeJob.cancel_requested" class="chip quiet">已请求取消</span>
           <span v-if="activeJob.stale" class="chip quiet">执行器已中断（stale）</span>
+          <span v-if="activeJob.recovered" class="chip quiet">已恢复（进程重启后续跑）</span>
         </p>
         <p v-if="activeJob.status_reason" class="hint">原因：{{ activeJob.status_reason }}</p>
         <p class="hint">
           统计：总数 {{ activeJob.stats.total }}，完成 {{ activeJob.stats.completed }}，失败
           {{ activeJob.stats.failed }}，超时 {{ activeJob.stats.timed_out }}，取消
-          {{ activeJob.stats.cancelled }}，跳过 {{ activeJob.stats.skipped }}。通过率分母只包含已完成的 case，跳过不计入。
+          {{ activeJob.stats.cancelled }}，跳过 {{ activeJob.stats.skipped }}；运行
+          {{ activeJob.stats.runs }} 次，重试 {{ activeJob.stats.retries }} 次。通过率分母只包含已完成的 case，跳过不计入。
+        </p>
+        <p v-if="activeJob.limits" class="hint">
+          并发上限：全局 {{ activeJob.limits.global }} / 单 Agent {{ activeJob.limits.agent }}；
+          单 case 重试上限 {{ activeJob.max_retries ?? 0 }} 次<template v-if="activeJob.timeout_seconds">
+            ；套件总超时 {{ activeJob.timeout_seconds }} 秒</template>。
+        </p>
+        <p v-if="activeJob.budget && (activeJob.budget.max_attempts || activeJob.budget.max_total_tokens)" class="hint">
+          预算：已运行 {{ activeJob.budget_used?.attempts ?? 0 }} 次<template v-if="activeJob.budget.max_attempts">
+            / 上限 {{ activeJob.budget.max_attempts }}</template>；已消耗
+          {{ activeJob.budget_used?.total_tokens ?? 0 }} token<template v-if="activeJob.budget.max_total_tokens">
+            / 上限 {{ activeJob.budget.max_total_tokens }}</template>。预算耗尽后未开始的 case 标记为跳过。
         </p>
         <table v-if="activeJobAttempts.length" class="platform-table">
           <thead>
@@ -643,7 +721,10 @@ onUnmounted(() => {
           <tbody>
             <tr v-for="attempt in activeJobAttempts" :key="attempt.attempt_id">
               <td>{{ attempt.order + 1 }}</td>
-              <td><code>{{ attempt.case_id }}</code> {{ attempt.case_title }}</td>
+              <td>
+                <code>{{ attempt.case_id }}</code> {{ attempt.case_title }}
+                <span v-if="attempt.retry_index" class="chip quiet">重试 #{{ attempt.retry_index }}</span>
+              </td>
               <td>
                 <span class="chip" :data-status="attempt.status">{{ runStatusLabel(String(attempt.status)) }}</span>
                 <span v-if="attempt.status_reason" class="hint">— {{ attempt.status_reason }}</span>

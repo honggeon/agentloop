@@ -432,11 +432,46 @@ platform page (sidebar「测试平台」), following the model
 
 A failed case never blocks the rest of the suite. Stats keep `skipped` and
 `unknown` quality separate from passes — the pass-rate denominator only
-includes completed cases. Phase 1 has no automatic retry, no idempotent
-suite-job submission and no cross-process recovery: a queued/running job
-whose executor is gone is flagged `stale` instead of pretending to progress.
-SuiteJob records live in `platform/suite_jobs/<job_id>.json` and are written
-atomically like all other platform files.
+includes completed cases. SuiteJob records live in
+`platform/suite_jobs/<job_id>.json` and are written atomically like all other
+platform files.
+
+## Agent Test Platform (Phase 1.1): Batch Reliability and Scheduling
+
+Phase 1.1 hardens batch execution to `SuiteJob -> CaseExecution -> Attempt N
+-> Run N` — every retry is a new attempt bound to a new Run, and old Runs keep
+their evidence untouched:
+
+- **Idempotent launch** — `POST /api/test-suites/{suite_id}/runs` accepts an
+  `Idempotency-Key` header; the same key with the same request replays to the
+  original job (`idempotent_replay: true`), a different request conflicts
+  (`409 idempotency_conflict`).
+- **Retry** — `max_retries` (0–5) retries failed/timed-out cases whose error
+  is retryable (agent timeout/unreachable/5xx/stream errors, executor
+  interruptions); validation and definition errors are never retried.
+- **Concurrency caps** — static ceilings, no autoscaling: a global cap
+  (`AUDITRAIL_PLATFORM_MAX_CONCURRENCY`, default 4) plus a per-Agent cap
+  (Agent config `max_concurrency`, falling back to
+  `AUDITRAIL_PLATFORM_AGENT_MAX_CONCURRENCY`, default 1). The caps in effect
+  at launch are snapshotted into the job's `limits`.
+- **Timeouts** — each case Run is watchdogged against its `timeout_seconds`
+  (cooperative cancel first, forced `timed_out` after a grace period); the
+  job-level `timeout_seconds` is a suite-wide deadline that cancels the
+  in-flight case, skips pending cases and fails the job with `suite_timeout`.
+- **Budgets** — `budget.max_attempts` (execution budget, retries included)
+  and `budget.max_total_tokens` (cost budget over observed LLM tokens) stop
+  scheduling new work; pending cases are `skipped` and the job fails with
+  `budget_exceeded`. Usage is reported in `budget_used`.
+- **Recovery** — on backend startup (or via `POST /api/suite-jobs/recover`)
+  queued/running jobs whose executor is gone are resumed: orphaned in-flight
+  attempts reconcile to their Run's terminal state or to
+  `failed`/`executor_interrupted` (retryable), remaining cases continue, and
+  resumed jobs are marked `recovered`. Jobs that nobody is executing are
+  still flagged `stale` until recovered.
+
+SuiteJob stats count cases by their *final* attempt (`total/completed/failed/
+timed_out/cancelled/skipped`) and additionally report `runs` (attempts that
+produced a Run) and `retries`.
 
 ## Auth
 

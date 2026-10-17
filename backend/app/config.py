@@ -71,6 +71,12 @@ class Settings:
     agent_allowed_hosts: tuple[str, ...] = ()
     agent_allow_private_endpoints: bool = False
     agent_allowed_ports: tuple[int, ...] = (80, 443)
+    #: Phase 1.1 batch reliability: static concurrency ceilings. The global cap
+    #: bounds concurrent case Runs across all SuiteJobs; the per-agent cap is
+    #: the default for Agents without their own ``max_concurrency``. Both are
+    #: fixed at startup — no dynamic autoscaling.
+    platform_max_concurrency: int = 4
+    platform_agent_max_concurrency: int = 1
 
 
 @lru_cache(maxsize=1)
@@ -105,6 +111,8 @@ def get_settings() -> Settings:
         agent_allowed_hosts=_csv_values(os.getenv("AGENT_ALLOWED_HOSTS", "")),
         agent_allow_private_endpoints=_env_bool("AGENT_ALLOW_PRIVATE_ENDPOINTS", False),
         agent_allowed_ports=_port_values(os.getenv("AGENT_ALLOWED_PORTS", "80,443")),
+        platform_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_MAX_CONCURRENCY", 4),
+        platform_agent_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_AGENT_MAX_CONCURRENCY", 1),
     )
 
 

@@ -3596,3 +3596,23 @@ body {
   border-color: #b08a2a;
 }
 
+
+/* Phase 1.1 批量可靠性控制：重试 / 超时 / 预算 / 幂等 */
+.platform-panel .batch-controls {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.platform-panel .batch-field {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.platform-panel .batch-field input {
+  width: 130px;
+}

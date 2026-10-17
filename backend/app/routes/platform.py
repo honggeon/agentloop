@@ -291,8 +291,14 @@ def delete_test_suite(suite_id: str) -> dict[str, Any]:
 
 
 @router.post("/test-suites/{suite_id}/runs")
-def create_suite_job(suite_id: str, payload: dict[str, Any]):
-    """Launch one sequential batch job (SuiteJob -> CaseAttempt -> Run)."""
+def create_suite_job(suite_id: str, payload: dict[str, Any], idempotency_key: Optional[str] = Header(default=None)):
+    """Launch one batch job (SuiteJob -> CaseExecution -> Attempt N -> Run).
+
+    Phase 1.1: the payload may carry ``max_retries``, ``timeout_seconds``
+    (suite-wide deadline) and ``budget`` (``max_attempts`` /
+    ``max_total_tokens``); an ``Idempotency-Key`` header replays to the
+    original job and conflicts (409) on a different request.
+    """
     settings = get_settings()
     suite = platform_store.get_test_suite(suite_id, settings)
     if suite is None:
@@ -317,6 +323,34 @@ def create_suite_job(suite_id: str, payload: dict[str, Any]):
             status_code=400,
             detail={"code": "invalid_request", "message": "agent_id is required"},
         )
+    judge = bool(payload.get("judge"))
+    try:
+        options = suite_mod.normalize_job_options(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_job_options", "message": str(exc)},
+        ) from exc
+    fingerprint = platform_store.suite_fingerprint(suite_id, suite.get("version"), agent_id, judge, options)
+
+    if idempotency_key:
+        existing = platform_store.lookup_suite_idempotency(idempotency_key, settings)
+        if existing:
+            if existing.get("fingerprint") != fingerprint:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "idempotency_conflict", "message": "Idempotency-Key was used with a different request"},
+                )
+            job_id = str(existing.get("job_id") or "")
+            record = platform_store.get_suite_job(job_id, settings)
+            if record is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "idempotency_conflict", "message": "the job for this Idempotency-Key no longer exists"},
+                )
+            status_code = 202 if suite_mod.is_active_job_status(record.get("status")) else 200
+            return JSONResponse(status_code=status_code, content=_job_accepted(job_id, record, replay=True))
+
     agent = platform_store.get_agent(agent_id, settings)
     if agent is None:
         raise HTTPException(status_code=404, detail={"code": "agent_not_found", "message": "unknown agent %s" % agent_id})
@@ -328,14 +362,24 @@ def create_suite_job(suite_id: str, payload: dict[str, Any]):
             detail={"code": "endpoint_rejected", "message": exc.reason},
         ) from exc
 
-    judge = bool(payload.get("judge"))
     snapshots = []
     for case_id in case_ids:
         case = platform_store.get_test_case(case_id, settings)
         snapshots.append(case or {"case_id": case_id, "title": "", "version": None})
+    global_limit, agent_limit = suite_executor.limits_for(settings, agent)
     job_id = suite_mod.new_suite_job_id()
-    record = suite_mod.new_suite_job(job_id, suite=suite, agent=agent, judge=judge, case_snapshots=snapshots)
+    record = suite_mod.new_suite_job(
+        job_id,
+        suite=suite,
+        agent=agent,
+        judge=judge,
+        case_snapshots=snapshots,
+        options=options,
+        limits={"global": global_limit, "agent": agent_limit},
+    )
     platform_store.save_suite_job(record, settings)
+    if idempotency_key:
+        platform_store.store_suite_idempotency(idempotency_key, fingerprint, job_id, settings)
     suite_executor.submit(
         job_id,
         settings=settings,
@@ -343,14 +387,16 @@ def create_suite_job(suite_id: str, payload: dict[str, Any]):
         policy=build_endpoint_policy(settings),
         judge_runner=_default_judge_runner if judge else None,
     )
-    return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": job_id,
-            "status": "queued",
-            "status_url": "/api/suite-jobs/%s" % job_id,
-        },
-    )
+    return JSONResponse(status_code=202, content=_job_accepted(job_id, record, replay=False))
+
+
+def _job_accepted(job_id: str, record: dict[str, Any], *, replay: bool) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "status": record.get("status") or "queued",
+        "status_url": "/api/suite-jobs/%s" % job_id,
+        "idempotent_replay": bool(replay),
+    }
 
 
 @router.get("/suite-jobs")
@@ -393,6 +439,27 @@ def cancel_suite_job(job_id: str) -> dict[str, Any]:
     return _job_payload(record, settings)
 
 
+@router.post("/suite-jobs/recover")
+def recover_suite_jobs() -> dict[str, Any]:
+    """Resume queued/running SuiteJobs whose executor is gone (stale jobs).
+
+    In-process and cross-process staleness are handled identically; resumed
+    jobs are marked ``recovered`` and continue from their remaining queued
+    cases. Returns the ids of jobs that were re-submitted.
+    """
+    return {"resumed": recover_stale_suite_jobs()}
+
+
+def recover_stale_suite_jobs() -> list:
+    """Startup/manual recovery entry point (also wired to app startup)."""
+    settings = get_settings()
+    return suite_executor.recover_stale_jobs(
+        settings,
+        policy=build_endpoint_policy(settings),
+        judge_runner=_default_judge_runner,
+    )
+
+
 def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": record.get("job_id"),
@@ -400,6 +467,12 @@ def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
         "suite_ref": record.get("suite_ref"),
         "agent_ref": record.get("agent_ref"),
         "judge": bool(record.get("judge")),
+        "max_retries": int(record.get("max_retries") or 0),
+        "timeout_seconds": record.get("timeout_seconds"),
+        "budget": record.get("budget") or {"max_attempts": None, "max_total_tokens": None},
+        "budget_used": record.get("budget_used") or {"attempts": 0, "total_tokens": 0},
+        "limits": record.get("limits"),
+        "recovered": bool(record.get("recovered")),
         "created_at": record.get("created_at"),
         "started_at": record.get("started_at"),
         "finished_at": record.get("finished_at"),
