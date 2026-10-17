@@ -320,22 +320,62 @@ def events_to_messages(events: List[Dict]) -> List[Dict]:
             messages.append(item)
         elif event_type == "tool/result":
             message = data.get("message") or {}
-            for block in message.get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool-result":
-                    continue
-                call_id = str(block.get("toolCallId") or "")
-                item = {
-                    "id": message.get("id"),
-                    "role": "tool",
-                    "timestamp": timestamp,
-                    "tool_call_id": call_id,
-                    "tool_name": tool_names.get(call_id) or None,
-                    "content": _text_of_blocks(block.get("content")),
-                }
-                if block.get("isError"):
-                    item["is_error"] = True
-                messages.append(item)
+            blocks = message.get("content") or []
+            tool_result_blocks = [
+                block
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "tool-result"
+            ]
+            if tool_result_blocks:
+                for block in tool_result_blocks:
+                    call_id = str(block.get("toolCallId") or "")
+                    item = {
+                        "id": message.get("id"),
+                        "role": "tool",
+                        "timestamp": timestamp,
+                        "tool_call_id": call_id,
+                        "tool_name": tool_names.get(call_id) or None,
+                        "content": _text_of_blocks(block.get("content")),
+                    }
+                    if block.get("isError"):
+                        item["is_error"] = True
+                    messages.append(item)
+            else:
+                item = _realtime_tool_result_message(message, blocks, tool_names, timestamp)
+                if item is not None:
+                    messages.append(item)
     return messages
+
+
+def _realtime_tool_result_message(
+    message: Dict, blocks: List, tool_names: Dict[str, str], timestamp
+) -> Optional[Dict]:
+    """Convert a real DSH ``tool/result`` message into a tool result row.
+
+    Live DSH recordings wrap the result directly in the message: the content
+    holds plain ``text`` blocks and the call id / error flag sit on the
+    message itself (``toolCallId``, ``isError``), instead of the nested
+    ``tool-result`` content block used by the consolidated shape.
+    """
+    call_id = str(message.get("toolCallId") or "")
+    if not call_id:
+        source = message.get("source")
+        if isinstance(source, dict):
+            call_id = str(source.get("callId") or "")
+    content = _text_of_blocks(blocks, block_type="text")
+    if not call_id and not content:
+        return None
+    item: Dict = {
+        "id": message.get("id"),
+        "role": "tool",
+        "timestamp": timestamp,
+        "tool_call_id": call_id,
+        "tool_name": tool_names.get(call_id) or None,
+        "content": content,
+    }
+    if message.get("isError"):
+        item["is_error"] = True
+    return item
 
 
 def build_session_response(events: List[Dict], path: Optional[Path] = None) -> Dict:

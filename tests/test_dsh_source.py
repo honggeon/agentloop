@@ -254,6 +254,89 @@ def test_events_to_messages_mapping():
     assert "tool_calls" not in final
 
 
+def _realtime_tool_result_event(call_id, text, is_error=False, include_tool_call_id=True):
+    """Real DSH ``tool/result`` shape: text blocks on the message itself."""
+    message = {
+        "role": "tool",
+        "id": "t-real",
+        "source": {"kind": "tool", "callId": call_id},
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error,
+    }
+    if include_tool_call_id:
+        message["toolCallId"] = call_id
+    return {"type": "tool/result", "seq": 22, "time": 1787000003000, "data": {"message": message}}
+
+
+def test_events_to_messages_real_dsh_text_tool_result():
+    events = _events()
+    # Replace the consolidated tool-result fixture with the real DSH shape.
+    events[6] = _realtime_tool_result_event("call_1", "file content")
+
+    messages = events_to_messages(events)
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
+
+    tool = messages[2]
+    assert tool == {
+        "id": "t-real",
+        "role": "tool",
+        "timestamp": 1787000003000,
+        "tool_call_id": "call_1",
+        "tool_name": "read_file",
+        "content": "file content",
+    }
+
+
+def test_events_to_messages_real_dsh_error_tool_result():
+    events = _events()
+    events[6] = _realtime_tool_result_event("call_1", "boom: file not found", is_error=True)
+
+    tool = events_to_messages(events)[2]
+    assert tool["role"] == "tool"
+    assert tool["tool_call_id"] == "call_1"
+    assert tool["tool_name"] == "read_file"
+    assert tool["content"] == "boom: file not found"
+    assert tool["is_error"] is True
+
+
+def test_events_to_messages_real_dsh_call_id_falls_back_to_source():
+    events = _events()
+    events[6] = _realtime_tool_result_event("call_1", "file content", include_tool_call_id=False)
+
+    tool = events_to_messages(events)[2]
+    assert tool["tool_call_id"] == "call_1"
+    assert tool["tool_name"] == "read_file"
+
+
+def test_events_to_messages_nested_tool_result_shape_still_works():
+    # Regression guard: the consolidated ``tool-result`` content block shape.
+    tool = events_to_messages(_events())[2]
+    assert tool["role"] == "tool"
+    assert tool["tool_call_id"] == "call_1"
+    assert tool["tool_name"] == "read_file"
+    assert tool["content"] == "file content"
+    assert "is_error" not in tool
+
+
+def test_cli_import_dsh_session_real_text_tool_result_audits_clean(tmp_path):
+    dsh_home = tmp_path / "dsh"
+    events = _events()
+    events[6] = _realtime_tool_result_event("call_1", "file content")
+    _write_session(dsh_home, events=events)
+    out = tmp_path / "runs"
+    code = cli.main(
+        ["import-dsh-session", "--dsh-home", str(dsh_home), "--session-id", SESSION_ID, "--out", str(out)]
+    )
+    assert code == 0
+    run = list(out.iterdir())[0]
+    audit = json.loads((run / "audit.json").read_text(encoding="utf-8"))
+    assert audit["tool_call_count"] == 1
+    assert audit["tool_result_count"] == 1
+    assert audit["missing_tool_results"] == []
+    assert audit["orphan_tool_results"] == []
+    assert not [f for f in audit["findings"] if f.get("code") == "missing_tool_result"]
+
+
 def test_build_session_response_filters_chunks():
     response = build_session_response(_events())
     session = response["session"]
