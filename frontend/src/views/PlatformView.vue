@@ -766,6 +766,12 @@ onUnmounted(() => {
           <span v-if="activeJob.cancel_requested" class="chip quiet">已请求取消</span>
           <span v-if="activeJob.stale" class="chip quiet">执行器已中断（stale）</span>
           <span v-if="activeJob.recovered" class="chip quiet">已恢复（进程重启后续跑）</span>
+          <router-link
+            class="ghost small"
+            :to="{ name: 'suite-job-detail', params: { jobId: activeJob.job_id } }"
+          >
+            打开详情页
+          </router-link>
         </p>
         <p v-if="activeJob.status_reason" class="hint">原因：{{ activeJob.status_reason }}</p>
         <p class="hint">

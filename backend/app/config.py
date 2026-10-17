@@ -81,6 +81,13 @@ class Settings:
     #: production auth in this deployment; these endpoints are local-only
     #: management capabilities and say so in every response.
     local_admin_enabled: bool = True
+    #: Phase 3 run-index watcher: an opt-in, debounced *polling* refresher
+    #: (no OS watcher dependency in this environment). Disabled by default;
+    #: failures degrade the watcher, never the main API.
+    run_index_watcher_enabled: bool = False
+    run_index_debounce_ms: int = 500
+    run_index_max_batch: int = 1000
+    run_index_poll_interval_ms: int = 2000
 
 
 @lru_cache(maxsize=1)
@@ -118,6 +125,10 @@ def get_settings() -> Settings:
         platform_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_MAX_CONCURRENCY", 4),
         platform_agent_max_concurrency=_positive_int("AUDITRAIL_PLATFORM_AGENT_MAX_CONCURRENCY", 1),
         local_admin_enabled=_env_bool("AUDITRAIL_LOCAL_ADMIN", True),
+        run_index_watcher_enabled=_env_bool("AUDITRAIL_RUN_INDEX_WATCHER", False),
+        run_index_debounce_ms=_positive_int("AUDITRAIL_RUN_INDEX_DEBOUNCE_MS", 500),
+        run_index_max_batch=_positive_int("AUDITRAIL_RUN_INDEX_MAX_BATCH", 1000),
+        run_index_poll_interval_ms=_positive_int("AUDITRAIL_RUN_INDEX_POLL_INTERVAL_MS", 2000),
     )
 
 

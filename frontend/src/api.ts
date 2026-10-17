@@ -1573,6 +1573,8 @@ export interface RunIndexStatus {
   indexed_count: number;
   error_count: number;
   errors: Array<{ run_id?: string; stage: string; message: string }>;
+  // Phase 3：watcher 是独立的轮询状态块，绝不能伪装成索引一致性或数据质量信号。
+  watcher?: RunIndexWatcherStatus;
   authority?: string;
   note?: string;
 }
@@ -1583,6 +1585,279 @@ export function fetchRunIndexStatus(): Promise<RunIndexStatus> {
 
 export function rebuildRunIndex(): Promise<RunIndexStatus> {
   return apiPost<RunIndexStatus>("/api/admin/run-index/rebuild");
+}
+
+// --- Phase 3：外部证据（Langfuse/promptfoo 集成）、SuiteJob 聚合详情、价格表 ------
+//
+// 外部证据是「仅展示」数据：存放在独立的 platform/external/ 存储中，永远不会
+// 修改正式 run 产物，不参与 deterministic audit、judge overall status 或
+// score cap。前端必须将其与确定性审计/裁判结论明确分区展示。
+
+// 外部评测记录：status 是外部系统自己的结论（pass/partial/fail/unknown），
+// 不映射到内部 judge/维度状态；score 永远带 score_min~score_max 范围，
+// 不会被重新解释成 0-100 的 completion_score。
+export interface ExternalEvaluationProvenance {
+  source_system: string;
+  source_id: string;
+  imported_at: string | null;
+  association: string;
+  confidence: "exact" | "strong" | "weak" | "unlinked" | string;
+}
+
+export interface ExternalEvaluation {
+  evaluation_id: string;
+  source_system: string;
+  source_id: string;
+  source_version?: string | null;
+  run_id: string | null;
+  agent_id: string | null;
+  suite_id?: string | null;
+  case_id?: string | null;
+  metric_name: string;
+  status: "pass" | "partial" | "fail" | "unknown" | string;
+  score: number | null;
+  score_min: number | null;
+  score_max: number | null;
+  label: string | null;
+  comment: string | null;
+  provenance: ExternalEvaluationProvenance;
+  metadata: Record<string, unknown>;
+  warnings?: string[];
+}
+
+// 外部 Trace：source_id 是外部系统自己的 trace id，绝不冒充平台 run_id；
+// 无法关联的 trace 保留为 unlinked_external_trace 证据，不丢弃。
+export interface ExternalTraceTokens {
+  input: number | null;
+  output: number | null;
+  total: number | null;
+}
+
+export interface ExternalTraceCost {
+  value: number | null;
+  currency: string | null;
+  source: CostSource;
+}
+
+export interface ExternalTraceLink {
+  method: "run_id" | "session_id" | "trace_field" | "source_id_map" | "agent_time_window" | "none" | string;
+  confidence: "exact" | "strong" | "weak" | "unlinked" | string;
+  run_ids: string[];
+}
+
+export interface ExternalTrace {
+  trace_id: string;
+  source_system: string;
+  source_id: string;
+  run_id: string | null;
+  agent_id: string | null;
+  name: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  latency_ms: number | null;
+  status: string;
+  error: string | null;
+  tokens: ExternalTraceTokens;
+  cost: ExternalTraceCost;
+  link: ExternalTraceLink;
+  import_status: "pending" | "imported" | "partial" | "failed" | "unlinked" | "skipped" | string;
+  imported_at?: string;
+  warnings?: string[];
+  metadata: Record<string, unknown>;
+}
+
+// 外部证据汇总：仅展示统计，不是质量信号。
+export interface ExternalSummary {
+  count: number;
+  evaluation_count: number;
+  trace_count: number;
+  linked_count: number;
+  unlinked_count: number;
+  source_systems: string[];
+}
+
+export interface RunExternalEvaluations {
+  run_id: string;
+  count: number;
+  external_evaluations: ExternalEvaluation[];
+}
+
+export interface RunExternalTraces {
+  run_id: string;
+  count: number;
+  external_traces: ExternalTrace[];
+}
+
+export interface AgentExternalEvaluations {
+  agent_id: string;
+  count: number;
+  external_evaluations: ExternalEvaluation[];
+  external_summary: ExternalSummary;
+}
+
+// 集成导入历史列表中的摘要行（GET /api/integrations/imports）。
+export interface IntegrationImport {
+  import_id: string;
+  source_system: string;
+  kind?: string | null;
+  status: string;
+  total_records: number;
+  imported_records: number;
+  duplicate_records: number;
+  unlinked_records: number;
+  invalid_records: number;
+  imported_at: string | null;
+}
+
+// 完整导入报告（POST /api/integrations/{source}/import 或 GET /imports/{id}）。
+export interface IntegrationImportResult extends IntegrationImport {
+  dry_run?: boolean;
+  skipped_records?: number;
+  warnings: string[];
+  errors: Array<{ line?: number; error: string }>;
+  idempotent_replay?: boolean;
+}
+
+// 版本化价格表记录：draft -> active -> retired，单 active 版本，仅 USD。
+export interface PriceVersion {
+  price_version: string;
+  currency: string;
+  effective_at: string | null;
+  entries: Record<string, { input_per_1k?: number; output_per_1k?: number; currency?: string; effective_at?: string | null }>;
+  status: "draft" | "active" | "retired" | string;
+  created_at: string;
+  updated_at: string;
+}
+
+// 运行索引 watcher 的独立状态块（GET /api/admin/run-index/status 的 watcher 字段）。
+export interface RunIndexWatcherStatus {
+  enabled: boolean;
+  mode: string;
+  status: "disabled" | "running" | "degraded" | "stopped" | string;
+  last_event_at: string | null;
+  last_refresh_at: string | null;
+  pending_events: number;
+  error_count: number;
+}
+
+// 关联置信度中文标签：unlinked 显示「未关联」，与弱关联区分。
+export const EXTERNAL_CONFIDENCE_LABELS: Record<string, string> = {
+  exact: "精确关联",
+  strong: "强关联",
+  weak: "弱关联",
+  unlinked: "未关联"
+};
+
+// 外部 Trace 关联方式中文标签。
+export const EXTERNAL_LINK_METHOD_LABELS: Record<string, string> = {
+  run_id: "运行 ID 直接关联",
+  session_id: "会话 ID 关联",
+  trace_field: "Trace 字段关联",
+  source_id_map: "来源 ID 映射关联",
+  agent_time_window: "Agent 时间窗口关联",
+  none: "无关联"
+};
+
+// 运行索引 watcher 状态中文标签；watcher 是独立的轮询状态，不是数据质量信号。
+export const WATCHER_STATUS_LABELS: Record<string, string> = {
+  disabled: "已关闭",
+  running: "运行中",
+  degraded: "已降级",
+  stopped: "已停止"
+};
+
+// SuiteJob 聚合详情（GET /api/suite-jobs/{id}/detail）的 CaseExecution 分组：
+// 同一 case 的多次重试是一组 attempt（retry_index 递增），final_status 取最终尝试。
+export interface CaseExecutionDetail {
+  case_execution_id: string;
+  order: number;
+  case_id: string | null;
+  case_title?: string | null;
+  attempt_count: number;
+  attempts: string[];
+  final_attempt_id: string;
+  final_status: string | null;
+}
+
+// Attempt 详情复用 SuiteJobAttempt：attempt number = retry_index + 1，
+// is_final_attempt 区分「最终尝试」与历史 attempt。
+export type AttemptDetail = SuiteJobAttempt;
+
+// 按 case 最终 attempt 状态计数；unknown = 尚无最终尝试的 case（未评估），
+// retrying 不显示为 failed；pass_rate 分母只含已评估的 case。
+export interface SuiteJobDetailSummary {
+  total: number;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  timed_out: number;
+  cancelled: number;
+  skipped: number;
+  unknown: number;
+  attempts_total: number;
+  retries: number;
+  evaluated: number;
+  passed: number;
+  pass_rate: number | null;
+}
+
+// 预算与限额块：token 用量（budget_used.total_tokens / budget.max_total_tokens）、
+// attempt 用量、超时（timeout_seconds / deadline_at）、并发限额与预算耗尽原因。
+// concurrency 是进程内并发使用快照（重启后归零），仅展示；job 上的 limits 才是权威上限。
+export interface SuiteJobConcurrencySnapshot {
+  global_active: number;
+  agent_id?: string;
+  agent_active?: number;
+}
+
+export interface SuiteJobBudgetBlock {
+  budget: SuiteJobBudget;
+  budget_used: SuiteJobBudgetUsed;
+  limits: SuiteJobLimits | null;
+  concurrency?: SuiteJobConcurrencySnapshot;
+  max_retries: number;
+  timeout_seconds: number | null;
+  deadline_at: string | null;
+  budget_exceeded: boolean;
+  budget_exceeded_reason: string | null;
+}
+
+// SuiteJob 详情的外部证据区：与 deterministic audit 明确分隔，仅展示。
+export interface SuiteJobExternalEvidence {
+  summary: ExternalSummary;
+  external_evaluations: ExternalEvaluation[];
+  external_traces: ExternalTrace[];
+  note?: string;
+}
+
+// GET /api/suite-jobs/{job_id}/detail 的完整聚合载荷。
+export interface SuiteJobDetail {
+  suite_job: SuiteJob;
+  case_executions: CaseExecutionDetail[];
+  summary: SuiteJobDetailSummary;
+  budget: SuiteJobBudgetBlock;
+  external_evidence: SuiteJobExternalEvidence;
+}
+
+export function fetchSuiteJobDetail(jobId: string): Promise<SuiteJobDetail> {
+  return apiGet<SuiteJobDetail>(`/api/suite-jobs/${encodeURIComponent(jobId)}/detail`);
+}
+
+export function fetchRunExternalEvaluations(runId: string): Promise<RunExternalEvaluations> {
+  return apiGet<RunExternalEvaluations>(`/api/runs/${encodeURIComponent(runId)}/external-evaluations`);
+}
+
+export function fetchRunExternalTraces(runId: string): Promise<RunExternalTraces> {
+  return apiGet<RunExternalTraces>(`/api/runs/${encodeURIComponent(runId)}/external-traces`);
+}
+
+export function fetchAgentExternalEvaluations(agentId: string): Promise<AgentExternalEvaluations> {
+  return apiGet<AgentExternalEvaluations>(`/api/agents/${encodeURIComponent(agentId)}/external-evaluations`);
+}
+
+export function fetchIntegrationImports(): Promise<{ imports: IntegrationImport[]; count: number }> {
+  return apiGet<{ imports: IntegrationImport[]; count: number }>("/api/integrations/imports");
 }
 
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {

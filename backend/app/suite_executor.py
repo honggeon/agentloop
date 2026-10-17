@@ -99,6 +99,21 @@ class _ConcurrencyLimiter:
 _LIMITER = _ConcurrencyLimiter()
 
 
+def concurrency_snapshot(agent_id: Optional[str] = None) -> Dict[str, Any]:
+    """Display-only snapshot of in-process concurrency usage (Phase 3).
+
+    Counts reflect this process only — after a restart they are zero, which
+    is honest: the static ``limits`` recorded on the job remain the
+    authoritative caps.
+    """
+    with _LIMITER._cond:
+        snapshot: Dict[str, Any] = {"global_active": _LIMITER._global_active}
+        if agent_id:
+            snapshot["agent_id"] = str(agent_id)
+            snapshot["agent_active"] = _LIMITER._agent_active.get(str(agent_id), 0)
+        return snapshot
+
+
 def limits_for(settings: Settings, agent: Dict[str, Any]) -> Tuple[int, int]:
     """Effective (global, per-agent) concurrency caps for one launch."""
     global_limit = max(1, int(getattr(settings, "platform_max_concurrency", 4) or 4))

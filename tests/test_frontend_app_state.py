@@ -715,3 +715,126 @@ def test_platform_view_agent_metadata_editing():
     assert "route.query.job" in source
     assert "最终尝试" in source
     assert "fetch(" not in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 3：SuiteJob 独立详情页、外部证据展示与外部评测面板
+# ---------------------------------------------------------------------------
+
+SUITE_JOB_DETAIL_VIEW = Path("frontend/src/views/SuiteJobDetailView.vue")
+
+
+def test_suite_job_detail_route_exists_with_name_and_title():
+    source = ROUTER.read_text(encoding="utf-8")
+    assert SUITE_JOB_DETAIL_VIEW.exists()
+    assert 'path: "/suite-jobs/:jobId"' in source
+    assert 'name: "suite-job-detail"' in source
+    assert "SuiteJobDetailView" in source
+    assert 'meta: { title: "SuiteJob 详情" }' in source
+    # 旧入口 /platform?job= 保持不变
+    assert 'path: "/platform"' in source
+    assert 'name: "platform"' in source
+
+
+def test_phase3_api_contracts_exist():
+    source = API_TS.read_text(encoding="utf-8")
+    for name in (
+        "ExternalEvaluation",
+        "ExternalTrace",
+        "ExternalSummary",
+        "IntegrationImport",
+        "IntegrationImportResult",
+        "PriceVersion",
+        "RunIndexWatcherStatus",
+        "SuiteJobDetail",
+        "CaseExecutionDetail",
+        "AttemptDetail",
+        "RunExternalEvaluations",
+        "RunExternalTraces",
+        "AgentExternalEvaluations",
+        "SuiteJobDetailSummary",
+        "SuiteJobBudgetBlock",
+        "SuiteJobExternalEvidence",
+        "SuiteJobConcurrencySnapshot",
+    ):
+        assert name in source, name
+    for fn in (
+        "fetchSuiteJobDetail",
+        "fetchRunExternalEvaluations",
+        "fetchRunExternalTraces",
+        "fetchAgentExternalEvaluations",
+        "fetchIntegrationImports",
+        "fetchRunIndexStatus",
+    ):
+        assert fn in source, fn
+    for path in (
+        "/detail",
+        "/external-evaluations",
+        "/external-traces",
+        "/api/integrations/imports",
+    ):
+        assert path in source, path
+    # 外部证据中文标签常量：置信度 / 关联方式 / watcher 状态
+    assert "EXTERNAL_CONFIDENCE_LABELS" in source
+    assert "EXTERNAL_LINK_METHOD_LABELS" in source
+    assert "WATCHER_STATUS_LABELS" in source
+    for label in ("精确关联", "强关联", "弱关联", "未关联", "已关闭", "运行中", "已降级", "已停止"):
+        assert label in source, label
+    # watcher 是 RunIndexStatus 的可选独立块，且预算块含进程内并发快照
+    assert "watcher?: RunIndexWatcherStatus" in source
+    assert "concurrency?: SuiteJobConcurrencySnapshot" in source
+
+
+def test_suite_job_detail_view_sections_and_semantics():
+    source = SUITE_JOB_DETAIL_VIEW.read_text(encoding="utf-8")
+    # 页面分区：Header / 执行汇总 / 预算与限额 / Case 执行 / 外部证据
+    assert "SuiteJob 详情" in source
+    assert "执行汇总" in source
+    assert "预算与限额" in source
+    assert "Case 执行" in source
+    assert "外部证据" in source
+    assert "外部 Trace" in source
+    assert "外部评测" in source
+    # 外部证据与确定性审计明确分隔的说明文案与空态
+    assert "不影响确定性审计与裁判结论" in source
+    assert "未关联外部 Trace" in source
+    # unknown 显示「未评估」，最终尝试徽标与历史 attempt 区分
+    assert "未评估" in source
+    assert "最终尝试" in source
+    assert "历史尝试" in source
+    # 并发活跃快照展示（进程内快照）
+    assert "进程内快照" in source
+    assert "global_active" in source
+    assert "agent_active" in source
+    # 下钻：Run / Agent / 返回平台（模板属性内使用单引号路由名）
+    assert "name: 'run'" in source
+    assert "name: 'agent-detail'" in source
+    assert "name: 'platform'" in source
+    assert "返回平台" in source
+    assert "打开运行详情" in source
+    # 状态标签与轮询
+    assert "SUITE_JOB_STATUS_LABELS" in source
+    assert "RUN_STATUS_LABELS" in source
+    assert "FINAL_QUALITY_LABELS" in source
+    assert "fetchSuiteJobDetail" in source
+    assert "fetch(" not in source  # 组件不直接 fetch
+
+
+def test_platform_view_links_to_suite_job_detail_page():
+    source = PLATFORM_VIEW.read_text(encoding="utf-8")
+    assert "suite-job-detail" in source
+    assert "打开详情页" in source
+    # ?job= 旧入口逻辑保持不变
+    assert "route.query.job" in source
+
+
+def test_agent_detail_view_shows_external_evaluations_panel():
+    source = AGENT_DETAIL_VIEW.read_text(encoding="utf-8")
+    assert "外部评测" in source
+    assert "暂无外部评测证据" in source
+    assert "外部 score 与内部 completion_score 相互独立" in source
+    assert "不参与质量封顶" in source
+    assert "external_summary" in source
+    assert "EXTERNAL_CONFIDENCE_LABELS" in source
+    assert "fetchAgentExternalEvaluations" in source
+    assert "fetch(" not in source

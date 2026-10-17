@@ -8,13 +8,17 @@ import { GridComponent, LegendComponent, TooltipComponent } from "echarts/compon
 import { CanvasRenderer } from "echarts/renderers";
 import {
   costSourceLabel,
+  EXTERNAL_CONFIDENCE_LABELS,
   fetchAgentDetail,
+  fetchAgentExternalEvaluations,
   fetchAgentOverview,
   type AgentDetailPayload,
+  type AgentExternalEvaluations,
   type AgentHealthMetric,
   type AgentOverview,
   type AgentOverviewRange,
-  type AgentRunRow
+  type AgentRunRow,
+  type ExternalEvaluation
 } from "../api";
 import { formatPercent } from "../utils";
 
@@ -65,6 +69,38 @@ const HEALTH_SECTIONS: Array<{ key: keyof AgentOverview["health"]; label: string
 ];
 
 const agent = computed(() => overview.value?.agent || detail.value?.agent || null);
+
+// Phase 3 外部评测证据：与内部 completion_score / 健康指标相互独立，仅展示。
+const externalEvaluations = ref<AgentExternalEvaluations | null>(null);
+const externalLoading = ref(false);
+const externalError = ref("");
+
+// 外部评测行级状态是外部系统自己的结论；unknown 显示「未评估」。
+const EXTERNAL_EVAL_STATUS_LABELS: Record<string, string> = {
+  pass: "通过",
+  partial: "部分通过",
+  fail: "未通过",
+  unknown: "未评估"
+};
+
+function externalStatusLabel(status: string | null | undefined): string {
+  if (!status) return "未评估";
+  return EXTERNAL_EVAL_STATUS_LABELS[status] || "未评估";
+}
+
+function externalConfidenceLabel(confidence: string | null | undefined): string {
+  if (!confidence) return EXTERNAL_CONFIDENCE_LABELS.unlinked;
+  return EXTERNAL_CONFIDENCE_LABELS[confidence] || confidence;
+}
+
+// 外部 score 永远带 score_min~score_max 范围标注，不解释成 0-100 completion_score。
+function formatExternalScore(record: ExternalEvaluation): string {
+  if (record.score === null) return "—";
+  if (record.score_min !== null && record.score_max !== null) {
+    return `${record.score}（范围 ${record.score_min} ~ ${record.score_max}）`;
+  }
+  return String(record.score);
+}
 
 const partialWarning = computed(() => {
   const parts: string[] = [];
@@ -233,6 +269,19 @@ async function loadOverview() {
   }
 }
 
+async function loadExternalEvaluations() {
+  externalLoading.value = true;
+  externalError.value = "";
+  try {
+    externalEvaluations.value = await fetchAgentExternalEvaluations(agentId.value);
+  } catch (err) {
+    externalEvaluations.value = null;
+    externalError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    externalLoading.value = false;
+  }
+}
+
 async function loadAll() {
   loading.value = true;
   error.value = "";
@@ -244,6 +293,8 @@ async function loadAll() {
   } finally {
     loading.value = false;
   }
+  // 外部证据是独立分区，加载失败不阻断主页面。
+  await loadExternalEvaluations();
 }
 
 watch(range, () => {
@@ -496,6 +547,69 @@ onMounted(loadAll);
             </tbody>
           </table>
           <p v-else class="empty">该范围内没有运行记录。</p>
+        </section>
+
+        <section class="panel agent-span-12" aria-label="外部评测">
+          <div class="panel-head">
+            <h3>外部评测</h3>
+            <span v-if="externalEvaluations" class="chip quiet">
+              {{ externalEvaluations.count }} 条（{{ externalEvaluations.external_summary.source_systems.join(", ") || "无来源系统" }}）
+            </span>
+          </div>
+          <p class="hint">
+            外部评测证据仅用于展示：外部 score 与内部 completion_score 相互独立，不参与质量封顶，也不影响
+            deterministic audit 与 judge overall status。
+          </p>
+          <p v-if="externalError" class="banner error" role="alert">外部评测加载失败：{{ externalError }}</p>
+          <p v-else-if="externalLoading" class="banner loading">加载外部评测中…</p>
+          <template v-else-if="externalEvaluations">
+            <p class="hint">
+              共 {{ externalEvaluations.external_summary.count }} 条外部证据：评测
+              {{ externalEvaluations.external_summary.evaluation_count }} 条，Trace
+              {{ externalEvaluations.external_summary.trace_count }} 条；已关联
+              {{ externalEvaluations.external_summary.linked_count }} 条，未关联
+              {{ externalEvaluations.external_summary.unlinked_count }} 条；来源系统：{{
+                externalEvaluations.external_summary.source_systems.join(", ") || "无"
+              }}。
+            </p>
+            <table v-if="externalEvaluations.external_evaluations.length" class="run-table">
+              <thead>
+                <tr>
+                  <th>指标</th>
+                  <th>状态</th>
+                  <th>分数</th>
+                  <th>标签</th>
+                  <th>来源</th>
+                  <th>关联置信度</th>
+                  <th>关联 Run</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="record in externalEvaluations.external_evaluations" :key="record.evaluation_id">
+                  <td>{{ record.metric_name }}</td>
+                  <td>
+                    <span class="chip" :data-status="record.status">{{ externalStatusLabel(record.status) }}</span>
+                  </td>
+                  <td>{{ formatExternalScore(record) }}</td>
+                  <td>{{ record.label || "—" }}</td>
+                  <td>{{ record.source_system }}</td>
+                  <td>
+                    <span class="chip quiet">{{ externalConfidenceLabel(record.provenance?.confidence) }}</span>
+                  </td>
+                  <td>
+                    <router-link
+                      v-if="record.run_id"
+                      :to="{ name: 'run', params: { runId: record.run_id } }"
+                    >
+                      打开运行详情
+                    </router-link>
+                    <span v-else>—</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="empty">暂无外部评测证据。</p>
+          </template>
         </section>
       </div>
     </template>

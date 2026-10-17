@@ -514,6 +514,78 @@ run artifacts, without changing the audit/judge/run lifecycle semantics:
   are local-only management capabilities (no production auth; gated by
   `AUDITRAIL_LOCAL_ADMIN`, default on, responses state `authority: "local"`).
 
+## Agent Test Platform (Phase 3): External Evidence, Prices and Operations
+
+Phase 3 adapts external evaluation/observability systems and adds platform
+operations, under one rule: **external results are additional evidence only** —
+they never overwrite `audit.json`, deterministic checks, judge
+`overall_status` or score caps, and they never modify formal run artifacts
+(all external evidence lives under `platform/external/`).
+
+- **Unified external evidence** — `ExternalEvaluation` (score with explicit
+  `score_min`/`score_max`, never reinterpreted as a 0–100 completion score)
+  and `ExternalTrace` records carry `source_system`, `source_id`,
+  `imported_at`, association method and confidence
+  (`exact/strong/weak/unlinked`). Imports are idempotent on
+  `source_system + source_id`; conflicting re-imports keep the original record
+  and append a warning. Traces that cannot be linked are kept as
+  `unlinked_external_trace`, never dropped.
+- **Langfuse adapter** (`auditrail/integrations/langfuse.py`, no SDK required)
+  — imports traces/scores from safe JSON/JSONL exports, or from an explicitly
+  enabled HTTP endpoint guarded by the SSRF policy (`netguard`: scheme/host/
+  port checks, DNS re-validation, redirect guards); API tokens come from a
+  named environment variable and are never logged or stored. Association
+  priority: platform `run_id` metadata > `session_id` > trace-level field >
+  operator source-id mapping > agent + time window (always `weak`) >
+  `unlinked`. A Langfuse trace id is stored as `source_id`, never presented
+  as a platform run id.
+- **promptfoo adapter** (`auditrail/integrations/promptfoo.py`) — static
+  asset import only: tests/vars/provider declarations/basic assertions are
+  mapped to **draft** TestCases (`platform/external/promptfoo_drafts.json`);
+  `command`/plugin/shell/Python/JavaScript/template content is rejected or
+  preserved as `unmapped` assertions (`safe_to_execute: false`); nothing is
+  ever executed and the promptfoo CLI is never called. YAML uses
+  `yaml.safe_load` when PyYAML is installed and fails with a clear error
+  otherwise (JSON always works). `GET /api/integrations/promptfoo/export/{case_id}`
+  renders a safe static promptfoo JSON config: no secrets, tokens,
+  Authorization headers or full private prompts.
+- **Import APIs** — `POST /api/integrations/{source}/import` (`dry_run`,
+  `Idempotency-Key`: same key + same fingerprint replays, different
+  fingerprint is 409; import paths confined to the runs/platform roots),
+  `POST /api/integrations/{source}/validate`,
+  `GET /api/integrations/imports[/{import_id}]`,
+  `GET /api/runs/{run_id}/external-evaluations`,
+  `GET /api/runs/{run_id}/external-traces`,
+  `GET /api/agents/{agent_id}/external-evaluations`.
+- **Versioned price tables** (`auditrail/prices.py`) — price versions are
+  `draft -> active -> retired` with exactly one active version; activating
+  rewrites the derived `platform/price_table.json`, historical `estimated`
+  records keep their original `price_version`, referenced/active versions
+  cannot be deleted, and only `USD` is accepted (missing prices stay `null`,
+  never invented). APIs: `GET /api/prices`,
+  `POST /api/prices/versions`, `GET /api/prices/versions/{version}`,
+  `POST /api/prices/versions/{version}/activate`,
+  `DELETE /api/prices/versions/{version}`, `POST /api/prices/validate`.
+  Mutations are local-admin gated (`AUDITRAIL_LOCAL_ADMIN`).
+- **Run-index watcher** — an opt-in, debounced **polling** refresher (no OS
+  watcher dependency; `mode` is always reported as `polling`). Env:
+  `AUDITRAIL_RUN_INDEX_WATCHER` (default `false`),
+  `AUDITRAIL_RUN_INDEX_DEBOUNCE_MS` (500), `AUDITRAIL_RUN_INDEX_MAX_BATCH`
+  (1000), `AUDITRAIL_RUN_INDEX_POLL_INTERVAL_MS` (2000). It only watches the
+  runs root, ignores `.tmp`/hidden/platform directories, collapses bursts
+  into one refresh per debounce window, degrades (never crashes the API) on
+  errors, and is stopped on shutdown. Manual rebuild and fallback scan remain
+  available; watcher state is reported separately in
+  `GET /api/costs/admin/run-index/status` under `watcher`, never as a
+  data-quality signal.
+- **SuiteJob detail page** — the frontend route `/suite-jobs/:jobId`
+  (name `suite-job-detail`) shows the job header, summary (unknown/failed/
+  cancelled/skipped counted separately), CaseExecutions, the attempt
+  timeline (final vs. historical attempts), budget/limits usage and a
+  clearly separated external-evidence section, backed by
+  `GET /api/suite-jobs/{job_id}/detail`. The legacy `/platform?job=:jobId`
+  entry keeps working and links to the new page.
+
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.

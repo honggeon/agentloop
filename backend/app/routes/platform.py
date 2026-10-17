@@ -20,7 +20,7 @@ from auditrail import run_contract
 from auditrail import testsuites as suite_mod
 from auditrail.netguard import EndpointRejected, validate_endpoint
 from auditrail.runner import create_platform_run
-from backend.app import agent_overview, platform_store, run_context, run_executor, suite_executor
+from backend.app import agent_overview, integration_service, platform_store, run_context, run_executor, suite_executor
 from backend.app.config import build_endpoint_policy, get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -562,6 +562,97 @@ def get_suite_job_attempt(job_id: str, attempt_id: str) -> dict[str, Any]:
             detail={"code": "attempt_not_found", "message": "unknown attempt %s in suite job %s" % (attempt_id, job_id)},
         )
     return payload
+
+
+@router.get("/suite-jobs/{job_id}/detail")
+def get_suite_job_detail(job_id: str) -> dict[str, Any]:
+    """Phase 3 aggregate detail for the standalone SuiteJob page.
+
+    Combines the job record, CaseExecution grouping, budget/limits usage and
+    the external evidence linked to the job's runs. External evidence is a
+    display section only — it never feeds deterministic or judge verdicts.
+    """
+    settings = get_settings()
+    record = platform_store.get_suite_job(job_id, settings)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "suite_job_not_found", "message": "unknown suite job %s" % job_id},
+        )
+    payload = _job_payload(record, settings)["suite_job"]
+    attempts = payload.get("attempts") or []
+
+    finals = [attempt for attempt in attempts if attempt.get("is_final_attempt")]
+    evaluated = sum(1 for attempt in finals if attempt.get("final_quality_status"))
+    passed = sum(1 for attempt in finals if attempt.get("final_quality_status") == "success")
+    stats = payload.get("stats") or {}
+    summary = {
+        "total": int(stats.get("total") or 0),
+        "queued": int(stats.get("queued") or 0),
+        "running": int(stats.get("running") or 0),
+        "completed": int(stats.get("completed") or 0),
+        "failed": int(stats.get("failed") or 0),
+        "timed_out": int(stats.get("timed_out") or 0),
+        "cancelled": int(stats.get("cancelled") or 0),
+        "skipped": int(stats.get("skipped") or 0),
+        "unknown": max(int(stats.get("total") or 0) - len(finals), 0),
+        "attempts_total": len(attempts),
+        "retries": int(stats.get("retries") or 0),
+        "evaluated": evaluated,
+        "passed": passed,
+        "pass_rate": round(passed / evaluated, 4) if evaluated else None,
+    }
+
+    budget = record.get("budget") or {}
+    budget_used = record.get("budget_used") or {}
+    budget_exceeded_reason = None
+    max_attempts = budget.get("max_attempts")
+    max_tokens = budget.get("max_total_tokens")
+    if isinstance(max_attempts, int) and int(budget_used.get("attempts") or 0) >= max_attempts:
+        budget_exceeded_reason = "attempt budget exhausted"
+    if isinstance(max_tokens, int) and int(budget_used.get("total_tokens") or 0) >= max_tokens:
+        budget_exceeded_reason = "token budget exhausted"
+    budget_block = {
+        "budget": budget or {"max_attempts": None, "max_total_tokens": None},
+        "budget_used": budget_used or {"attempts": 0, "total_tokens": 0},
+        "limits": record.get("limits"),
+        "concurrency": suite_executor.concurrency_snapshot(
+            str((record.get("agent_ref") or {}).get("id") or "") or None
+        ),
+        "max_retries": int(record.get("max_retries") or 0),
+        "timeout_seconds": record.get("timeout_seconds"),
+        "deadline_at": _job_deadline_at(record),
+        "budget_exceeded": budget_exceeded_reason is not None,
+        "budget_exceeded_reason": budget_exceeded_reason,
+    }
+
+    run_ids = [str(attempt.get("run_id")) for attempt in attempts if attempt.get("run_id")]
+    external = integration_service.external_evidence_for_runs(run_ids, settings)
+    return {
+        "suite_job": payload,
+        "case_executions": run_context.list_case_executions(record),
+        "summary": summary,
+        "budget": budget_block,
+        "external_evidence": external,
+    }
+
+
+def _job_deadline_at(record: dict[str, Any]) -> Optional[str]:
+    """Display-only deadline derived from started_at + timeout_seconds."""
+    timeout = record.get("timeout_seconds")
+    started_at = record.get("started_at")
+    if not timeout or not isinstance(started_at, str) or not started_at.strip():
+        return None
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        started = datetime.fromisoformat(started_at.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    deadline = started + timedelta(seconds=float(timeout))
+    return deadline.isoformat().replace("+00:00", "Z")
 
 
 @router.post("/suite-jobs/{job_id}/cancel")

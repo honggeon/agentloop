@@ -60,6 +60,12 @@ const router = createRouter({
       meta: { title: "Agent 运行记录" }
     },
     {
+      path: "/suite-jobs/:jobId",
+      name: "suite-job-detail",
+      component: () => import("./views/SuiteJobDetailView.vue"),
+      meta: { title: "SuiteJob 详情" }
+    },
+    {
       path: "/:pathMatch(.*)*",
       redirect: "/"
     }

@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException
 
 from auditrail import run_index
 
-from backend.app import cost_service
+from backend.app import cost_service, run_index_watch
 from backend.app.config import get_settings, resolve_run_path
 
 router = APIRouter(prefix="/api")
@@ -91,6 +91,9 @@ def get_run_index_status() -> dict[str, Any]:
     settings = get_settings()
     _require_local_admin(settings)
     status = run_index.index_status(Path(settings.platform_dir))
+    # Phase 3: watcher/polling state is reported separately and never
+    # disguised as an index-consistency or data-quality signal.
+    status["watcher"] = run_index_watch.watcher_status(settings)
     status["authority"] = "local"
     status["note"] = "本地管理能力：无生产级权限控制"
     return status

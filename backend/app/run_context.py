@@ -76,6 +76,11 @@ def _agent_section(agent_ref: Optional[Dict[str, Any]], settings: Settings) -> D
     }
 
 
+def list_case_executions(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Public wrapper: group a job's attempts into CaseExecutions."""
+    return _case_executions(record)
+
+
 def _case_executions(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Group a job's attempts into CaseExecutions (one per ``order``)."""
     job_id = str(record.get("job_id") or "")
