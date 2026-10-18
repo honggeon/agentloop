@@ -679,6 +679,10 @@ def _build_kpis(runs: List[Dict[str, Any]], totals: Dict[str, Any]) -> Dict[str,
     run_count = len(runs)
     trace_count = sum(1 for row in runs if row.get("_has_trace"))
     error_runs = sum(1 for row in runs if row.get("status") in _ERROR_RUN_STATUSES)
+    # 工具错误率口径：工具失败 / 可判定工具调用（来自确定性审计的调用列表），
+    # 与 error_rate（失败 Run / 全部 Run）严格分开；没有工具调用时为 None。
+    tool_call_total = sum(len(row.get("_tool_calls") or []) for row in runs)
+    tool_error_total = sum(_int_value(row.get("tool_error_count")) for row in runs)
     scores = [row["completion_score"] for row in runs if isinstance(row.get("completion_score"), (int, float))]
     total_valid = sum(
         _int_value(row.get("_judge_reliability", {}).get("total_evidence_count"))
@@ -713,6 +717,7 @@ def _build_kpis(runs: List[Dict[str, Any]], totals: Dict[str, Any]) -> Dict[str,
         "trace_count": trace_count,
         "run_count": run_count,
         "error_rate": round(error_runs / run_count, 4) if run_count else None,
+        "tool_error_rate": round(tool_error_total / tool_call_total, 4) if tool_call_total else None,
         "completion_score": round(sum(scores) / len(scores), 1) if scores else None,
         "token_count": totals["total_tokens"] if totals["saw_llm_data"] else None,
         "total_cost": total_cost,
@@ -812,6 +817,15 @@ def _agent_header(
         name = agent_id[len("host:") :]
     else:
         name = agent_id
+    # 身份来源（设计 4.1）：registered = 有注册配置；run_metadata = 仅从
+    # run.json agent_ref 可知；derived = 按来源主机派生的兜底身份。前端必须
+    # 展示该来源，避免误以为所有 Agent 都来自注册中心。
+    if config is not None:
+        identity_source = "registered"
+    elif agent_id.startswith("host:"):
+        identity_source = "derived"
+    else:
+        identity_source = "run_metadata"
     return {
         "agent_id": agent_id,
         "name": name,
@@ -819,6 +833,7 @@ def _agent_header(
         "environment": environment,
         "source_host": source_host or None,
         "derived": config is None,
+        "identity_source": identity_source,
         # registered = backed by a stored config; missing_configuration =
         # known from run data only (deleted or never registered).
         "config_status": "registered" if config is not None else "missing_configuration",
@@ -955,6 +970,9 @@ def get_agent_overview(agent_id: str, range_key: str, settings: Settings, recent
         "traces": _traces_per_day(scoped),
         "kpis": kpis,
         "health": health,
+        # 范围内有 Judge 报告的 Run 数：0 且有 Run 时前端显示「尚未生成
+        # Judge 报告」，与「没有 Run」区分。
+        "judge_report_count": sum(1 for row in scoped if row.get("judge_overall_status") is not None),
         "recent_runs": [_public_row(row) for row in ordered[: max(recent_limit, 0)]],
         "data_range": range_key,
         "index": index_block,

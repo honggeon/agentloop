@@ -1238,6 +1238,8 @@ export interface AgentHeader {
   environment: string | null;
   source_host: string | null;
   derived: boolean;
+  // 身份来源：registered 已注册 / run_metadata 运行元数据 / derived 按主机派生。
+  identity_source?: "registered" | "run_metadata" | "derived" | string;
   // registered = 有注册配置；missing_configuration = 仅从运行数据可知。
   config_status?: "registered" | "missing_configuration" | string;
   description?: string | null;
@@ -1299,6 +1301,9 @@ export interface AgentKpis {
   trace_count: number;
   run_count: number;
   error_rate: number | null;
+  // 工具错误率：工具失败 / 可判定工具调用；与 error_rate（Run 失败率）口径
+  // 严格分开，没有工具调用时为 null。
+  tool_error_rate: number | null;
   completion_score: number | null;
   token_count: number | null;
   total_cost: number | null;
@@ -1362,6 +1367,8 @@ export interface AgentOverview {
   traces: AgentTraceDay[];
   kpis: AgentKpis;
   health: AgentHealth;
+  // 范围内有 Judge 报告的 Run 数；为 0 且有 Run 时显示「尚未生成 Judge 报告」。
+  judge_report_count?: number;
   recent_runs: AgentRunRow[];
   data_range: AgentOverviewRange | string;
   index?: RunIndexBlock;

@@ -68,6 +68,18 @@ const HEALTH_SECTIONS: Array<{ key: keyof AgentOverview["health"]; label: string
   { key: "high_severity_finding_count", label: "高严重度发现数" }
 ];
 
+// 身份来源（设计 4.1）：已注册 / 运行元数据 / 派生，避免误以为都来自注册中心。
+const IDENTITY_SOURCE_LABELS: Record<string, string> = {
+  registered: "已注册",
+  run_metadata: "运行元数据",
+  derived: "派生"
+};
+
+function identitySourceLabel(source: string | null | undefined): string {
+  if (!source) return "—";
+  return IDENTITY_SOURCE_LABELS[source] || source;
+}
+
 const agent = computed(() => overview.value?.agent || detail.value?.agent || null);
 
 // Phase 3 外部评测证据：与内部 completion_score / 健康指标相互独立，仅展示。
@@ -122,6 +134,11 @@ const kpiCards = computed(() => {
       label: "错误率",
       value: kpis.error_rate === null ? "—" : formatPercent(kpis.error_rate),
       hint: "统计口径：失败/超时运行占全部运行的比例"
+    },
+    {
+      label: "工具错误率",
+      value: kpis.tool_error_rate === null ? "—" : formatPercent(kpis.tool_error_rate),
+      hint: "统计口径：工具失败 / 可判定工具调用；与 Run 失败率分开"
     },
     {
       label: "完成度分数",
@@ -241,6 +258,22 @@ function setRange(value: AgentOverviewRange) {
   range.value = value;
 }
 
+// 没有可信时间时显示「运行时间不可用」，与「加载中」区分。
+const lastRunLabel = computed(() => {
+  if (!agent.value) return "—";
+  return agent.value.last_run_at || "运行时间不可用";
+});
+
+// 有 Run 但没有任何 Judge 报告时的显式空态；没有 Run 时不提示（由空运行态负责）。
+const noJudgeHint = computed(() => {
+  const data = overview.value;
+  if (!data) return "";
+  if ((data.kpis.run_count ?? 0) > 0 && (data.judge_report_count ?? 0) === 0) {
+    return "尚未生成 Judge 报告：该范围内的运行都没有 Judge 结果，健康与完成度指标显示为未评估。";
+  }
+  return "";
+});
+
 function openRun(row: AgentRunRow) {
   void router.push({ name: "run", params: { runId: row.run_id } });
 }
@@ -256,6 +289,31 @@ function openAllRuns() {
 
 function backToAgents() {
   void router.push({ name: "agents" });
+}
+
+function backToBatch() {
+  void router.push({ name: "batch" });
+}
+
+const copied = ref(false);
+
+// 复制稳定 Agent ID；剪贴板不可用时给出显式失败提示，不静默吞错。
+async function copyAgentId() {
+  const id = agent.value?.agent_id || agentId.value;
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+    copied.value = true;
+    setTimeout(() => {
+      copied.value = false;
+    }, 2000);
+  } catch {
+    error.value = "复制 Agent ID 失败：浏览器未授权剪贴板访问";
+  }
+}
+
+function refresh() {
+  void loadAll();
 }
 
 async function loadOverview() {
@@ -320,12 +378,13 @@ onMounted(loadAll);
         </h2>
         <p class="lede agent-header-meta">
           <span class="mono">{{ agent?.agent_id || agentId }}</span>
+          <span v-if="agent">身份来源：{{ identitySourceLabel(agent.identity_source) }}</span>
           <span v-if="agent?.type">类型：{{ agent.type }}</span>
           <span>环境：{{ agent?.environment || "—" }}</span>
           <span v-if="agent?.source_host">来源主机：{{ agent.source_host }}</span>
           <span v-if="agent?.config_status === 'missing_configuration'" class="chip quiet">配置已删除或从未注册</span>
           <span>创建时间：{{ agent?.created_at || "—" }}</span>
-          <span>最近运行：{{ agent?.last_run_at || "—" }}</span>
+          <span>最近运行：{{ lastRunLabel }}</span>
           <span v-if="agent?.last_run_status" class="chip" :data-status="agent.last_run_status">
             {{ runStatusLabel(agent.last_run_status) }}
           </span>
@@ -336,7 +395,18 @@ onMounted(loadAll);
         </p>
       </div>
       <div class="hero-actions">
+        <button type="button" class="ghost small" aria-label="刷新 Agent 数据" title="刷新" @click="refresh">刷新</button>
+        <button
+          type="button"
+          class="ghost small"
+          aria-label="复制 Agent ID"
+          title="复制 Agent ID"
+          @click="copyAgentId"
+        >
+          {{ copied ? "已复制" : "复制 Agent ID" }}
+        </button>
         <button type="button" class="back-link" @click="backToAgents">返回 Agent 列表</button>
+        <button type="button" class="back-link" @click="backToBatch">返回批量总览</button>
         <div class="range-switch" role="group" aria-label="时间范围">
           <button
             v-for="option in RANGE_OPTIONS"
@@ -356,6 +426,7 @@ onMounted(loadAll);
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-else-if="partialWarning" class="banner error" role="status">{{ partialWarning }}</p>
     <p v-if="indexHint" class="banner quiet" role="status">{{ indexHint }}</p>
+    <p v-if="noJudgeHint" class="banner quiet" role="status">{{ noJudgeHint }}</p>
     <p v-if="loading" class="banner loading">加载 Agent 详情中…</p>
     <p v-else-if="overviewLoading" class="banner loading">刷新指标中…</p>
 
@@ -437,6 +508,7 @@ onMounted(loadAll);
             <h3>Traces per day</h3>
             <span class="chip quiet">{{ overview.data_range }}</span>
           </div>
+          <p class="hint">按日期下钻到带筛选的运行列表将在后续阶段提供，当前请先使用「查看全部运行」。</p>
           <template v-if="overview.traces.length">
             <p class="chart-insight">{{ traceSummary }}</p>
             <VChart class="chart compact-chart" :option="traceChart" autoresize aria-label="每日运行数量柱状图" />

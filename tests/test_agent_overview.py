@@ -630,3 +630,90 @@ def test_run_row_shape(monkeypatch, tmp_path):
         assert key in row
     assert row["duration_ms"] == 2000
     assert not any(key.startswith("_") for key in row)
+
+
+# ---------------------------------------------------------------------------
+# Phase A gap closure: tool error rate KPI, identity source, no-judge state
+# ---------------------------------------------------------------------------
+
+
+def test_kpi_tool_error_rate_uses_decidable_tool_calls(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    _register_agent(client)
+    # two runs: 3 decidable tool calls, 1 error -> 1/3
+    _make_run(
+        settings.runs_dir,
+        "run-tk1",
+        agent_id="agent-001",
+        audit={
+            "tool_call_count": 2,
+            "tool_calls": [
+                {"tool": "search", "status": "ok"},
+                {"tool": "shell", "status": "error"},
+            ],
+            "findings": [],
+        },
+    )
+    _make_run(
+        settings.runs_dir,
+        "run-tk2",
+        agent_id="agent-001",
+        audit={"tool_call_count": 1, "tool_calls": [{"tool": "search", "status": "ok"}], "findings": []},
+    )
+
+    kpis = client.get("/api/agents/agent-001/overview?range=all").json()["kpis"]
+    assert kpis["tool_error_rate"] == round(1 / 3, 4)
+    # run failure rate stays a separate口径
+    assert kpis["error_rate"] == 0.0
+
+
+def test_kpi_tool_error_rate_null_without_tool_calls(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    _register_agent(client)
+    _make_run(settings.runs_dir, "run-notools", agent_id="agent-001")
+
+    kpis = client.get("/api/agents/agent-001/overview?range=all").json()["kpis"]
+    assert kpis["tool_error_rate"] is None  # 没有可判定工具调用时不伪造 0
+
+
+def test_identity_source_registered_run_metadata_and_derived(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    _register_agent(client)
+    # run_metadata：run.json agent_ref 指向从未注册的 Agent
+    _make_run(settings.runs_dir, "run-rm", agent_id="ghost-agent", source_host=None)
+    # derived：无 agent_ref 的旧 Run，按来源主机兜底
+    _make_run(settings.runs_dir, "run-hd", agent_id=None, with_run_json=False, source_host="legacy.internal")
+
+    registered = client.get("/api/agents/agent-001").json()["agent"]
+    assert registered["identity_source"] == "registered"
+
+    ghost = client.get("/api/agents/ghost-agent").json()["agent"]
+    assert ghost["identity_source"] == "run_metadata"
+    assert ghost["derived"] is True
+
+    host = client.get("/api/agents/host:legacy.internal").json()["agent"]
+    assert host["identity_source"] == "derived"
+    assert host["derived"] is True
+
+
+def test_judge_report_count_distinguishes_no_runs_from_no_judge(monkeypatch, tmp_path):
+    client, settings = _client(monkeypatch, tmp_path)
+    _register_agent(client)
+
+    empty = client.get("/api/agents/agent-001/overview?range=all").json()
+    assert empty["judge_report_count"] == 0
+    assert empty["kpis"]["run_count"] == 0
+
+    _make_run(settings.runs_dir, "run-j0", agent_id="agent-001")
+    no_judge = client.get("/api/agents/agent-001/overview?range=all").json()
+    assert no_judge["kpis"]["run_count"] == 1
+    assert no_judge["judge_report_count"] == 0  # 有 Run 但无 Judge：显式可区分
+
+    _make_run(
+        settings.runs_dir,
+        "run-j1",
+        agent_id="agent-001",
+        judge={"overall_status": "unknown", "dimensions": {}, "judge_reliability": {}},
+    )
+    with_judge = client.get("/api/agents/agent-001/overview?range=all").json()
+    assert with_judge["judge_report_count"] == 1  # unknown 状态也算有报告，只是未评估

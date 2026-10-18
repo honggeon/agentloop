@@ -554,6 +554,10 @@ def test_agent_workspace_uses_centralized_api_contracts():
     assert '"/api/agents"' in source
     assert "/overview?range=" in source
     assert "/runs?" in source
+    # 聚合字段契约：工具错误率 / 身份来源 / Judge 报告计数
+    assert "tool_error_rate" in source
+    assert "identity_source" in source
+    assert "judge_report_count" in source
 
 
 def test_agent_workspace_sidebar_entry_exists():
@@ -597,6 +601,31 @@ def test_agent_detail_view_sections_and_semantics():
     assert "查看全部运行" in source
     assert "第 {{ row.retry_index }} 次重试" in source
     assert "fetchAgentOverview" in source
+    assert "fetch(" not in source
+
+
+def test_agent_detail_view_header_actions_and_explicit_states():
+    """设计 5.2 / 7：Header 操作与无 Judge、无时间、身份来源的显式状态。"""
+    source = AGENT_DETAIL_VIEW.read_text(encoding="utf-8")
+    # Header 操作：刷新 / 复制 Agent ID / 返回批量总览 / 返回 Agent 列表
+    assert "刷新" in source
+    assert "复制 Agent ID" in source
+    assert 'name: "batch"' in source
+    assert "返回批量总览" in source
+    assert "返回 Agent 列表" in source
+    # 身份来源：已注册 / 运行元数据 / 派生
+    assert "身份来源" in source
+    for label in ("已注册", "运行元数据", "派生"):
+        assert label in source, label
+    # 无时间显示「运行时间不可用」而不是伪造时间
+    assert "运行时间不可用" in source
+    # 有 Run 但无 Judge 报告的显式空态
+    assert "尚未生成 Judge 报告" in source
+    # 工具错误率 KPI 卡片，口径独立于 Run 失败率
+    assert "工具错误率" in source
+    assert "tool_error_rate" in source
+    # 日期下钻未实现时的明确状态（设计 5.5）
+    assert "按日期下钻" in source
     assert "fetch(" not in source
 
 
