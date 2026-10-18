@@ -44,11 +44,14 @@ class JudgeRequest:
     """One judge attempt for an already-selected run directory.
 
     ``run_dir`` must come from ``backend.app.config.resolve_run_path`` (or an
-    equivalent validation) before it reaches an engine.
+    equivalent validation) before it reaches an engine. ``thread_id`` is an
+    optional caller-chosen conversation id (CLI ``--thread-id``); engines fall
+    back to their own default when it is empty.
     """
 
     run_dir: Path
     run_id: str = ""
+    thread_id: str = ""
 
 
 @dataclass(frozen=True)

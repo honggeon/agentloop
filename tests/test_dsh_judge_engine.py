@@ -4,9 +4,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from auditrail.agents.schemas import DIMENSION_DEFINITIONS, missing_judge_dimensions
 from auditrail.agents.tools import write_judge_report
 from auditrail.dsh_headless import DshProcessOutput
 from auditrail.judges.base import (
+    JudgeExecutionError,
     JudgeRequest,
     JudgeUnavailableError,
     describe_engines,
@@ -18,6 +20,7 @@ from auditrail.judges.prompting import build_dsh_judge_prompt
 from auditrail.judges.proposals import JudgeProposalError, parse_judge_proposal
 from backend.app.config import Settings, build_dsh_judge_settings
 from backend.app.main import app
+from tests.conftest import full_judge_dimensions
 
 
 JUDGE_PROFILE = "agentloop-judge"
@@ -50,7 +53,8 @@ def _proposal(**overrides):
         ],
         "metrics": {"message_count": 3, "tool_call_count": 1, "tool_error_count": 0},
         "charts": {},
-        "dimensions": {},
+        # 新契约：proposal 必须提交全部 13 个维度（证据不足的用 unknown/judge）。
+        "dimensions": full_judge_dimensions(),
         "judge_reliability": {},
     }
     proposal.update(overrides)
@@ -246,7 +250,13 @@ def test_deepagent_engine_preserves_prompt_thread_id_and_proposal(base):
     async def fake_invoke(messages, config=None):
         seen["messages"] = messages
         seen["config"] = config
-        return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "ok"}
+        return {
+            "overall_status": "success",
+            "completion_score": 88,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
 
     result = DeepAgentJudgeEngine(fake_invoke).run(JudgeRequest(run_dir=run, run_id="run-1"))
 
@@ -460,11 +470,12 @@ def test_dsh_engine_proposal_is_normalized_and_capped_by_shared_pipeline(base):
     assert report["judge"]["profile"] == JUDGE_PROFILE
     assert Path(paths["markdown_path"]).exists()
     assert Path(paths["chart_path"]).exists()
-    # Every dimension key survives normalization even when the DSH judge omits it.
+    # Every dimension key survives normalization.
     assert len(report["dimensions"]) == 13
-    # Deterministic dimension logic still owns closure and citation scoring.
-    assert report["dimensions"]["execution_closure"]["source"] == "deterministic"
-    assert report["dimensions"]["evidence_citation"]["source"] == "deterministic"
+    # Deterministic dimension logic still owns closure and citation scoring,
+    # now merged with the judge's own submissions.
+    assert report["dimensions"]["execution_closure"]["source"] == "deterministic+judge"
+    assert report["dimensions"]["evidence_citation"]["source"] == "deterministic+judge"
     assert report["dimensions"]["tool_selection"]["status"] == "unknown"
     assert report["dimensions"]["error_recovery"]["status"] == "unknown"
     assert report["judge_reliability"]["total_evidence_count"] == 0
@@ -616,7 +627,13 @@ def test_backend_deepagent_judge_without_engine_field_still_works(base, monkeypa
     _patch_settings(monkeypatch, settings)
 
     async def fake_invoke(messages, config=None):
-        return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "ok"}
+        return {
+            "overall_status": "success",
+            "completion_score": 88,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     client = TestClient(app)
@@ -655,7 +672,13 @@ def test_dsh_and_deepagent_reports_survive_subsequent_judge_runs(base, monkeypat
     )
 
     async def fake_invoke(messages, config=None):
-        return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "deepagent"}
+        return {
+            "overall_status": "success",
+            "completion_score": 88,
+            "confidence": "high",
+            "summary": "deepagent",
+            "dimensions": full_judge_dimensions(),
+        }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     client = TestClient(app)
@@ -692,3 +715,140 @@ def test_dsh_and_deepagent_reports_survive_subsequent_judge_runs(base, monkeypat
     # ones engine proposals disagree about.
     assert comparison["dimensions"]["evidence_citation"]["status"]["deepagent"] in {"fail", "pass", "partial"}
     assert comparison["disagreements"]
+
+
+# -- dimension completeness gate ---------------------------------------
+
+
+def _incomplete_proposal(*missing_keys):
+    """A syntactically valid strict-JSON proposal that omits dimension keys."""
+    dimensions = full_judge_dimensions()
+    for key in missing_keys:
+        del dimensions[key]
+    return _proposal(dimensions=dimensions)
+
+
+def _sequenced_runner(proposals, captured):
+    """Fake DSH runner returning a different proposal per invocation."""
+    queue = list(proposals)
+
+    def runner(argv, *, cwd, timeout_seconds, cancel_event, max_stdout_bytes, max_stderr_bytes, on_stdout_line):
+        captured.append({"argv": list(argv), "cwd": str(cwd), "timeout": timeout_seconds})
+        proposal = queue.pop(0) if queue else proposals[-1]
+        lines = _judge_stdout(proposal, workspace=cwd)
+        return DshProcessOutput(tuple(line.encode("utf-8") + b"\n" for line in lines), b"", 0)
+
+    return runner
+
+
+def test_parseable_dsh_proposal_with_missing_dimensions_is_not_publishable():
+    # 「JSON 可解析且 report-shaped」不等于「报告完整」：缺维度的严格 JSON
+    # 仍必须被识别为结构不完整。
+    proposal = parse_judge_proposal(json.dumps(_proposal(dimensions={})))
+    assert missing_judge_dimensions(proposal) == list(DIMENSION_DEFINITIONS)
+    complete = parse_judge_proposal(json.dumps(_proposal(dimensions=full_judge_dimensions())))
+    assert missing_judge_dimensions(complete) == []
+
+
+def test_dsh_engine_repairs_incomplete_proposal_once(base):
+    run = _write_run(base / "runs")
+    settings = _settings(base)
+    captured = []
+    runner = _sequenced_runner([_incomplete_proposal("verification", "efficiency"), _proposal()], captured)
+    engine = DshJudgeEngine(settings, runner=runner)
+
+    result = engine.run(JudgeRequest(run_dir=run, run_id="run-1"))
+
+    assert len(captured) == 2
+    repair_message = captured[1]["argv"][-1]
+    assert "verification" in repair_message
+    assert "efficiency" in repair_message
+    assert missing_judge_dimensions(result.proposal) == []
+
+
+def test_dsh_engine_fails_when_repair_stays_incomplete(base):
+    run = _write_run(base / "runs")
+    settings = _settings(base)
+    captured = []
+    incomplete = _incomplete_proposal("verification", "efficiency")
+    runner = _sequenced_runner([incomplete, incomplete], captured)
+    engine = DshJudgeEngine(settings, runner=runner)
+
+    with pytest.raises(JudgeExecutionError, match="verification"):
+        engine.run(JudgeRequest(run_dir=run, run_id="run-1"))
+    # 至多一次修复尝试，不会无限重试，也不写出任何报告文件。
+    assert len(captured) == 2
+    assert not (run / "agent_judge.json").exists()
+    assert not (run / "judges").exists()
+
+
+def test_deepagent_engine_repairs_incomplete_proposal_once(base):
+    run = _write_run(base / "runs")
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"overall_status": "partial", "completion_score": 60, "summary": "缺维度"}
+        return {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "完整报告",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    result = DeepAgentJudgeEngine(fake_invoke).run(JudgeRequest(run_dir=run, run_id="run-1"))
+
+    assert len(calls) == 2
+    repair_prompt = calls[1][0]["content"]
+    assert "intent_recognition" in repair_prompt
+    assert "efficiency" in repair_prompt
+    assert result.proposal["summary"] == "完整报告"
+    assert missing_judge_dimensions(result.proposal) == []
+
+
+def test_deepagent_engine_fails_when_repair_stays_incomplete(base):
+    run = _write_run(base / "runs")
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        calls.append(messages)
+        return {"overall_status": "partial", "completion_score": 60, "summary": "缺维度"}
+
+    with pytest.raises(JudgeExecutionError, match="intent_recognition"):
+        DeepAgentJudgeEngine(fake_invoke).run(JudgeRequest(run_dir=run, run_id="run-1"))
+    assert len(calls) == 2
+
+
+def test_deepagent_engine_prefers_complete_tool_call_report(base):
+    # DeepAgent 返回值里最后一条 assistant 消息是简略 JSON，但更早的
+    # write_judge_report 工具调用提交了完整 13 维报告：必须选择完整候选。
+    run = _write_run(base / "runs")
+    full = {
+        "overall_status": "partial",
+        "completion_score": 55,
+        "summary": "工具调用中的完整报告",
+        "findings": [],
+        "dimensions": full_judge_dimensions(),
+    }
+    thin = {"overall_status": "failed", "summary": "简略总结", "findings": []}
+
+    async def fake_invoke(messages, config=None):
+        return {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "write_judge_report", "args": {"run_path": str(run), "report": full}}
+                    ],
+                },
+                {"role": "tool", "content": json.dumps({"json_path": "x"})},
+                {"role": "assistant", "content": json.dumps(thin, ensure_ascii=False)},
+            ]
+        }
+
+    result = DeepAgentJudgeEngine(fake_invoke).run(JudgeRequest(run_dir=run, run_id="run-1"))
+
+    assert result.proposal["summary"] == "工具调用中的完整报告"
+    assert missing_judge_dimensions(result.proposal) == []

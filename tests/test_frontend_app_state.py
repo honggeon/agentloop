@@ -171,6 +171,20 @@ def test_run_view_lists_and_compares_multiple_judge_reports():
     assert "unknown" in source
 
 
+def test_run_view_warns_about_structurally_incomplete_judge_report():
+    # 历史裁判报告可能结构不完整（judge_incomplete=true 或维度 source=missing）：
+    # 前端必须明确中文提示，同时仍展示报告内容；unknown 仍显示「未评估」。
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "judge_incomplete" in api_source
+    assert "judgeIncomplete" in source
+    assert "judgeMissingDimensions" in source
+    assert "结构不完整" in source
+    assert "请重新运行评测" in source
+    assert '"missing"' in source
+    assert "未评估" in source
+
 
 def test_live_eval_can_auto_continue_confirmations():
     source = LIVE_VIEW.read_text(encoding="utf-8")

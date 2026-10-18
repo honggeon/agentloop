@@ -311,11 +311,18 @@ def test_run_with_judge_success_and_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("auditrail.runner.AgentClient", FakeClient)
 
     from auditrail.agents.tools import write_judge_report
+    from tests.conftest import full_judge_dimensions
 
     def good_judge(run_dir):
         write_judge_report(
             str(run_dir),
-            {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "好"},
+            {
+                "overall_status": "success",
+                "completion_score": 90,
+                "confidence": "high",
+                "summary": "好",
+                "dimensions": full_judge_dimensions(),
+            },
         )
 
     def bad_judge(run_dir):

@@ -128,6 +128,9 @@ export interface JudgeReport {
   judge?: JudgeProvenance;
   metrics?: Record<string, unknown>;
   charts?: Record<string, unknown>;
+  // 结构完整性标记：true 表示裁判 proposal 没有提交全部维度（维度 source=missing）。
+  // 旧报告可能没有该字段，前端还需从 dimensions 的 source=missing 推导。
+  judge_incomplete?: boolean;
   // GET /api/runs/:id/judges/:engine 标注该报告属于哪个引擎；根报告没有该字段。
   judge_engine?: string;
 }

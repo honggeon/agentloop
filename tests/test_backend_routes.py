@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from backend.app.config import Settings
 from backend.app.main import app
 from backend.app.routes.runs import _provider_from_model, _render_judge_markdown
+from tests.conftest import full_judge_dimensions
 
 
 def _write_run(tmp_path):
@@ -751,7 +752,13 @@ def test_backend_judge_includes_acceptance_criteria(tmp_path, monkeypatch):
     async def fake_invoke(messages, config=None):
         assert "Agent Judge acceptance criteria" in messages[0]["content"]
         assert "必须调用 ppt-master" in messages[0]["content"]
-        return {"overall_status": "success", "completion_score": 88, "confidence": "high", "summary": "ok"}
+        return {
+            "overall_status": "success",
+            "completion_score": 88,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     client = TestClient(app)
@@ -759,6 +766,72 @@ def test_backend_judge_includes_acceptance_criteria(tmp_path, monkeypatch):
     response = client.post("/api/runs/run-1/judge")
     assert response.status_code == 200
     assert response.json()["report"]["completion_score"] == 88
+
+
+def test_backend_judge_twice_incomplete_returns_500_and_preserves_active_report(tmp_path, monkeypatch):
+    # 两次 proposal 都缺维度：HTTP 500（detail 点名缺失维度），已有的有效
+    # 活动报告、图表和 manifest 完全不被覆盖。
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    _publish_judge_report(run, "deepagent", "success", 90, published_at="2026-10-13T00:00:00+00:00")
+    before = {
+        name: (run / name).read_text(encoding="utf-8")
+        for name in ("agent_judge.json", "agent_judge.md", "chart_data.json")
+    }
+    manifest_before = (run / "judges" / "manifest.json").read_text(encoding="utf-8")
+
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        calls.append(messages)
+        return {"overall_status": "success", "completion_score": 99, "summary": "缺维度提案"}
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    client = TestClient(app)
+
+    response = client.post("/api/runs/run-1/judge")
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "intent_recognition" in detail
+    assert len(calls) == 2  # 一次有界修复尝试后明确失败
+    for name, content in before.items():
+        assert (run / name).read_text(encoding="utf-8") == content
+    assert (run / "judges" / "manifest.json").read_text(encoding="utf-8") == manifest_before
+
+
+def test_get_run_judge_reads_legacy_incomplete_report(tmp_path, monkeypatch):
+    # 历史兼容：旧式不完整报告（11 个维度 source=missing、无 judge_incomplete
+    # 字段）必须仍可读取展示，新门禁只约束新报告发布，不让 GET 报错。
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
+    from auditrail.agents.schemas import normalize_judge_report
+
+    legacy = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "旧的不完整报告",
+            "dimensions": {
+                "evidence_citation": {"score": 100, "status": "pass", "summary": "s", "source": "deterministic"},
+                "execution_closure": {"score": 65, "status": "partial", "summary": "s", "source": "deterministic"},
+            },
+        }
+    )
+    legacy.pop("judge_incomplete", None)
+    (run / "agent_judge.json").write_text(json.dumps(legacy), encoding="utf-8")
+    client = TestClient(app)
+
+    response = client.get("/api/runs/run-1/judge")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["dimensions"]["evidence_citation"]["score"] == 100
+    assert data["dimensions"]["intent_recognition"]["source"] == "missing"
+    assert data["dimensions"]["intent_recognition"]["status"] == "unknown"
+    assert data["dimensions"]["intent_recognition"]["score"] is None
 
 
 # -- multi-judge storage and comparison --------------------------------
@@ -775,6 +848,7 @@ def _publish_judge_report(run, engine, status, score, *, published_at, findings=
             "confidence": "high",
             "summary": "%s summary" % engine,
             "findings": findings or [],
+            "dimensions": full_judge_dimensions(),
         },
         judge_metadata={"engine": engine, "runtime": engine},
         judge_engine=engine,
@@ -789,7 +863,13 @@ def test_backend_judge_run_archives_report_per_engine(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.app.routes.runs.get_settings", lambda: settings)
 
     async def fake_invoke(messages, config=None):
-        return {"overall_status": "success", "completion_score": 91, "confidence": "high", "summary": "d"}
+        return {
+            "overall_status": "success",
+            "completion_score": 91,
+            "confidence": "high",
+            "summary": "d",
+            "dimensions": full_judge_dimensions(),
+        }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     client = TestClient(app)

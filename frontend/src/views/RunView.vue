@@ -263,6 +263,27 @@ const dimensionRows = computed(() =>
   }))
 );
 
+// 结构不完整的裁判报告：judge_incomplete=true 或存在 source=missing 的维度
+// （裁判 proposal 没有提交该维度，与诚实评估的 unknown 不同）。历史报告
+// 仍完整展示，但必须明确提示用户重新运行评测。
+const judgeMissingDimensions = computed(() =>
+  Object.entries(judge.value?.dimensions || {})
+    .filter(([, item]) => (item.source || "missing") === "missing")
+    .map(([key]) => DIMENSION_LABELS[key] || key)
+);
+
+const judgeIncomplete = computed(
+  () => Boolean(judge.value) && (judge.value?.judge_incomplete === true || judgeMissingDimensions.value.length > 0)
+);
+
+const judgeIncompleteMessage = computed(() => {
+  if (!judgeIncomplete.value) return "";
+  const count = judgeMissingDimensions.value.length;
+  return count > 0
+    ? `该裁判报告结构不完整：有 ${count} 个维度未由裁判提交。请重新运行评测。`
+    : "该裁判报告结构不完整：部分维度未由裁判提交。请重新运行评测。";
+});
+
 const reliabilityRows = computed(() => {
   const reliability = judge.value?.judge_reliability;
   if (!reliability) return [];
@@ -1350,6 +1371,7 @@ onMounted(() => {
             <h3>评测维度</h3>
             <span class="chip quiet">{{ dimensionRows.length }}</span>
           </div>
+          <p v-if="judgeIncomplete" class="judge-incomplete-warning" role="alert">{{ judgeIncompleteMessage }}</p>
           <div v-if="dimensionRows.length" class="dimension-list">
             <div
               v-for="row in dimensionRows"
@@ -1533,6 +1555,16 @@ onMounted(() => {
 .dimension-row em[data-status="unknown"] {
   color: #5a6b7d;
   font-style: normal;
+}
+
+.judge-incomplete-warning {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(180, 122, 20, 0.45);
+  border-radius: 6px;
+  background: rgba(180, 122, 20, 0.08);
+  color: #7a5410;
+  font-size: 13px;
 }
 
 .judge-engine-picker {

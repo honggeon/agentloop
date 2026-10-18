@@ -1,11 +1,14 @@
 import json
 
 from auditrail.agents.schemas import (
+    DIMENSION_DEFINITIONS,
     extract_json_object,
+    missing_judge_dimensions,
     normalize_judge_report,
     render_judge_markdown,
     resolve_judge_report,
 )
+from tests.conftest import full_judge_dimensions
 
 
 def test_normalize_judge_report_fills_defaults_and_counts_findings():
@@ -510,3 +513,76 @@ def test_normalize_judge_report_complete_when_all_dimensions_provided():
 
     assert report["judge_incomplete"] is False
     assert report["completion_score"] == 90
+
+
+def test_extract_json_object_prefers_complete_report_over_later_incomplete():
+    # Regression: the judge submitted a complete 13-dimension report through the
+    # write_judge_report tool call, but the final assistant message carried a
+    # terse summary JSON without dimensions. Extraction must prefer the most
+    # complete candidate, not the last one.
+    full = {
+        "overall_status": "partial",
+        "completion_score": 55,
+        "summary": "完整报告",
+        "findings": [],
+        "dimensions": full_judge_dimensions(),
+    }
+    thin = {"overall_status": "failed", "summary": "简略总结", "findings": []}
+    message = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"name": "write_judge_report", "args": {"run_path": "/tmp/run", "report": full}}
+                ],
+            },
+            {"role": "tool", "content": json.dumps({"json_path": "/tmp/run/agent_judge.json"})},
+            {"role": "assistant", "content": json.dumps(thin, ensure_ascii=False)},
+        ]
+    }
+
+    report = normalize_judge_report(extract_json_object(message))
+
+    assert report["summary"] == "完整报告"
+    assert report["judge_incomplete"] is False
+    assert all(row["source"] != "missing" for row in report["dimensions"].values())
+
+
+def test_extract_json_object_keeps_latest_preference_among_equal_candidates():
+    # 完整度相同时维持「更接近最终回答」的稳定偏好。
+    first = {"overall_status": "failed", "completion_score": 10, "summary": "first", "findings": []}
+    second = {"overall_status": "success", "completion_score": 90, "summary": "second", "findings": []}
+    message = {
+        "messages": [
+            {"role": "assistant", "content": json.dumps(first)},
+            {"role": "assistant", "content": json.dumps(second)},
+        ]
+    }
+    assert extract_json_object(message)["summary"] == "second"
+
+
+def test_missing_judge_dimensions_distinguish_absent_from_honest_unknown():
+    # 合法 unknown（status=unknown、score=null、source=judge）是完整提交，
+    # 只有字段缺失（source=missing）才算结构不完整。
+    dimensions = full_judge_dimensions()
+    assert missing_judge_dimensions({"overall_status": "partial", "dimensions": dimensions}) == []
+
+    del dimensions["verification"]
+    del dimensions["efficiency"]
+    assert missing_judge_dimensions({"dimensions": dimensions}) == ["verification", "efficiency"]
+
+
+def test_missing_judge_dimensions_accepts_chinese_aliases():
+    dimensions = full_judge_dimensions()
+    dimensions[DIMENSION_DEFINITIONS["intent_recognition"]] = dimensions.pop("intent_recognition")
+    assert missing_judge_dimensions({"dimensions": dimensions}) == []
+
+
+def test_missing_judge_dimensions_requires_an_explicit_source():
+    # 维度条目缺少 source 字段时无法与「未提交」区分，按结构不完整处理。
+    dimensions = full_judge_dimensions()
+    dimensions["efficiency"] = {"score": 80, "status": "pass", "summary": "x"}
+    assert missing_judge_dimensions({"dimensions": dimensions}) == ["efficiency"]
+    assert len(missing_judge_dimensions({"overall_status": "success"})) == 13
+    assert len(missing_judge_dimensions("not a report")) == 13

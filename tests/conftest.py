@@ -60,3 +60,28 @@ def _command_name(command) -> str:
     except (TypeError, StopIteration):
         return ""
     return os.path.basename(os.fsdecode(first))
+
+
+def full_judge_dimensions(**overrides):
+    """A complete 13-dimension judge submission for judge-pipeline tests.
+
+    Every dimension key is present with ``source="judge"``. Dimensions the
+    judge could not evidence stay ``status="unknown"``/``score=None`` — a
+    legitimate verdict, distinct from a missing field. ``overrides`` replaces
+    whole dimension entries, e.g. ``full_judge_dimensions(verification={...})``.
+    """
+    from auditrail.agents.schemas import DIMENSION_DEFINITIONS
+
+    dimensions = {
+        key: {
+            "score": None,
+            "status": "unknown",
+            "summary": "证据不足",
+            "evidence": [],
+            "recommendation": "",
+            "source": "judge",
+        }
+        for key in DIMENSION_DEFINITIONS
+    }
+    dimensions.update(overrides)
+    return dimensions

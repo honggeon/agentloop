@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import sys
 import time
@@ -403,9 +402,10 @@ def _recover_dsh_model(session_response: Dict) -> None:
 
 
 def _judge_run(args) -> int:
-    from .agents.agent import invoke_agent
     from .agents.schemas import resolve_judge_report
     from .agents.tools import write_judge_report
+    from .judges.base import JudgeEngineError, JudgeRequest
+    from .judges.deepagent_engine import DeepAgentJudgeEngine
 
     run_dir = Path(args.run)
     for filename in ("summary.json", "audit.json", "trajectory.jsonl"):
@@ -414,17 +414,21 @@ def _judge_run(args) -> int:
             print("Missing %s" % path, file=sys.stderr)
             return 2
 
-    thread_id = args.thread_id or "auditrail-judge-%s" % run_dir.name
-    messages = [
-        {
-            "role": "user",
-            "content": build_agent_judge_prompt(run_dir),
-        }
-    ]
-    config = {"configurable": {"thread_id": thread_id}}
-    raw_report = asyncio.run(invoke_agent(messages, config=config))
-    report = resolve_judge_report(raw_report, run_dir)
-    paths = write_judge_report(str(run_dir), report)
+    # 统一裁判执行边界：引擎负责候选优选与一次有界修复；write_judge_report
+    # 是发布前最后一道完整性门禁。proposal 结构不完整时明确失败（返回 2），
+    # 不写出或覆盖任何报告文件。
+    engine = DeepAgentJudgeEngine()
+    request = JudgeRequest(run_dir=run_dir, run_id=run_dir.name, thread_id=args.thread_id or "")
+    try:
+        result = engine.run(request)
+        report = resolve_judge_report(result.proposal, run_dir)
+        paths = write_judge_report(str(run_dir), report)
+    except JudgeEngineError as exc:
+        print("Judge failed: %s" % exc, file=sys.stderr)
+        return 2
+    except (ValueError, FileNotFoundError) as exc:
+        print("Judge report rejected: %s" % exc, file=sys.stderr)
+        return 2
     if args.output_format in {"json", "both"}:
         print("Wrote %s" % paths["json_path"])
     if args.output_format in {"markdown", "both"}:

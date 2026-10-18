@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from auditrail.agents.tools import (
     assess_run_quality,
     build_chart_data,
@@ -8,6 +10,8 @@ from auditrail.agents.tools import (
     search_trajectory,
     write_judge_report,
 )
+from auditrail.judges.proposals import JudgeProposalError
+from tests.conftest import full_judge_dimensions
 
 
 def _write_run(tmp_path):
@@ -188,6 +192,7 @@ def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
             "completion_score": 20,
             "confidence": "high",
             "summary": "工具失败",
+            "dimensions": full_judge_dimensions(),
             "findings": [
                 {
                     "severity": "high",
@@ -226,6 +231,7 @@ def test_write_judge_report_writes_three_files(tmp_path):
             "confidence": "high",
             "summary": "failed",
             "findings": [],
+            "dimensions": full_judge_dimensions(),
         },
     )
     assert result["json_path"].endswith("agent_judge.json")
@@ -244,6 +250,7 @@ def test_write_judge_report_downgrades_fact_findings_without_valid_evidence(tmp_
             "overall_status": "failed",
             "completion_score": 18,
             "summary": "幻觉 finding 测试",
+            "dimensions": full_judge_dimensions(),
             "findings": [
                 {
                     "severity": "critical",
@@ -287,6 +294,7 @@ def test_write_judge_report_merges_quality_checks_and_caps_completion(tmp_path):
             "confidence": "high",
             "summary": "模型声称任务完成。",
             "findings": [],
+            "dimensions": full_judge_dimensions(),
         },
     )
 
@@ -311,6 +319,7 @@ def test_write_judge_report_recomputes_finding_severity_after_quality_merge(tmp_
             "completion_score": 95,
             "confidence": "high",
             "summary": "模型声称任务完成。",
+            "dimensions": full_judge_dimensions(),
             "findings": [
                 {
                     "severity": "medium",
@@ -348,6 +357,78 @@ def test_tools_return_error_for_unknown_run(tmp_path, monkeypatch):
     assert "list_runs" in result["error"]
     assert "error" in search_trajectory("no-such-run", "x")
     assert "error" in get_tool_calls("no-such-run")
+
+
+def _complete_proposal(**overrides):
+    proposal = {
+        "overall_status": "partial",
+        "completion_score": 55,
+        "confidence": "medium",
+        "summary": "完整提案",
+        "findings": [],
+        "dimensions": full_judge_dimensions(),
+    }
+    proposal.update(overrides)
+    return proposal
+
+
+def test_write_judge_report_rejects_incomplete_proposal_without_creating_files(tmp_path):
+    # 发布前门禁：裁判没有提交全部 13 个维度时不得写出任何报告文件。
+    run = _write_run(tmp_path)
+    with pytest.raises(JudgeProposalError):
+        write_judge_report(str(run), {"overall_status": "success", "summary": "空 dimensions"})
+    assert not (run / "agent_judge.json").exists()
+    assert not (run / "agent_judge.md").exists()
+    assert not (run / "chart_data.json").exists()
+    assert not (run / "judges").exists()
+
+
+def test_write_judge_report_rejects_incomplete_proposal_and_preserves_active_report(tmp_path):
+    # 示例缺陷形态：proposal 只提交了两个维度，其余 11 个 source=missing。
+    # 门禁必须抛出包含缺失维度 key 的明确错误，且完全不动已发布的有效报告。
+    run = _write_run(tmp_path)
+    write_judge_report(str(run), _complete_proposal(summary="有效旧报告"))
+    before = {
+        name: (run / name).read_text(encoding="utf-8")
+        for name in ("agent_judge.json", "agent_judge.md", "chart_data.json")
+    }
+
+    incomplete = {
+        "overall_status": "success",
+        "completion_score": 90,
+        "summary": "只提交了两个维度",
+        "dimensions": {
+            "evidence_citation": {"score": 100, "status": "pass", "summary": "s", "source": "judge"},
+            "execution_closure": {"score": 65, "status": "partial", "summary": "s", "source": "judge"},
+        },
+    }
+    with pytest.raises(JudgeProposalError) as excinfo:
+        write_judge_report(str(run), incomplete)
+
+    message = str(excinfo.value)
+    assert "11" in message
+    assert "intent_recognition" in message
+    assert "efficiency" in message
+    # 确定性维度 assess_dimensions 本可为这两个维度补分，但门禁必须先于补分拦截。
+    assert "evidence_citation" not in message
+    assert "execution_closure" not in message
+    for name, content in before.items():
+        assert (run / name).read_text(encoding="utf-8") == content
+    assert not (run / "judges").exists()
+
+
+def test_write_judge_report_accepts_honest_unknown_dimensions(tmp_path):
+    # 合法 unknown：裁判提交了全部维度但部分证据不足（status=unknown、
+    # score=null、source=judge），报告结构完整，可以发布，且不伪造分数。
+    run = _write_run(tmp_path)
+    write_judge_report(str(run), _complete_proposal())
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    assert report["judge_incomplete"] is False
+    verification = report["dimensions"]["verification"]
+    assert verification["source"] == "judge"
+    assert verification["status"] == "unknown"
+    assert verification["score"] is None
 
 
 def test_first_tool_failure_ignores_keyword_lookalikes(tmp_path):

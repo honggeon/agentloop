@@ -44,23 +44,73 @@ EVIDENCE_SOURCE_ALIASES = {
 
 
 def extract_json_object(value: object) -> Dict[str, Any]:
-    fallback: Dict[str, Any] | None = None
+    best: Dict[str, Any] | None = None
+    best_score: tuple[int, int] | None = None
     for candidate in _iter_json_dicts(value, depth=0):
-        if "overall_status" in candidate:
-            return dict(candidate)
-        # Some models drop overall_status but still emit a report-shaped body;
-        # keep the first such candidate so the report can be normalized with
-        # overall_status "unknown" instead of failing the whole run.
-        if fallback is None and any(
-            key in candidate for key in ("findings", "dimensions", "completion_score")
-        ):
-            fallback = dict(candidate)
-    if fallback is not None:
-        return fallback
+        score = _report_candidate_score(candidate)
+        if score is None:
+            continue
+        # Strictly-greater keeps the first (closest to the final answer) among
+        # equally complete candidates, preserving the historic preference.
+        if best_score is None or score > best_score:
+            best = dict(candidate)
+            best_score = score
+    if best is not None:
+        return best
     preview = _response_preview(value)
     if preview:
         raise ValueError("agent response did not contain a JSON object; last content preview: %s" % preview)
     raise ValueError("agent response did not contain a JSON object")
+
+
+_REPORT_SHAPE_KEYS = ("overall_status", "completion_score", "findings", "dimensions")
+
+
+def _report_candidate_score(candidate: Dict[str, Any]) -> "tuple[int, int] | None":
+    """Rank one report candidate by structural completeness; higher wins.
+
+    A complex run often yields several report-shaped JSON objects: the judge
+    may submit a full report through a write_judge_report tool call and then
+    end with a terse summary JSON that omits ``dimensions``. Picking the last
+    object publishes the skeleton; ranking candidates by completeness keeps
+    the full report. Primary key: submitted dimension count (English keys or
+    Chinese aliases). Secondary: report-shape field count. Dicts without any
+    report-shape field are not candidates (``None``).
+    """
+    if not any(key in candidate for key in _REPORT_SHAPE_KEYS):
+        return None
+    dimensions = candidate.get("dimensions")
+    dimension_count = 0
+    if isinstance(dimensions, Mapping):
+        aliases = set(DIMENSION_DEFINITIONS.values())
+        dimension_count = sum(1 for key in dimensions if key in DIMENSION_DEFINITIONS or key in aliases)
+    shape_count = sum(1 for key in _REPORT_SHAPE_KEYS if key in candidate)
+    return (dimension_count, shape_count)
+
+
+def missing_judge_dimensions(report: object) -> List[str]:
+    """Return the dimension keys a judge proposal did not submit.
+
+    Works on raw proposals and normalized reports alike. A dimension counts as
+    submitted only when the proposal carries a mapping entry (English key or
+    Chinese alias) whose ``source`` normalizes to something other than
+    ``missing``. A judge that assessed a dimension but found insufficient
+    evidence (``status=unknown``, ``score=null``, ``source=judge``) is
+    complete; only absent or source-less entries are structurally missing.
+    """
+    if not isinstance(report, Mapping):
+        return list(DIMENSION_DEFINITIONS)
+    dimensions = report.get("dimensions")
+    raw = dimensions if isinstance(dimensions, Mapping) else {}
+    missing: List[str] = []
+    for key, label in DIMENSION_DEFINITIONS.items():
+        item = raw.get(key)
+        if item is None:
+            item = raw.get(label)
+        source = item.get("source") if isinstance(item, Mapping) else None
+        if _dimension_source(source) == "missing":
+            missing.append(key)
+    return missing
 
 
 def resolve_judge_report(raw: object, run_path: object = None) -> Dict[str, Any]:

@@ -7,6 +7,7 @@ import pytest
 from auditrail.agents.schemas import normalize_judge_report
 from auditrail.agents.tools import write_judge_report
 from auditrail.judges import reports
+from tests.conftest import full_judge_dimensions
 
 
 def _write_run(base: Path) -> Path:
@@ -38,6 +39,7 @@ def _publish(run: Path, engine: str, status: str, score: int, *, published_at: s
             "confidence": "high",
             "summary": "%s summary" % engine,
             "findings": findings or [],
+            "dimensions": full_judge_dimensions(),
         },
         judge_metadata={"engine": engine, "runtime": engine},
         judge_engine=engine,
@@ -432,7 +434,13 @@ def test_write_judge_report_without_engine_keeps_single_report_layout(tmp_path):
     run = _write_run(tmp_path)
     paths = write_judge_report(
         str(run),
-        {"overall_status": "partial", "completion_score": 50, "confidence": "medium", "summary": "legacy"},
+        {
+            "overall_status": "partial",
+            "completion_score": 50,
+            "confidence": "medium",
+            "summary": "legacy",
+            "dimensions": full_judge_dimensions(),
+        },
     )
 
     assert Path(paths["json_path"]) == run / "agent_judge.json"

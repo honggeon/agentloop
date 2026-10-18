@@ -106,6 +106,7 @@ source 只能先填 judge；确定性校验会在写入报告时覆盖 evidence_
 没有工具失败时，error_recovery 必须保持 unknown，不能因为“没有失败”写成 pass。
 不要根据工具成功次数给 tool_selection 打高分；成功只说明调用没有报错，不说明选对了工具。
 没有证据的语义判断不得给 pass；没有证据的判断必须在 summary 中说明证据不足。
+dimensions 缺少任何一个维度 key 都是结构不完整，系统会拒绝写入整份报告；宁可用 status=unknown、score=null、source=judge 占位，也不得省略维度。
 
 - judge_reliability: object，可先填写空对象；系统会基于 evidence 重新计算，并保留 invalid_evidence 明细。
 

@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional
 
 from .dimensions import assess_dimensions
 from .evidence import validate_judge_evidence
-from .schemas import DIMENSION_DEFINITIONS, normalize_judge_report, render_judge_markdown
+from .schemas import DIMENSION_DEFINITIONS, missing_judge_dimensions, normalize_judge_report, render_judge_markdown
 from ..judges import reports as judge_reports
+from ..judges.proposals import JudgeProposalError
 from ..judges.reports import publish_judge_report
 
 
@@ -361,6 +362,17 @@ def write_judge_report(
         existing.update(merged_metadata)
         normalized["judge"] = existing
         normalized = normalize_judge_report(normalized)
+    # Publish gate, before any file is written and before assess_dimensions
+    # could mask gaps with deterministic scores: the judge must have submitted
+    # every dimension itself. source=missing is a structural gap (the proposal
+    # omitted the dimension), not an honest "insufficient evidence" verdict
+    # (status=unknown, score=null, source=judge), which stays publishable.
+    missing_dimensions = missing_judge_dimensions(normalized)
+    if missing_dimensions:
+        raise JudgeProposalError(
+            "judge proposal is structurally incomplete: %s dimension(s) were not submitted by the judge: %s"
+            % (len(missing_dimensions), ", ".join(missing_dimensions))
+        )
     reliability = validate_judge_evidence(str(run_dir), normalized)
     existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
     merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]

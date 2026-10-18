@@ -1,9 +1,10 @@
 import json
 
 from auditrail import cli
+from tests.conftest import full_judge_dimensions
 
 
-def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
+def _write_minimal_run(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
     (run / "summary.json").write_text(json.dumps({"session_id": "s1", "model": "m1"}), encoding="utf-8")
@@ -15,6 +16,11 @@ def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
         json.dumps({"index": 0, "role": "user", "content": "hi"}),
         encoding="utf-8",
     )
+    return run
+
+
+def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
+    run = _write_minimal_run(tmp_path)
 
     async def fake_invoke(messages, config=None):
         assert "run_path" in messages[0]["content"]
@@ -24,12 +30,64 @@ def test_judge_run_uses_agent_and_writes_report(tmp_path, monkeypatch):
             "confidence": "high",
             "summary": "ok",
             "findings": [],
+            "dimensions": full_judge_dimensions(),
         }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     code = cli.main(["judge-run", "--run", str(run)])
     assert code == 0
     assert json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))["overall_status"] == "success"
+
+
+def test_judge_run_repairs_incomplete_proposal_once(tmp_path, monkeypatch):
+    # 首次 proposal 缺维度时，引擎在同一个 run 证据上做一次有界修复：
+    # 第二次调用必须点名缺失维度，修复成功后报告完整写出。
+    run = _write_minimal_run(tmp_path)
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"overall_status": "success", "completion_score": 90, "summary": "缺维度"}
+        return {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    code = cli.main(["judge-run", "--run", str(run)])
+
+    assert code == 0
+    assert len(calls) == 2
+    assert "intent_recognition" in calls[1][0]["content"]
+    assert "efficiency" in calls[1][0]["content"]
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    assert report["judge_incomplete"] is False
+
+
+def test_judge_run_fails_cleanly_when_proposal_stays_incomplete(tmp_path, monkeypatch, capsys):
+    # 两次都不完整：明确失败（非零退出、stderr 说明缺失维度），不宣称成功，
+    # 也不写出任何报告文件。
+    run = _write_minimal_run(tmp_path)
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        calls.append(messages)
+        return {"overall_status": "success", "completion_score": 90, "summary": "缺维度"}
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    code = cli.main(["judge-run", "--run", str(run)])
+
+    assert code == 2
+    assert len(calls) == 2
+    assert not (run / "agent_judge.json").exists()
+    assert not (run / "chart_data.json").exists()
+    captured = capsys.readouterr()
+    assert "intent_recognition" in captured.err
+    assert "Wrote" not in captured.out
 
 
 def test_write_run_outputs_persists_llm_calls(tmp_path):
@@ -168,7 +226,13 @@ def test_judge_run_includes_acceptance_criteria(tmp_path, monkeypatch):
         assert "Agent Judge acceptance criteria" in content
         assert "必须生成 pptx" in content
         assert "不能伪造用户确认" in content
-        return {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"}
+        return {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     assert cli.main(["judge-run", "--run", str(run)]) == 0

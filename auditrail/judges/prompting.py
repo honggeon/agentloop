@@ -25,6 +25,26 @@ class JudgeEvidenceError(ValueError):
     """A run directory cannot supply bounded judge evidence."""
 
 
+def build_dimension_repair_note(missing: List[str]) -> str:
+    """Repair instruction appended to the judge prompt after an incomplete proposal.
+
+    Names the omitted dimension keys and restates the contract: every one of
+    the 13 dimensions must be present; a dimension without evidence stays
+    ``status=unknown``/``score=null``/``source=judge`` instead of being
+    dropped. The judge must return the full report again, not a patch.
+    """
+    from ..agents.schemas import DIMENSION_DEFINITIONS
+
+    required = ", ".join(DIMENSION_DEFINITIONS)
+    return (
+        "\n\n上一次输出的裁判报告结构不完整：缺少维度 %s。\n"
+        "必须重新返回完整报告 JSON：dimensions 必须包含全部 13 个维度 key（%s），不得省略任何维度。\n"
+        "缺少证据的维度也必须保留条目，并填 status=unknown、score=null、source=judge，"
+        "在 summary 中说明证据不足；不得用 0 分或 fail 冒充已评估。\n"
+        "返回完整报告，不要只返回缺失维度的补丁。\n"
+    ) % (", ".join(missing), required)
+
+
 def build_judge_evidence(run_dir: str | Path) -> Dict[str, Any]:
     """Read bounded, deterministic evidence from one run directory."""
     run = Path(run_dir)

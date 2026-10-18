@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from ..agents.schemas import missing_judge_dimensions
 from ..dsh_headless import DshHeadlessClient, run_subprocess
 from ..dsh_runtime import (
     DshExecutionResult,
@@ -31,7 +32,7 @@ from ..dsh_runtime import (
 )
 from ..dsh_source import find_session_file, read_events
 from .base import DSH_ENGINE, JudgeExecutionError, JudgeRequest, JudgeResult, JudgeUnavailableError
-from .prompting import build_dsh_judge_prompt
+from .prompting import build_dimension_repair_note, build_dsh_judge_prompt
 from .proposals import JudgeProposalError, parse_judge_proposal
 
 _PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -64,14 +65,40 @@ class DshJudgeEngine:
         return None
 
     def run(self, request: JudgeRequest) -> JudgeResult:
-        run_dir = Path(request.run_dir)
         try:
-            config, profile, workspace = self._resolve(run_dir)
+            config, profile, workspace = self._resolve(Path(request.run_dir))
         except JudgeUnavailableError as exc:
             raise JudgeUnavailableError("dsh_unavailable", str(exc)) from exc
 
+        result, invocation = self._run_turn(config, profile, workspace, build_dsh_judge_prompt(request.run_dir))
+        proposal = self._parse_proposal(result)
+        missing = missing_judge_dimensions(proposal)
+        if missing:
+            # One bounded repair attempt on the same bounded run evidence: the
+            # note names the omitted dimensions and demands the full report.
+            # Strictly parseable JSON is not enough — a report-shaped proposal
+            # that omits dimensions is not publishable.
+            repair_prompt = build_dsh_judge_prompt(request.run_dir) + build_dimension_repair_note(missing)
+            result, invocation = self._run_turn(config, profile, workspace, repair_prompt)
+            proposal = self._parse_proposal(result)
+            missing = missing_judge_dimensions(proposal)
+            if missing:
+                raise JudgeExecutionError(
+                    "incomplete_proposal",
+                    "judge proposal is still incomplete after one repair attempt; "
+                    "missing dimensions: %s" % ", ".join(missing),
+                )
+        return JudgeResult(engine=self.id, proposal=proposal, metadata=self._metadata(result, invocation))
+
+    def _run_turn(
+        self,
+        config: DshRuntimeConfig,
+        profile: str,
+        workspace: Path,
+        message: str,
+    ) -> tuple[DshExecutionResult, Any]:
         run_request = DshRunRequest(
-            message=build_dsh_judge_prompt(request.run_dir),
+            message=message,
             profile=profile,
             workspace=workspace,
             timeout_seconds=self._timeout_seconds(),
@@ -80,11 +107,14 @@ class DshJudgeEngine:
         result: DshExecutionResult = self._client_for(config).run(run_request, invocation=invocation)
         if not result.succeeded:
             raise self._execution_error(result)
+        return result, invocation
+
+    @staticmethod
+    def _parse_proposal(result: DshExecutionResult) -> dict[str, Any]:
         try:
-            proposal = parse_judge_proposal(result.final_text)
+            return parse_judge_proposal(result.final_text)
         except JudgeProposalError as exc:
             raise JudgeExecutionError("invalid_proposal", str(exc)) from exc
-        return JudgeResult(engine=self.id, proposal=proposal, metadata=self._metadata(result, invocation))
 
     # -- configuration -------------------------------------------------
 

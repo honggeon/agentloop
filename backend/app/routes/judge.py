@@ -77,6 +77,10 @@ def run_judge(run_id: str, payload: dict[str, Any] | None = None) -> dict[str, A
             judge_metadata=report_metadata,
             judge_engine=result.engine,
         )
+    except JudgeProposalError as exc:
+        # Structural completeness gate: an incomplete proposal must fail
+        # loudly (and never overwrite the active report), not publish shells.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="%s: %s" % (type(exc).__name__, exc)) from exc
     return {

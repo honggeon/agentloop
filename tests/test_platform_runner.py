@@ -8,6 +8,7 @@ from auditrail.client import AuditrailHTTPError
 from auditrail.evaluation import load_evaluation
 from auditrail.netguard import EndpointPolicy
 from auditrail.runner import build_evaluation_envelope, create_platform_run, execute_run
+from tests.conftest import full_judge_dimensions
 
 
 def _agent(**overrides):
@@ -317,16 +318,17 @@ def test_deterministic_failure_caps_judge_pass(tmp_path):
         "confidence": "high",
         "summary": "一切顺利",
         "findings": [],
+        "dimensions": full_judge_dimensions(),
     }
     paths = write_judge_report(str(run_dir), proposal)
     report = json.loads(open(paths["json_path"], encoding="utf-8").read())
     assert report["overall_status"] == "failed"  # judge cannot override determinism
     assert report["completion_score"] == 60
-    # a no-evidence dimension stays unknown with a null score, never fabricated
+    # 裁判诚实提交的证据不足维度保持 unknown + null 分数，不伪造数字
     dimension = report["dimensions"]["intent_recognition"]
     assert dimension["status"] == "unknown"
     assert dimension["score"] is None
-    assert dimension["source"] == "missing"
+    assert dimension["source"] == "judge"
 
 
 def test_multiple_caps_take_the_minimum(tmp_path):
@@ -344,7 +346,13 @@ def test_multiple_caps_take_the_minimum(tmp_path):
     quality = assess_run_quality(str(run_dir))
     assert quality["completion"]["score_cap"] == 40  # min(60 tool_error, 60 expectation, 40 artifact)
 
-    proposal = {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"}
+    proposal = {
+        "overall_status": "success",
+        "completion_score": 90,
+        "confidence": "high",
+        "summary": "ok",
+        "dimensions": full_judge_dimensions(),
+    }
     paths = write_judge_report(str(run_dir), proposal)
     report = json.loads(open(paths["json_path"], encoding="utf-8").read())
     assert report["completion_score"] == 40
@@ -365,7 +373,13 @@ def test_invalid_envelope_never_gates(tmp_path):
     assert quality["evaluation"]["status"] == "invalid"
     assert quality["completion"]["score_cap"] == 100  # invalid envelope is not used
 
-    proposal = {"overall_status": "success", "completion_score": 90, "confidence": "high", "summary": "ok"}
+    proposal = {
+        "overall_status": "success",
+        "completion_score": 90,
+        "confidence": "high",
+        "summary": "ok",
+        "dimensions": full_judge_dimensions(),
+    }
     paths = write_judge_report(str(run_dir), proposal)
     report = json.loads(open(paths["json_path"], encoding="utf-8").read())
     assert report["overall_status"] == "success"
@@ -381,7 +395,13 @@ def test_render_and_judge_preserve_run_json(tmp_path):
     _write_run_outputs(run_dir, _session_response())
     assert (run_dir / "run.json").exists()
     # re-judge
-    proposal = {"overall_status": "partial", "completion_score": 50, "confidence": "low", "summary": "x"}
+    proposal = {
+        "overall_status": "partial",
+        "completion_score": 50,
+        "confidence": "low",
+        "summary": "x",
+        "dimensions": full_judge_dimensions(),
+    }
     write_judge_report(str(run_dir), proposal)
     record = run_contract.read_run_record(run_dir)
     assert record["run_id"] == run_dir.name
