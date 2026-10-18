@@ -438,3 +438,35 @@ def test_normalize_judge_report_maps_dimension_aliases_and_bounds_scores():
     assert report["dimensions"]["tool_selection"]["status"] == "fail"
     assert report["judge_reliability"]["invalid_evidence"][0]["reason"] == "quote_not_found"
     assert report["judge_reliability"]["fact_inference_mismatch_count"] == 2
+
+
+def test_normalize_judge_report_discards_malformed_metrics_and_charts():
+    # Regression: judge models sometimes emit metrics/charts as arrays or
+    # strings; dict() on those crashed the whole judge run with an opaque
+    # ValueError ("dictionary update sequence element ...") after the model
+    # quota was already spent. Malformed shapes must degrade to empty objects.
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "metrics": ["abc"],
+            "charts": "token",
+        }
+    )
+
+    assert report["metrics"]["completion_score"] == 0
+    assert report["metrics"]["message_count"] == 0
+    assert report["charts"]["finding_severity"] == []
+    assert report["charts"]["tool_distribution"] == []
+
+
+def test_normalize_judge_report_keeps_mapping_metrics_and_charts():
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "metrics": {"custom_kpi": 3},
+            "charts": {"tool_distribution": [{"tool": "bash", "count": 1}]},
+        }
+    )
+
+    assert report["metrics"]["custom_kpi"] == 3
+    assert report["charts"]["tool_distribution"] == [{"tool": "bash", "count": 1}]

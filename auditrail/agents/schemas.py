@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 
 
 ALLOWED_STATUS = {"success", "partial", "failed", "unknown"}
@@ -263,18 +263,29 @@ def _balanced_json_objects(text: str) -> List[str]:
     return blobs
 
 
+def _object_or_empty(value: object) -> Dict[str, Any]:
+    """Return a plain dict for mapping input, else an empty dict.
+
+    Judge models occasionally emit ``metrics``/``charts`` as arrays or strings;
+    discarding those malformed shapes keeps the report writable instead of
+    crashing the whole judge run with an opaque ``dict()`` ValueError after
+    the model quota was already spent.
+    """
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def normalize_judge_report(raw: object) -> Dict[str, Any]:
     report = extract_json_object(raw)
     status = _choice(report.get("overall_status"), ALLOWED_STATUS, "unknown", "overall_status")
     confidence = _choice(report.get("confidence"), ALLOWED_CONFIDENCE, "low", "confidence")
     score = _score(report.get("completion_score", 0))
     findings = [_normalize_finding(item) for item in report.get("findings") or []]
-    metrics = dict(report.get("metrics") or {})
+    metrics = _object_or_empty(report.get("metrics"))
     metrics["completion_score"] = score
     metrics.setdefault("message_count", 0)
     metrics.setdefault("tool_call_count", 0)
     metrics.setdefault("tool_error_count", 0)
-    charts = dict(report.get("charts") or {})
+    charts = _object_or_empty(report.get("charts"))
     charts["finding_severity"] = _count_by(findings, "severity")
     charts.setdefault("tool_distribution", [])
     charts.setdefault("phase_timeline", [])
