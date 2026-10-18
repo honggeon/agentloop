@@ -1343,3 +1343,13 @@ def test_run_view_shows_dimension_evidence_chain():
     assert "结构缺失" in source
     # unknown 仍显示「未评估」，score=null 显示「—」
     assert "未评估" in source
+
+
+def test_run_view_quality_metrics_show_dash_when_unmeasured():
+    # LLM Quality Metrics：无质量信号时显示「—」而不是伪造的 0 分。
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "qualityScore: number | null" in api_source
+    assert "qualityScore ?? \"—\"" in source
+    assert "未测量" in source

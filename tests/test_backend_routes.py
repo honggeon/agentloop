@@ -962,3 +962,36 @@ def test_backend_judge_routes_keep_legacy_single_report_runs_readable(tmp_path, 
     assert client.get("/api/runs/run-1/judge").json()["summary"] == "old"
     # A run with no report at all still answers instead of failing.
     assert client.get("/api/runs/run-1/judges/compare").status_code == 200
+
+
+def test_llm_quality_metrics_null_when_unmeasured():
+    # 无质量信号的调用（如 DSH 导入会话）必须得到 null，而不是伪造的 0 分。
+    from backend.app.routes.runs import _llm_quality_metrics, _normalize_quality
+
+    quality = _normalize_quality({}, {"response": "hello"})
+    assert quality["qualityScore"] is None
+    assert quality["formatCompliance"] is None
+    assert quality["responseLength"] == 5
+
+    metrics = _llm_quality_metrics([{"quality": quality}])
+    assert metrics["qualityScore"] is None
+    assert metrics["formatCompliance"] is None
+    assert metrics["hallucinationRisk"] is None
+    assert metrics["instructionFollowing"] is None
+    assert metrics["selfEvaluationScore"] is None
+    assert metrics["responseLength"] == 5
+
+
+def test_llm_quality_metrics_average_measured_values():
+    from backend.app.routes.runs import _llm_quality_metrics, _normalize_quality
+
+    measured = _normalize_quality(
+        {"formatCompliance": 0.8, "instructionFollowing": 1.0, "selfEvaluationScore": 0.6},
+        {"response": "x"},
+    )
+    unmeasured = _normalize_quality({}, {"response": "y"})
+    metrics = _llm_quality_metrics([{"quality": measured}, {"quality": unmeasured}])
+    assert metrics["formatCompliance"] == 0.8
+    assert metrics["instructionFollowing"] == 1.0
+    assert metrics["selfEvaluationScore"] == 60
+    assert metrics["qualityScore"] == 80  # (0.8 + 1.0 + 0.6) / 3

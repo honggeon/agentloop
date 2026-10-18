@@ -1183,15 +1183,18 @@ onMounted(() => {
             <span class="chip quiet">score</span>
           </div>
           <div class="quality-score">
-            <strong>{{ runtime?.llmDashboard.qualityMetrics.qualityScore || 0 }}</strong>
-            <span>/ 100</span>
+            <strong>{{ runtime?.llmDashboard.qualityMetrics.qualityScore ?? "—" }}</strong>
+            <span v-if="runtime?.llmDashboard.qualityMetrics.qualityScore != null">/ 100</span>
           </div>
+          <p v-if="runtime?.llmDashboard.qualityMetrics.qualityScore == null" class="empty">
+            来源数据未包含质量信号，以下指标未测量。
+          </p>
           <div class="metric-list">
             <div><span>Response Length</span><strong>{{ formatNumber(runtime?.llmDashboard.qualityMetrics.responseLength) }}</strong></div>
-            <div><span>Format Compliance</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.formatCompliance) }}</strong></div>
-            <div><span>Hallucination Risk</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.hallucinationRisk) }}</strong></div>
-            <div><span>Instruction Following</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.instructionFollowing) }}</strong></div>
-            <div><span>Self Evaluation Score</span><strong>{{ runtime?.llmDashboard.qualityMetrics.selfEvaluationScore || 0 }}</strong></div>
+            <div><span>Format Compliance</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.formatCompliance ?? undefined) }}</strong></div>
+            <div><span>Hallucination Risk</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.hallucinationRisk ?? undefined) }}</strong></div>
+            <div><span>Instruction Following</span><strong>{{ formatPercent(runtime?.llmDashboard.qualityMetrics.instructionFollowing ?? undefined) }}</strong></div>
+            <div><span>Self Evaluation Score</span><strong>{{ runtime?.llmDashboard.qualityMetrics.selfEvaluationScore ?? "—" }}</strong></div>
           </div>
         </div>
 

@@ -721,13 +721,14 @@ def _llm_quality_metrics(calls: list[dict[str, Any]]) -> dict[str, Any]:
     following = [call["quality"]["instructionFollowing"] for call in calls if call["quality"]["instructionFollowing"] is not None]
     self_scores = [call["quality"]["selfEvaluationScore"] for call in calls if call["quality"]["selfEvaluationScore"] is not None]
     quality_scores = [call["quality"]["qualityScore"] for call in calls if call["quality"]["qualityScore"] is not None]
+    # Empty series stay None (unmeasured); only measured values average.
     return {
-        "qualityScore": int(_average(quality_scores)) if quality_scores else 0,
+        "qualityScore": int(_average(quality_scores)) if quality_scores else None,
         "responseLength": round(_average(response_lengths)),
-        "formatCompliance": _average(format_scores),
-        "hallucinationRisk": _average(hallucination),
-        "instructionFollowing": _average(following),
-        "selfEvaluationScore": round(_average(self_scores)),
+        "formatCompliance": _average(format_scores) if format_scores else None,
+        "hallucinationRisk": _average(hallucination) if hallucination else None,
+        "instructionFollowing": _average(following) if following else None,
+        "selfEvaluationScore": round(_average(self_scores)) if self_scores else None,
     }
 
 
@@ -1080,7 +1081,9 @@ def _normalize_quality(quality: dict[str, Any], call: dict[str, Any]) -> dict[st
         score_parts.append(instruction_following)
     if self_evaluation is not None:
         score_parts.append(max(min(self_evaluation / 100, 1), 0))
-    quality_score = int((sum(score_parts) / len(score_parts)) * 100) if score_parts else 0
+    # No quality signals means "not measured", not zero: keep it null so the
+    # dashboard can render "—" instead of a fabricated 0/100.
+    quality_score = int((sum(score_parts) / len(score_parts)) * 100) if score_parts else None
 
     return {
         "responseLength": response_length,

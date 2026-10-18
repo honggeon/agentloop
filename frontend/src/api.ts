@@ -489,7 +489,8 @@ export interface LlmCallDetail {
     hallucinationRisk: number | null;
     instructionFollowing: number | null;
     selfEvaluationScore: number | null;
-    qualityScore: number;
+    // 无质量信号时为 null（未测量），不伪造 0 分
+    qualityScore: number | null;
   };
 }
 
@@ -548,12 +549,13 @@ export interface LlmDashboard {
     cost: number;
   }>;
   qualityMetrics: {
-    qualityScore: number;
+    // 全部可为 null：源数据没有质量信号时表示「未测量」，界面显示「—」
+    qualityScore: number | null;
     responseLength: number;
-    formatCompliance: number;
-    hallucinationRisk: number;
-    instructionFollowing: number;
-    selfEvaluationScore: number;
+    formatCompliance: number | null;
+    hallucinationRisk: number | null;
+    instructionFollowing: number | null;
+    selfEvaluationScore: number | null;
   };
   errorAnalysis: {
     timeout: number;
