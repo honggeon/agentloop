@@ -36,7 +36,11 @@ Outputs:
 auditrail can audit locally recorded DeepSeek Harness sessions. DSH writes every
 agent session to `~/.dsh/sessions/<workspace>/<session-id>/session.jsonl.zstd`;
 `auditrail/dsh_source.py` converts those event logs into the standard run
-contract, so audit, judge and dashboard work unchanged.
+contract, so audit, judge and dashboard work unchanged. When the recording
+carries provider-reported per-step `usage`, import writes a real
+`llm_calls.json` (input/output/cache tokens and step latency); runs imported
+before that support can be repaired in place with `render-run`, which recovers
+the usage from the raw `dsh_events` stored in `session.json`.
 
 ```bash
 # List recorded DSH sessions (newest first)

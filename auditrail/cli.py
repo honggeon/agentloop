@@ -381,9 +381,31 @@ def _render_run(args) -> int:
         return 2
     session_response = json.loads(session_path.read_text(encoding="utf-8"))
     _recover_dsh_model(session_response)
+    _recover_dsh_llm_calls(session_response)
     _write_run_outputs(run_dir, session_response)
     print("Rendered run %s" % run_dir)
     return 0
+
+
+def _recover_dsh_llm_calls(session_response: Dict) -> None:
+    """Fill missing session llm_calls from recorded DSH events, if present.
+
+    Runs imported before usage extraction was supported hold the raw
+    ``dsh_events`` (with per-step provider-reported ``usage``) but no
+    ``llm_calls``; recovering here lets ``render-run`` write a real
+    ``llm_calls.json`` instead of the trajectory-derived estimate.
+    """
+    session = session_response.get("session")
+    if not isinstance(session, dict) or session.get("llm_calls"):
+        return
+    events = session_response.get("dsh_events")
+    if not isinstance(events, list) or not events:
+        return
+    from .dsh_source import events_to_llm_calls
+
+    llm_calls = events_to_llm_calls(events)
+    if llm_calls:
+        session["llm_calls"] = llm_calls
 
 
 def _recover_dsh_model(session_response: Dict) -> None:

@@ -442,3 +442,105 @@ def test_cli_list_dsh_sessions_json(tmp_path, capsys):
     assert code == 0
     data = json.loads(capsys.readouterr().out)
     assert data["sessions"][0]["session_id"] == SESSION_ID
+
+
+# -- real LLM token usage from recordings ---------------------------------
+
+
+def _events_with_usage():
+    events = _events()
+    # step/start before each assistant/message, provider-reported usage on the
+    # assistant events — the shape of session.v4 recordings.
+    usage_events = [
+        {"type": "step/start", "seq": 19, "time": 1787000001500, "data": {"turn": 1, "step": 1}},
+        {"type": "step/start", "seq": 29, "time": 1787000003500, "data": {"turn": 1, "step": 2}},
+    ]
+    merged = []
+    for event in events:
+        for start in usage_events:
+            if start["seq"] == 19 and event.get("seq") == 20:
+                merged.append(start)
+            if start["seq"] == 29 and event.get("seq") == 30:
+                merged.append(start)
+        if event.get("type") == "assistant/message":
+            event = json.loads(json.dumps(event))
+            step = event["data"]["step"]
+            event["data"]["usage"] = {
+                "inputTokens": 1000 * step,
+                "outputTokens": 100 * step,
+                "cacheReadTokens": 10 * step,
+                "cacheWriteTokens": 0,
+                "totalTokens": 1110 * step,
+            }
+        merged.append(event)
+    return merged
+
+
+def test_events_to_llm_calls_extracts_real_usage_and_latency():
+    from auditrail.dsh_source import events_to_llm_calls
+
+    calls = events_to_llm_calls(_events_with_usage())
+
+    assert len(calls) == 2
+    first, second = calls
+    assert first["call_id"] == "a1"
+    assert first["name"] == "Tool Planning"  # carries a tool-call block
+    assert first["token_usage"]["input_tokens"] == 1000
+    assert first["token_usage"]["output_tokens"] == 100
+    assert first["token_usage"]["total_tokens"] == 1110
+    assert first["token_usage"]["cache_read_tokens"] == 10
+    assert first["latency_ms"] == 500  # 1787000002000 - step/start 1787000001500
+    assert second["call_id"] == "a2"
+    assert second["name"] == "Assistant Response"
+    assert second["token_usage"]["input_tokens"] == 2000
+    assert second["latency_ms"] == 500
+    assert all(call["status"] == "success" for call in calls)
+
+
+def test_events_to_llm_calls_empty_without_usage():
+    from auditrail.dsh_source import events_to_llm_calls
+
+    assert events_to_llm_calls(_events()) == []
+    response = build_session_response(_events())
+    assert "llm_calls" not in response["session"]
+
+
+def test_build_session_response_attaches_real_llm_calls():
+    response = build_session_response(_events_with_usage())
+    calls = response["session"]["llm_calls"]
+    assert len(calls) == 2
+    assert calls[0]["token_usage"]["total_tokens"] == 1110
+
+
+def test_cli_render_run_recovers_dsh_llm_calls(tmp_path, capsys):
+    # Simulate a run imported before usage extraction existed: session.json
+    # holds raw dsh_events but no llm_calls; render-run must recover them.
+    response = build_session_response(_events_with_usage())
+    del response["session"]["llm_calls"]
+    run = tmp_path / "runs" / "20260901-000000-dsh-usage"
+    cli._write_run_outputs(run, response)
+    assert not (run / "llm_calls.json").exists()
+
+    code = cli.main(["render-run", "--run", str(run)])
+
+    assert code == 0
+    llm_calls = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))["llm_calls"]
+    assert len(llm_calls) == 2
+    assert llm_calls[0]["token_usage"]["input_tokens"] == 1000
+    assert llm_calls[1]["token_usage"]["output_tokens"] == 200
+
+
+def test_import_dsh_session_writes_real_llm_calls(tmp_path, monkeypatch):
+    from auditrail.dsh_source import events_to_llm_calls
+
+    dsh_home = tmp_path / "dsh-home"
+    _write_session(dsh_home, events=_events_with_usage())
+    out = tmp_path / "runs"
+
+    code = cli.main(["import-dsh-session", "--session-id", SESSION_ID, "--dsh-home", str(dsh_home), "--out", str(out)])
+
+    assert code == 0
+    run = next(out.iterdir())
+    llm_calls = json.loads((run / "llm_calls.json").read_text(encoding="utf-8"))["llm_calls"]
+    assert len(llm_calls) == 2
+    assert llm_calls[0]["token_usage"]["total_tokens"] == 1110

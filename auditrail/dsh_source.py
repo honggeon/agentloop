@@ -378,6 +378,67 @@ def _realtime_tool_result_message(
     return item
 
 
+def events_to_llm_calls(events: List[Dict]) -> List[Dict]:
+    """Extract real per-step LLM call telemetry from DSH recordings.
+
+    Every ``assistant/message`` event carries the provider-reported ``usage``
+    (input/output/cache tokens) and is preceded by a ``step/start`` event with
+    the same ``(turn, step)``, so wall-clock latency is measurable. Sessions
+    recorded without usage yield no entries, and callers keep the
+    trajectory-derived fallback for the LLM metrics panel.
+    """
+    step_starts: Dict[tuple, object] = {}
+    for event in events:
+        if event.get("type") == "step/start":
+            data = event.get("data") or {}
+            step_starts[(data.get("turn"), data.get("step"))] = event.get("time")
+    model = _model_of(events)
+    calls: List[Dict] = []
+    for event in events:
+        if event.get("type") != "assistant/message":
+            continue
+        data = event.get("data") or {}
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        message = data.get("message") or {}
+        blocks = message.get("content") or []
+        content = _text_of_blocks(blocks, block_type="text") or _text_of_blocks(blocks, block_type="reasoning")
+        turn, step = data.get("turn"), data.get("step")
+        call: Dict = {
+            "call_id": message.get("id") or "turn%s-step%s" % (turn, step),
+            "name": "Tool Planning"
+            if any(isinstance(block, dict) and block.get("type") == "tool-call" for block in blocks)
+            else "Assistant Response",
+            "model": model or "unknown",
+            "provider": "DeepSeek" if model and "deepseek" in model.lower() else "",
+            "token_usage": {
+                "input_tokens": _usage_int(usage.get("inputTokens")),
+                "output_tokens": _usage_int(usage.get("outputTokens")),
+                "total_tokens": _usage_int(usage.get("totalTokens")),
+                "cache_read_tokens": _usage_int(usage.get("cacheReadTokens")),
+                "cache_write_tokens": _usage_int(usage.get("cacheWriteTokens")),
+            },
+            "response": content,
+            "status": "success",
+        }
+        start = step_starts.get((turn, step))
+        end = event.get("time")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+            call["latency_ms"] = round(end - start, 3)
+        calls.append(call)
+    return calls
+
+
+def _usage_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def build_session_response(events: List[Dict], path: Optional[Path] = None) -> Dict:
     """Build the ``session.json`` payload for one parsed DSH event log.
 
@@ -392,6 +453,12 @@ def build_session_response(events: List[Dict], path: Optional[Path] = None) -> D
         "model": _model_of(events),
         "messages": events_to_messages(events),
     }
+    # Real provider-reported token usage, when the recording carries it;
+    # ``trajectory.llm_calls_from_session_response`` forwards it to
+    # ``llm_calls.json`` so the dashboard stops falling back to estimates.
+    llm_calls = events_to_llm_calls(events)
+    if llm_calls:
+        session["llm_calls"] = llm_calls
     response: Dict = {"session": session}
     response["dsh"] = {
         "agent_preset": info["agent_preset"],
