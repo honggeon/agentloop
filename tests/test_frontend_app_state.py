@@ -1310,3 +1310,36 @@ def test_phase5_import_views_pause_and_backoff_polling():
     assert "pollFailures" in detail_source
     assert "30000" in detail_source
     assert "fetch(" not in detail_source
+
+
+def test_run_view_shows_dimension_evidence_chain():
+    # 每个维度可展开查看完整证据链：原子检查项、支撑/反证、分数推导、证据缺口。
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "export interface JudgeEvidenceChain" in api_source
+    assert "export interface JudgeDimensionCheck" in api_source
+    assert "export interface JudgeScoreTrace" in api_source
+    assert "export interface JudgeScoreRule" in api_source
+    assert "evidence_chain?: JudgeEvidenceChain" in api_source
+    assert "dimensions_without_valid_evidence" in api_source
+    assert "unsupported_dimension_count" in api_source
+
+    assert "展开证据链" in source
+    assert "expandedDimensions" in source
+    assert "toggleDimension" in source
+    assert "原子检查项" in source
+    assert "反证" in source
+    assert "分数推导" in source
+    assert "Judge 原始分" in source
+    assert "确定性候选分" in source
+    assert "证据缺口" in source
+    # 机械校验文案：引用已验证 ≠ 结论已证明
+    assert "引用已验证" in source
+    assert "校验失败" in source
+    assert "不代表结论已被系统证明" in source
+    # 旧报告 fallback 与结构缺失警告
+    assert "旧报告未记录完整证据链" in source
+    assert "结构缺失" in source
+    # unknown 仍显示「未评估」，score=null 显示「—」
+    assert "未评估" in source

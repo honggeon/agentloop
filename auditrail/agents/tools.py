@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .dimensions import assess_dimensions
+from .dimensions import assess_dimensions, verbatim_quote
 from .evidence import validate_judge_evidence
 from .schemas import DIMENSION_DEFINITIONS, missing_judge_dimensions, normalize_judge_report, render_judge_markdown
 from ..judges import reports as judge_reports
@@ -308,11 +308,21 @@ def _envelope_quality(run_dir: Path) -> "tuple[str, str, List[int], List[Dict[st
                     "category": "delivery",
                     "title": "Required artifact missing: %s" % check.get("path"),
                     "type": "fact",
-                    "evidence": [{"source": "evaluation.json", "quote": "artifact %s missing" % check.get("path")}],
+                    # The quote must be verbatim content of evaluation.json:
+                    # the artifact path itself, never a synthesized sentence.
+                    "evidence": [{"source": "evaluation.json", "quote": _envelope_quote(str(check.get("path") or ""))}],
                     "recommendation": "Produce the required artifact before reporting success.",
                 }
             )
     return "completed", "", caps, findings
+
+
+def _envelope_quote(value: str) -> str:
+    """Return a quote that survives verbatim JSON matching, or a safe marker."""
+    text = str(value or "").strip()
+    if text and not re.search(r'["\\\x00-\x1f]', text):
+        return text[:500]
+    return '"status": "fail"'
 
 
 def _downgrade_unsupported_facts(normalized: Dict[str, Any], reliability: Dict[str, Any]) -> int:
@@ -331,6 +341,35 @@ def _downgrade_unsupported_facts(normalized: Dict[str, Any], reliability: Dict[s
             findings[index]["type"] = "inference"
             count += 1
     return count
+
+
+def _downgrade_unsupported_dimensions(normalized: Dict[str, Any], reliability: Dict[str, Any]) -> List[str]:
+    """Normalize judge-scored dimensions without valid evidence to unknown.
+
+    A judge that reports pass/partial/fail with a score but no mechanically
+    valid evidence has not produced a trustworthy verdict: the dimension is
+    rewritten to ``score=null, status=unknown, source=judge`` (never 0/fail,
+    which would fabricate a negative evaluation), and the gap is recorded in
+    the dimension's evidence chain. Deterministic dimensions are exempt — they
+    generate their own verbatim evidence when they assign a score.
+    """
+    dimensions = normalized.get("dimensions") or {}
+    downgraded: List[str] = []
+    for key in reliability.get("dimensions_without_valid_evidence") or []:
+        dimension = dimensions.get(key)
+        if not isinstance(dimension, dict):
+            continue
+        if dimension.get("source") != "judge" or dimension.get("status") == "unknown":
+            continue
+        dimension["score"] = None
+        dimension["status"] = "unknown"
+        chain = dict(dimension.get("evidence_chain") or {})
+        gaps = list(chain.get("gaps") or [])
+        gaps.append("裁判给出了分数但缺少有效证据支撑，已归一化为 unknown（score=null）。")
+        chain["gaps"] = gaps
+        dimension["evidence_chain"] = chain
+        downgraded.append(key)
+    return downgraded
 
 
 def write_judge_report(
@@ -373,6 +412,19 @@ def write_judge_report(
             "judge proposal is structurally incomplete: %s dimension(s) were not submitted by the judge: %s"
             % (len(missing_dimensions), ", ".join(missing_dimensions))
         )
+    # Stage 1 reliability covers the raw judge proposal only; it drives the
+    # deterministic evidence_citation scoring below.
+    base_reliability = validate_judge_evidence(str(run_dir), normalized)
+    # Quality findings are merged BEFORE the final evidence validation so they
+    # can never bypass it, and deterministic dimensions run before it so their
+    # generated evidence chains are part of the validated evidence set.
+    quality = assess_run_quality(str(run_dir))
+    normalized = _merge_quality_report(normalized, quality)
+    normalized["dimensions"] = assess_dimensions(str(run_dir), normalized, base_reliability)
+    normalized = normalize_judge_report(normalized)
+    # Stage 2 reliability is computed over the complete publishable report
+    # (judge + quality findings + deterministic dimension chains) and is what
+    # gets persisted.
     reliability = validate_judge_evidence(str(run_dir), normalized)
     existing_notes = list((normalized.get("judge_reliability") or {}).get("notes") or [])
     merged_notes = existing_notes + [note for note in reliability.get("notes") or [] if note not in existing_notes]
@@ -381,11 +433,14 @@ def write_judge_report(
         merged_notes.append(
             "downgraded %s fact findings to inference: no valid evidence in run artifacts" % downgraded
         )
+    downgraded_dimensions = _downgrade_unsupported_dimensions(normalized, reliability)
+    if downgraded_dimensions:
+        merged_notes.append(
+            "normalized %s scored dimension(s) to unknown: no valid evidence (%s)"
+            % (len(downgraded_dimensions), ", ".join(downgraded_dimensions))
+        )
     reliability["notes"] = merged_notes
-    quality = assess_run_quality(str(run_dir))
-    normalized = _merge_quality_report(normalized, quality)
     normalized["judge_reliability"] = reliability
-    normalized["dimensions"] = assess_dimensions(str(run_dir), normalized, reliability)
     normalized = normalize_judge_report(normalized)
     chart_data = build_chart_data(str(run_dir))
     charts = dict(chart_data)
@@ -411,6 +466,8 @@ def write_judge_report(
         "unsupported_claim_count": normalized["judge_reliability"]["unsupported_claim_count"],
         "invalid_evidence_count": normalized["judge_reliability"]["invalid_evidence_count"],
         "fact_inference_mismatch_count": normalized["judge_reliability"]["fact_inference_mismatch_count"],
+        "unsupported_dimension_count": normalized["judge_reliability"].get("unsupported_dimension_count", 0),
+        "dimension_evidence_mismatch_count": normalized["judge_reliability"].get("dimension_evidence_mismatch_count", 0),
     }
     normalized["charts"] = charts
 
@@ -551,10 +608,13 @@ def _last_assistant_message(trajectory: Any) -> Optional[Dict[str, Any]]:
         return None
     for row in reversed(trajectory):
         if isinstance(row, dict) and row.get("role") == "assistant":
+            quote = verbatim_quote(row.get("content"), json.dumps(row, ensure_ascii=False, default=str))
+            if not quote:
+                return None
             return {
                 "source": "trajectory.jsonl",
                 "message_index": row.get("index"),
-                "quote": _trim(row.get("content") or ""),
+                "quote": quote,
             }
     return None
 
@@ -569,11 +629,14 @@ def _first_tool_failure(audit: Dict[str, Any], trajectory: Any) -> Optional[Dict
     Shell non-zero exits are a separate semantic, handled by the command-level
     channel rather than keyword guessing.
     """
+    audit_dump = json.dumps(audit, ensure_ascii=False, default=str)
     for call in audit.get("tool_calls") or []:
         if not isinstance(call, dict) or call.get("status") not in {"error", "blocked", "timeout"}:
             continue
-        quote = call.get("result_preview") or call.get("args_preview") or call.get("message") or ""
-        return {"source": "audit.json", "message_index": call.get("index"), "quote": _trim(quote)}
+        quote = verbatim_quote(call.get("result_preview") or call.get("args_preview") or call.get("message"), audit_dump)
+        if not quote:
+            quote = '"status": "%s"' % call.get("status")
+        return {"source": "audit.json", "message_index": call.get("index"), "quote": quote}
     return None
 
 
@@ -585,22 +648,19 @@ def _quality_evidence(
 ) -> List[Dict[str, Any]]:
     evidence = []
     if requested:
-        evidence.append(
-            {
-                "source": "summary.json",
-                "quote": _trim("requested deliverables: %s; title: %s" % (", ".join(requested), summary.get("title") or "")),
-            }
-        )
+        # Quote the session title verbatim — a synthesized sentence like
+        # "requested deliverables: ..." is not artifact content and would fail
+        # the mechanical quote validation.
+        title = str(summary.get("title") or "").strip()
+        if title:
+            quote = verbatim_quote(title, json.dumps(summary, ensure_ascii=False, default=str), limit=500)
+            if quote:
+                evidence.append({"source": "summary.json", "quote": quote})
     if tool_failure:
         evidence.append(tool_failure)
     if final_message:
         evidence.append(final_message)
     return evidence
-
-
-def _trim(value: object, limit: int = 500) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return text[:limit]
 
 
 def _required(path: Path) -> Path:

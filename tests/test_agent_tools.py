@@ -211,7 +211,11 @@ def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
     charts = json.loads((run / "chart_data.json").read_text(encoding="utf-8"))
 
     assert "tool_selection" in report["dimensions"]
-    assert report["judge_reliability"]["valid_evidence_count"] == 1
+    # The final reliability covers the full published report: the judge
+    # finding, the merged quality findings and the deterministic dimension
+    # evidence chains are all validated, so the valid count exceeds the single
+    # judge-supplied reference.
+    assert report["judge_reliability"]["valid_evidence_count"] >= 1
     assert report["judge_reliability"]["invalid_evidence_count"] == 0
     assert report["judge_reliability"]["invalid_evidence"] == []
     assert any(finding["title"] == "Requested deliverable cannot be verified from the run bundle" for finding in report["findings"])
@@ -460,3 +464,182 @@ def test_first_tool_failure_ignores_keyword_lookalikes(tmp_path):
     quality = assess_run_quality(str(run))
 
     assert all(finding["category"] != "tool" for finding in quality["findings"])
+
+
+# -- full-report evidence chain contract ----------------------------------
+
+
+def _write_envelope_run(tmp_path):
+    run = tmp_path / "runs" / "envelope-run"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1", "title": "生成报告"}), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps({"tool_calls": [{"index": 1, "tool": "bash", "status": "ok", "result_preview": "done"}], "findings": []}),
+        encoding="utf-8",
+    )
+    (run / "trajectory.jsonl").write_text(
+        json.dumps({"index": 0, "role": "user", "content": "生成报告"}) + "\n"
+        + json.dumps({"index": 1, "role": "assistant", "content": "完成"}),
+        encoding="utf-8",
+    )
+    return run
+
+
+def test_write_judge_report_validates_quality_findings_evidence(tmp_path):
+    # Ordering contract: quality findings (from evaluation.json envelope
+    # checks) are merged BEFORE evidence validation, so their references are
+    # part of the persisted reliability instead of bypassing it.
+    from auditrail.evaluation import make_artifact_check, new_envelope, write_evaluation
+
+    run = _write_envelope_run(tmp_path)
+    envelope = new_envelope("completed")
+    envelope["artifact_checks"] = [
+        make_artifact_check("report.pptx", required=True, status="fail", exists=False, valid=False)
+    ]
+    write_evaluation(run, envelope)
+
+    write_judge_report(str(run), _complete_proposal())
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    quality_finding = [
+        finding for finding in report["findings"] if finding["title"] == "Required artifact missing: report.pptx"
+    ]
+    assert quality_finding, report["findings"]
+    evidence = quality_finding[0]["evidence"][0]
+    assert evidence["source"] == "evaluation.json"
+    # The quote is verbatim envelope content (the artifact path), not a
+    # synthesized sentence; it therefore passes mechanical validation...
+    assert evidence["quote"] == "report.pptx"
+    assert evidence["quote"] in (run / "evaluation.json").read_text(encoding="utf-8")
+    # ...and the finding keeps its fact type because its evidence validated.
+    assert quality_finding[0]["type"] == "fact"
+    assert report["judge_reliability"]["invalid_evidence_count"] == 0
+    assert report["judge_reliability"]["valid_evidence_count"] > 0
+
+
+def test_write_judge_report_flags_invalid_quality_finding_evidence(tmp_path):
+    # Proof that quality findings cannot bypass validation: an envelope check
+    # whose evidence_ref points at an artifact that does not contain the quote
+    # lands in the persisted invalid_evidence list.
+    from auditrail.evaluation import make_check, new_envelope, write_evaluation
+
+    run = _write_envelope_run(tmp_path)
+    envelope = new_envelope("completed")
+    envelope["deterministic_checks"] = [
+        make_check(
+            "chk-1",
+            "tool_errors",
+            "fail",
+            blocking=True,
+            blocking_source="structured_audit",
+            evidence_refs=["trajectory.jsonl"],
+            message="this message never appears in trajectory",
+        )
+    ]
+    write_evaluation(run, envelope)
+
+    write_judge_report(str(run), _complete_proposal())
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    invalid = report["judge_reliability"]["invalid_evidence"]
+    assert any("this message never appears" in row.get("quote", "") for row in invalid)
+    # The fabricated fact is downgraded to inference in the published report.
+    blocking = [finding for finding in report["findings"] if finding["title"].startswith("Blocking deterministic check")]
+    assert blocking and blocking[0]["type"] == "inference"
+
+
+def test_write_judge_report_normalizes_unevidenced_judge_dimension_to_unknown(tmp_path):
+    run = _write_envelope_run(tmp_path)
+    proposal = _complete_proposal(
+        dimensions=full_judge_dimensions(
+            intent_recognition={"score": 90, "status": "pass", "summary": "猜的", "evidence": [], "source": "judge"},
+            verification={
+                "score": 40,
+                "status": "fail",
+                "summary": "只有无效引用",
+                "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "不存在的内容"}],
+                "source": "judge",
+            },
+        )
+    )
+    write_judge_report(str(run), proposal)
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    for key in ("intent_recognition", "verification"):
+        dimension = report["dimensions"][key]
+        assert dimension["score"] is None
+        assert dimension["status"] == "unknown"
+        assert dimension["source"] == "judge"
+        assert any("缺少有效证据" in gap for gap in dimension["evidence_chain"]["gaps"])
+    reliability = report["judge_reliability"]
+    assert sorted(reliability["dimensions_without_valid_evidence"]) == ["intent_recognition", "verification"]
+    assert reliability["unsupported_dimension_count"] == 1
+    assert reliability["dimension_evidence_mismatch_count"] == 1
+    # The invalid quote is still recorded with its failure reason.
+    assert any(row.get("location") == "dimensions.verification" for row in reliability["invalid_evidence"])
+
+
+def test_write_judge_report_evidenced_judge_dimension_keeps_score(tmp_path):
+    run = _write_envelope_run(tmp_path)
+    proposal = _complete_proposal(
+        dimensions=full_judge_dimensions(
+            intent_recognition={
+                "score": 90,
+                "status": "pass",
+                "summary": "识别正确",
+                "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "生成报告"}],
+                "source": "judge",
+            }
+        )
+    )
+    write_judge_report(str(run), proposal)
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    dimension = report["dimensions"]["intent_recognition"]
+    assert dimension["score"] == 90
+    assert dimension["status"] == "pass"
+    assert report["judge_reliability"]["dimensions_without_valid_evidence"] == []
+
+
+def test_write_judge_report_records_deterministic_score_trace(tmp_path):
+    run = _write_run(tmp_path)  # one failed terminal call, one ok read_file call
+    write_judge_report(
+        str(run),
+        _complete_proposal(
+            dimensions=full_judge_dimensions(
+                error_recovery={"score": 85, "status": "pass", "summary": "恢复了", "source": "judge"}
+            )
+        ),
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    dimension = report["dimensions"]["error_recovery"]
+    assert dimension["score"] == 60
+    assert dimension["status"] == "partial"
+    assert dimension["source"] == "deterministic+judge"
+    trace = dimension["evidence_chain"]["score_trace"]
+    assert trace["judge_score"] == 85
+    assert trace["deterministic_score"] == 60
+    assert trace["final_score"] == 60
+    assert trace["rules"][0]["action"] == "cap"
+    # Generated chain evidence survives the full-pipeline validation.
+    assert report["judge_reliability"]["invalid_evidence_count"] == 0
+    markdown = (run / "agent_judge.md").read_text(encoding="utf-8")
+    assert "分数推导" in markdown
+    assert "error_recovery_cap" in markdown
+
+
+def test_write_judge_report_engine_archive_matches_root_contract(tmp_path):
+    run = _write_envelope_run(tmp_path)
+    write_judge_report(
+        str(run),
+        _complete_proposal(),
+        judge_metadata={"engine": "dsh", "runtime": "dsh"},
+        judge_engine="dsh",
+        published_at="2026-10-13T00:00:00+00:00",
+    )
+
+    root = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    archived = json.loads((run / "judges" / "dsh" / "agent_judge.json").read_text(encoding="utf-8"))
+    assert root == archived
+    assert "evidence_chain" in json.dumps(root["dimensions"])

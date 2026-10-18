@@ -140,3 +140,192 @@ def test_assess_dimensions_writes_deterministic_when_judge_left_unknown_failure(
     assert dimensions["evidence_citation"]["status"] == "fail"
     assert dimensions["evidence_citation"]["score"] == 0
     assert dimensions["evidence_citation"]["source"] == "deterministic+judge"
+
+
+# -- deterministic score traces and evidence chains -----------------------
+
+
+def _write_recovery_run(tmp_path, statuses=("error", "ok")):
+    """A run whose audit trail contains the given tool-call statuses in order."""
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({"message_count": 4, "tool_call_count": len(statuses)}), encoding="utf-8")
+    calls = []
+    previews = {"error": "[exit code: 1]", "ok": "file written"}
+    for offset, status in enumerate(statuses):
+        calls.append(
+            {
+                "index": offset + 1,
+                "tool": "bash",
+                "status": status,
+                "args_preview": "cat x.py",
+                "result_preview": previews[status],
+            }
+        )
+    (run / "audit.json").write_text(
+        json.dumps({"tool_call_count": len(calls), "tool_calls": calls, "findings": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    rows = [
+        {"index": 0, "role": "user", "content": "读取文件"},
+        {"index": 1, "role": "tool", "tool_name": "bash", "content": "[stderr] cat: x.py: No such file [exit code: 1]"},
+        {"index": 2, "role": "tool", "tool_name": "bash", "content": "file written"},
+        {"index": 3, "role": "assistant", "content": "已完成修复。"},
+    ]
+    (run / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8"
+    )
+    return run
+
+
+def _report_with_judge_scores(scores):
+    return normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "x",
+            "dimensions": {
+                key: {"score": score, "status": "pass", "summary": "judge", "source": "judge"}
+                for key, score in scores.items()
+            },
+        }
+    )
+
+
+def _assert_generated_evidence_valid(run, dimensions):
+    report = normalize_judge_report({"overall_status": "partial", "dimensions": dimensions})
+    reliability = validate_judge_evidence(run, report)
+    assert reliability["invalid_evidence_count"] == 0, reliability["invalid_evidence"]
+
+
+def test_error_recovery_cap_records_judge_score_and_trace(tmp_path):
+    # Judge 85 + deterministic cap 60: the canonical traceable case.
+    run = _write_recovery_run(tmp_path)
+    report = _report_with_judge_scores({"error_recovery": 85})
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["error_recovery"]
+
+    assert dimension["score"] == 60
+    assert dimension["status"] == "partial"
+    assert dimension["source"] == "deterministic+judge"
+    chain = dimension["evidence_chain"]
+    trace = chain["score_trace"]
+    assert trace["judge_score"] == 85
+    assert trace["judge_status"] == "pass"
+    assert trace["deterministic_score"] == 60
+    assert trace["final_score"] == 60
+    rule = trace["rules"][0]
+    assert rule["id"] == "error_recovery_cap"
+    assert rule["action"] == "cap"
+    assert rule["before"] == 85
+    assert rule["candidate"] == 60
+    assert rule["after"] == 60
+    assert rule["reason"]
+    assert rule["evidence"]
+    check_ids = [check["id"] for check in chain["checks"]]
+    assert check_ids == ["failure_detected", "recovery_attempted", "recovery_verified"]
+    assert [check["result"] for check in chain["checks"]] == ["fail", "pass", "pass"]
+    # The compatibility view carries the supporting references, deduplicated.
+    assert dimension["evidence"]
+    _assert_generated_evidence_valid(run, dimensions)
+
+
+def test_error_recovery_attempted_but_unverified_does_not_claim_success(tmp_path):
+    run = _write_recovery_run(tmp_path, statuses=("error", "error"))
+    report = _report_with_judge_scores({"error_recovery": 90})
+    reliability = validate_judge_evidence(run, report)
+
+    dimension = assess_dimensions(run, report, reliability)["error_recovery"]
+
+    assert dimension["score"] == 45
+    assert dimension["status"] == "fail"
+    checks = {check["id"]: check for check in dimension["evidence_chain"]["checks"]}
+    assert checks["recovery_attempted"]["result"] == "pass"
+    assert checks["recovery_verified"]["result"] == "fail"
+    assert "恢复未被验证" in checks["recovery_verified"]["conclusion"]
+    _assert_generated_evidence_valid(run, assess_dimensions(run, report, reliability))
+
+
+def test_error_recovery_failure_without_recovery(tmp_path):
+    run = _write_recovery_run(tmp_path, statuses=("error",))
+    report = _report_with_judge_scores({"error_recovery": 80})
+    reliability = validate_judge_evidence(run, report)
+
+    dimension = assess_dimensions(run, report, reliability)["error_recovery"]
+
+    assert dimension["score"] == 30
+    assert dimension["status"] == "fail"
+    checks = {check["id"]: check for check in dimension["evidence_chain"]["checks"]}
+    assert checks["failure_detected"]["result"] == "fail"
+    assert checks["recovery_attempted"]["result"] == "fail"
+    assert checks["recovery_verified"]["result"] == "fail"
+
+
+def test_error_recovery_no_failure_stays_unknown_without_chain(tmp_path):
+    run = _write_recovery_run(tmp_path, statuses=("ok",))
+    report = _report_with_judge_scores({})
+    reliability = validate_judge_evidence(run, report)
+
+    dimension = assess_dimensions(run, report, reliability)["error_recovery"]
+
+    assert dimension["status"] == "unknown"
+    assert dimension["score"] is None
+    assert "evidence_chain" not in dimension
+
+
+def test_deterministic_set_and_keep_actions_are_recorded(tmp_path):
+    run = _write_recovery_run(tmp_path)
+    # execution_closure: judge left it unknown -> set.
+    # tool_selection: judge 30 <= deterministic candidate 50 -> keep.
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "completion_score": 80,
+            "summary": "x",
+            "dimensions": {
+                "execution_closure": {"score": None, "status": "unknown", "source": "judge"},
+                "tool_selection": {"score": 30, "status": "fail", "source": "judge"},
+            },
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+
+    closure = dimensions["execution_closure"]
+    assert closure["score"] == 90
+    assert closure["status"] == "pass"
+    closure_rule = closure["evidence_chain"]["score_trace"]["rules"][0]
+    assert closure_rule["action"] == "set"
+    assert closure_rule["before"] is None
+    assert closure_rule["after"] == 90
+
+    selection = dimensions["tool_selection"]
+    assert selection["score"] == 30  # judge score kept, never raised
+    assert selection["status"] == "fail"
+    keep_rule = selection["evidence_chain"]["score_trace"]["rules"][0]
+    assert keep_rule["action"] == "keep"
+    assert keep_rule["before"] == 30
+    assert keep_rule["after"] == 30
+    _assert_generated_evidence_valid(run, dimensions)
+
+
+def test_score_and_status_stay_consistent(tmp_path):
+    run = _write_recovery_run(tmp_path, statuses=("error", "ok"))
+    report = _report_with_judge_scores({"error_recovery": 85, "tool_selection": 95, "execution_closure": 88})
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+    for key in ("error_recovery", "tool_selection", "execution_closure", "evidence_citation"):
+        dimension = dimensions[key]
+        score, status = dimension["score"], dimension["status"]
+        if score is None:
+            assert status == "unknown"
+        elif score >= 80:
+            assert status == "pass"
+        elif score >= 50:
+            assert status == "partial"
+        else:
+            assert status == "fail"

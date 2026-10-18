@@ -1,9 +1,10 @@
 EVIDENCE_FORMAT_REQUIREMENT = """
 证据格式（系统会逐字校验，务必遵守）：
-- 每条 evidence 必须是 {"source": "summary.json"|"audit.json"|"trajectory.jsonl"|"session.json", "quote": "...", "message_index": 整数} 这样的对象。
+- 每条 evidence 必须是 {"source": "summary.json"|"audit.json"|"trajectory.jsonl"|"session.json"|"expectations.json"|"evaluation.json", "quote": "...", "message_index": 整数} 这样的对象。
 - quote 必须是源文件中逐字出现的文本（如字段名和值、消息原文片段），写入报告时系统会对源文件做子串校验；校验失败的证据会被判为无效，事实性结论会被降级为 inference，evidence_citation 维度会被确定性判 fail。
-- 引用 trajectory.jsonl 中某条消息时必须填 message_index（消息行号，从 0 开始）。
+- 引用 trajectory.jsonl 中某条消息时必须填 message_index（消息行号，从 0 开始），不得编造 message_index。
 - 禁止写 "file:field=value"、"file#N" 这类引用记号；quote 里只放文件中真实逐字存在的内容。
+- 引用逐字校验通过只代表引用真实存在，不代表结论被系统证明；不要把推断标成 fact。
 """
 
 MAIN_SYSTEM_PROMPT = """你是 Auditrail Analyst，负责分析 xuanjian-agent 的运行轨迹。
@@ -107,6 +108,12 @@ source 只能先填 judge；确定性校验会在写入报告时覆盖 evidence_
 不要根据工具成功次数给 tool_selection 打高分；成功只说明调用没有报错，不说明选对了工具。
 没有证据的语义判断不得给 pass；没有证据的判断必须在 summary 中说明证据不足。
 dimensions 缺少任何一个维度 key 都是结构不完整，系统会拒绝写入整份报告；宁可用 status=unknown、score=null、source=judge 占位，也不得省略维度。
+
+每个 dimension 还应提供 evidence_chain，让结论可被审计：
+- checks: 原子检查项列表，每项为 {"id", "criterion", "result", "conclusion", "type", "evidence", "counter_evidence"}；result 用 pass|partial|fail|unknown，type 用 fact|inference，conclusion 只写一句话的简短结论，不要输出思维过程；有反证时放进 counter_evidence。
+- score_trace.judge_score 填你对该维度的原始评分；不要填 deterministic_score、final_score 或 rules，确定性赋分/封顶由系统在写入时计算并记录。
+- gaps: 字符串列表，说明当前还缺少哪些证据；证据不足导致 unknown 时必须填写。
+- 你只需给出原始评分和证据，不要生成确定性封顶后的最终结果。
 
 - judge_reliability: object，可先填写空对象；系统会基于 evidence 重新计算，并保留 invalid_evidence 明细。
 

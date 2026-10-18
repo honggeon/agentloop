@@ -85,6 +85,44 @@ export interface Finding {
   evidence?: JudgeEvidence[];
 }
 
+export interface JudgeDimensionCheck {
+  id: string;
+  criterion: string;
+  // 与维度状态同枚举：pass | partial | fail | unknown
+  result: string;
+  conclusion: string;
+  // fact = 直接事实，inference = 推断
+  type: string;
+  evidence: JudgeEvidence[];
+  counter_evidence: JudgeEvidence[];
+}
+
+export interface JudgeScoreRule {
+  id: string;
+  // set = 确定性赋分，cap = 封顶，keep = 保留 Judge 原分
+  action: string;
+  before?: number | null;
+  candidate?: number | null;
+  after?: number | null;
+  reason: string;
+  evidence: JudgeEvidence[];
+}
+
+export interface JudgeScoreTrace {
+  judge_score?: number | null;
+  judge_status?: string | null;
+  deterministic_score?: number | null;
+  final_score?: number | null;
+  rules: JudgeScoreRule[];
+}
+
+// 维度级可验证证据链；旧报告没有该字段，前端必须能 fallback。
+export interface JudgeEvidenceChain {
+  checks?: JudgeDimensionCheck[];
+  score_trace?: JudgeScoreTrace;
+  gaps?: string[];
+}
+
 export interface JudgeDimension {
   // Phase 0 起允许 null：无证据维度不伪造 0 分，界面显示「未评估」。
   score: number | null;
@@ -93,6 +131,7 @@ export interface JudgeDimension {
   evidence: JudgeEvidence[];
   recommendation: string;
   source: string;
+  evidence_chain?: JudgeEvidenceChain;
 }
 
 export interface JudgeReliability {
@@ -102,6 +141,10 @@ export interface JudgeReliability {
   fact_inference_mismatch_count: number;
   valid_evidence_count: number;
   total_evidence_count: number;
+  // 维度级证据完整性：有分数但没有（有效）证据的维度。
+  unsupported_dimension_count?: number;
+  dimension_evidence_mismatch_count?: number;
+  dimensions_without_valid_evidence?: string[];
   notes: string[];
   invalid_evidence?: JudgeEvidence[];
 }

@@ -478,7 +478,11 @@ def test_dsh_engine_proposal_is_normalized_and_capped_by_shared_pipeline(base):
     assert report["dimensions"]["evidence_citation"]["source"] == "deterministic+judge"
     assert report["dimensions"]["tool_selection"]["status"] == "unknown"
     assert report["dimensions"]["error_recovery"]["status"] == "unknown"
-    assert report["judge_reliability"]["total_evidence_count"] == 0
+    # The judge proposal carried no evidence, but the deterministic dimension
+    # chains (e.g. evidence_citation availability references) are part of the
+    # validated evidence set now.
+    assert report["judge_reliability"]["total_evidence_count"] > 0
+    assert report["judge_reliability"]["invalid_evidence_count"] == 0
 
 
 def test_malformed_dsh_proposal_cannot_weaken_deterministic_failure(base):

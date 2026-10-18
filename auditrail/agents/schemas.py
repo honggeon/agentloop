@@ -40,7 +40,22 @@ EVIDENCE_SOURCE_ALIASES = {
     "summary.json": "summary.json",
     "session": "session.json",
     "session.json": "session.json",
+    "expectations": "expectations.json",
+    "expectations.json": "expectations.json",
+    "evaluation": "evaluation.json",
+    "evaluation.json": "evaluation.json",
 }
+
+#: Actions a deterministic scoring rule may record in ``score_trace.rules``.
+ALLOWED_RULE_ACTIONS = {"set", "cap", "keep"}
+
+#: Bounds that keep judge-supplied evidence chains from bloating reports.
+_CHAIN_MAX_CHECKS = 20
+_CHAIN_MAX_RULES = 10
+_CHAIN_MAX_GAPS = 20
+_CHAIN_MAX_EVIDENCE = 20
+_CHAIN_MAX_ID = 100
+_CHAIN_MAX_TEXT = 500
 
 
 def extract_json_object(value: object) -> Dict[str, Any]:
@@ -465,7 +480,90 @@ def render_dimensions_markdown(dimensions: Any) -> str:
     header = "Dimension | Score | Status | Source | Summary | Recommendation"
     sep = "--- | --- | --- | --- | --- | ---"
     body = "\n".join("|".join(_markdown_cell(value) for value in row) for row in rows)
-    return "### Evaluation Dimensions\n\n%s\n%s\n%s" % (header, sep, body)
+    text = "### Evaluation Dimensions\n\n%s\n%s\n%s" % (header, sep, body)
+    chain_sections = []
+    for key, item in dimensions.items():
+        if not isinstance(item, dict):
+            continue
+        chain = item.get("evidence_chain")
+        if isinstance(chain, dict) and chain:
+            chain_sections.append(_render_dimension_chain_markdown(key, item, chain))
+    if chain_sections:
+        text += "\n\n" + "\n\n".join(chain_sections)
+    elif rows:
+        text += "\n\n_旧报告未记录完整证据链，仅展示维度分数、状态与摘要。_"
+    return text
+
+
+def _render_dimension_chain_markdown(key: str, item: Dict[str, Any], chain: Dict[str, Any]) -> str:
+    label = DIMENSION_DEFINITIONS.get(key, key)
+    lines = [
+        "#### %s（%s）" % (label, key),
+        "",
+        "- 最终分数: `%s`，状态: `%s`，来源: `%s`" % (item.get("score"), item.get("status"), item.get("source")),
+    ]
+    if item.get("summary"):
+        lines.append("- 摘要: %s" % _markdown_inline(item.get("summary")))
+    checks = chain.get("checks") or []
+    if checks:
+        lines.append("- 原子检查项:")
+        for check in checks:
+            lines.append(
+                "  - `%s` [%s] %s — %s（%s）"
+                % (
+                    _markdown_inline(check.get("result")),
+                    _markdown_inline(check.get("id") or ""),
+                    _markdown_inline(check.get("criterion") or ""),
+                    _markdown_inline(check.get("conclusion") or ""),
+                    _markdown_inline(check.get("type") or "inference"),
+                )
+            )
+            for evidence in check.get("evidence") or []:
+                lines.append("    - 证据 %s" % _markdown_evidence_ref(evidence))
+            for evidence in check.get("counter_evidence") or []:
+                lines.append("    - 反证 %s" % _markdown_evidence_ref(evidence))
+    trace = chain.get("score_trace") or {}
+    if trace:
+        lines.append(
+            "- 分数推导: Judge 原始分 `%s`（%s）→ 确定性候选分 `%s` → 最终分 `%s`"
+            % (
+                trace.get("judge_score"),
+                trace.get("judge_status") or "unknown",
+                trace.get("deterministic_score"),
+                trace.get("final_score"),
+            )
+        )
+        for rule in trace.get("rules") or []:
+            lines.append(
+                "  - 规则 `%s`（%s）: `%s` → `%s`。%s"
+                % (
+                    _markdown_inline(rule.get("id")),
+                    _markdown_inline(rule.get("action")),
+                    rule.get("before"),
+                    rule.get("after"),
+                    _markdown_inline(rule.get("reason") or ""),
+                )
+            )
+            for evidence in rule.get("evidence") or []:
+                lines.append("    - 证据 %s" % _markdown_evidence_ref(evidence))
+    gaps = chain.get("gaps") or []
+    if gaps:
+        lines.append("- 证据缺口:")
+        for gap in gaps:
+            lines.append("  - %s" % _markdown_inline(gap))
+    lines.append("")
+    lines.append("  引用校验仅为逐字机械匹配，不代表结论已被系统证明。")
+    return "\n".join(lines)
+
+
+def _markdown_evidence_ref(evidence: Any) -> str:
+    if not isinstance(evidence, dict):
+        return ""
+    source = evidence.get("source", "")
+    index = evidence.get("message_index")
+    quote = evidence.get("quote", "")
+    label = "%s#%s" % (source, index) if index is not None else str(source)
+    return "`%s`: %s" % (label, _markdown_inline(quote))
 
 
 def render_reliability_markdown(reliability: Any) -> str:
@@ -476,6 +574,8 @@ def render_reliability_markdown(reliability: Any) -> str:
         ["Unsupported Claims", reliability.get("unsupported_claim_count", "")],
         ["Invalid Evidence", reliability.get("invalid_evidence_count", "")],
         ["Fact/Inference Mismatch", reliability.get("fact_inference_mismatch_count", "")],
+        ["Unsupported Dimensions", reliability.get("unsupported_dimension_count", "")],
+        ["Dimension Evidence Mismatch", reliability.get("dimension_evidence_mismatch_count", "")],
         ["Valid Evidence", reliability.get("valid_evidence_count", "")],
         ["Total Evidence", reliability.get("total_evidence_count", "")],
     ]
@@ -486,6 +586,11 @@ def render_reliability_markdown(reliability: Any) -> str:
         for row in invalid:
             if isinstance(row, dict):
                 body += "- `%s`: %s\n" % (_markdown_inline(row.get("location", "")), _markdown_inline(row.get("reason", "")))
+    dimensions_without = reliability.get("dimensions_without_valid_evidence") or []
+    if dimensions_without:
+        body += "\nDimensions without valid evidence:\n"
+        for key in dimensions_without:
+            body += "- `%s`\n" % _markdown_inline(key)
     return "### Judge Reliability\n\n%s" % body
 
 
@@ -555,24 +660,164 @@ def _dimension_source(value: object) -> str:
 
 def _normalize_dimension(value: object) -> Dict[str, Any]:
     item = value if isinstance(value, dict) else {}
-    evidence = item.get("evidence") or []
+    normalized_evidence = _normalize_evidence_list(item.get("evidence"))
+    chain = _normalize_evidence_chain(item.get("evidence_chain"))
+    if chain:
+        # The top-level evidence list stays the compatibility view of every
+        # reference this dimension makes: original entries first, then chain
+        # references (checks, counter evidence, score rules), deduplicated.
+        normalized_evidence = _merge_evidence_refs(normalized_evidence, _chain_evidence_refs(chain))
+    normalized = {
+        "score": _score(item.get("score")),
+        "status": _dimension_status(item.get("status")),
+        "summary": str(item.get("summary") or "")[:_CHAIN_MAX_TEXT],
+        "evidence": normalized_evidence,
+        "recommendation": str(item.get("recommendation") or "")[:_CHAIN_MAX_TEXT],
+        "source": _dimension_source(item.get("source")),
+    }
+    if chain:
+        normalized["evidence_chain"] = chain
+    return normalized
+
+
+def _normalize_evidence_list(value: object, limit: int = _CHAIN_MAX_EVIDENCE) -> List[Dict[str, Any]]:
+    evidence = value
     if isinstance(evidence, dict):
         evidence = [evidence]
     elif isinstance(evidence, str):
         evidence = [{"source": "agent", "quote": evidence}]
     if not isinstance(evidence, list):
-        evidence = []
-    normalized_evidence: List[Dict[str, Any]] = []
+        return []
+    normalized: List[Dict[str, Any]] = []
     for row in evidence:
-        normalized_evidence.extend(_normalize_evidence(row))
+        try:
+            normalized.extend(_normalize_evidence(row))
+        except ValueError:
+            continue
+        if len(normalized) >= limit:
+            break
+    return normalized[:limit]
+
+
+def _normalize_evidence_chain(value: object) -> Dict[str, Any] | None:
+    """Normalize the optional per-dimension evidence chain.
+
+    The chain is additive audit metadata: malformed entries are dropped, never
+    trusted verbatim and never allowed to crash report normalization. Old
+    reports without the field keep it absent (``None``).
+    """
+    if not isinstance(value, dict):
+        return None
+    checks = []
+    for row in value.get("checks") or []:
+        if isinstance(row, dict):
+            checks.append(_normalize_chain_check(row))
+        if len(checks) >= _CHAIN_MAX_CHECKS:
+            break
+    trace = _normalize_score_trace(value.get("score_trace"))
+    gaps = []
+    for gap in value.get("gaps") or []:
+        text = str(gap or "").strip()
+        if text:
+            gaps.append(text[:_CHAIN_MAX_TEXT])
+        if len(gaps) >= _CHAIN_MAX_GAPS:
+            break
+    chain: Dict[str, Any] = {}
+    if checks:
+        chain["checks"] = checks
+    if trace:
+        chain["score_trace"] = trace
+    if gaps:
+        chain["gaps"] = gaps
+    return chain or None
+
+
+def _normalize_chain_check(item: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "score": _score(item.get("score")),
-        "status": _dimension_status(item.get("status")),
-        "summary": str(item.get("summary") or ""),
-        "evidence": normalized_evidence,
-        "recommendation": str(item.get("recommendation") or ""),
-        "source": _dimension_source(item.get("source")),
+        "id": str(item.get("id") or "")[:_CHAIN_MAX_ID],
+        "criterion": str(item.get("criterion") or "")[:_CHAIN_MAX_TEXT],
+        "result": _dimension_status(item.get("result")),
+        "conclusion": str(item.get("conclusion") or "")[:_CHAIN_MAX_TEXT],
+        "type": _choice(item.get("type"), ALLOWED_TYPE, "inference", "check.type"),
+        "evidence": _normalize_evidence_list(item.get("evidence")),
+        "counter_evidence": _normalize_evidence_list(item.get("counter_evidence")),
     }
+
+
+def _normalize_score_trace(value: object) -> Dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    rules = []
+    for row in value.get("rules") or []:
+        if isinstance(row, dict):
+            rules.append(_normalize_score_rule(row))
+        if len(rules) >= _CHAIN_MAX_RULES:
+            break
+    judge_status = value.get("judge_status")
+    trace = {
+        "judge_score": _chain_score(value.get("judge_score")),
+        "judge_status": _dimension_status(judge_status) if judge_status else None,
+        "deterministic_score": _chain_score(value.get("deterministic_score")),
+        "final_score": _chain_score(value.get("final_score")),
+        "rules": rules,
+    }
+    if not rules and all(trace[key] is None for key in ("judge_score", "deterministic_score", "final_score")):
+        return None
+    return trace
+
+
+def _normalize_score_rule(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(item.get("id") or "")[:_CHAIN_MAX_ID],
+        "action": _choice(item.get("action"), ALLOWED_RULE_ACTIONS, "keep", "rule.action"),
+        "before": _chain_score(item.get("before")),
+        "candidate": _chain_score(item.get("candidate")),
+        "after": _chain_score(item.get("after")),
+        "reason": str(item.get("reason") or "")[:_CHAIN_MAX_TEXT],
+        "evidence": _normalize_evidence_list(item.get("evidence")),
+    }
+
+
+def _chain_score(value: object) -> int | None:
+    """Score normalization for chain metadata: invalid input degrades to None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _chain_evidence_refs(chain: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # Support references only: counter evidence rebuts a conclusion and must
+    # not surface in the top-level compatibility view as if it supported it.
+    refs: List[Dict[str, Any]] = []
+    for check in chain.get("checks") or []:
+        refs.extend(check.get("evidence") or [])
+    trace = chain.get("score_trace") or {}
+    for rule in trace.get("rules") or []:
+        refs.extend(rule.get("evidence") or [])
+    return refs
+
+
+def _evidence_ref_key(row: Dict[str, Any]) -> tuple:
+    return (
+        str(row.get("source") or ""),
+        row.get("message_index") if isinstance(row.get("message_index"), int) else None,
+        str(row.get("quote") or ""),
+    )
+
+
+def _merge_evidence_refs(base: List[Dict[str, Any]], extra: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged = list(base)
+    seen = {_evidence_ref_key(row) for row in merged}
+    for row in extra:
+        key = _evidence_ref_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
 
 
 def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
@@ -590,15 +835,21 @@ def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
     invalid = item.get("invalid_evidence") or []
     if not isinstance(invalid, list):
         invalid = []
+    dimensions_without = item.get("dimensions_without_valid_evidence") or []
+    if not isinstance(dimensions_without, list):
+        dimensions_without = []
     return {
         "evidence_coverage": max(0, min(1, float(coverage))),
         "unsupported_claim_count": max(0, int(item.get("unsupported_claim_count") or 0)),
         "invalid_evidence_count": max(0, int(item.get("invalid_evidence_count") or 0)),
         "fact_inference_mismatch_count": max(0, int(item.get("fact_inference_mismatch_count") or 0)),
+        "unsupported_dimension_count": max(0, int(item.get("unsupported_dimension_count") or 0)),
+        "dimension_evidence_mismatch_count": max(0, int(item.get("dimension_evidence_mismatch_count") or 0)),
         "valid_evidence_count": valid,
         "total_evidence_count": total,
         "notes": [str(note) for note in notes if str(note).strip()],
         "invalid_evidence": [row for row in invalid if isinstance(row, dict)],
+        "dimensions_without_valid_evidence": [str(key) for key in dimensions_without if str(key).strip()],
     }
 
 

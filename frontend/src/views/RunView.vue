@@ -18,6 +18,8 @@ import {
   type Finding,
   type JudgeComparisonReport,
   type JudgeEngineInfo,
+  type JudgeEvidence,
+  type JudgeEvidenceChain,
   type JudgeReport,
   type JudgeReportList,
   type LlmCallDetail,
@@ -259,9 +261,84 @@ const dimensionRows = computed(() =>
     status: item.status || "unknown",
     source: item.source || "missing",
     summary: item.summary || "",
-    recommendation: item.recommendation || ""
+    recommendation: item.recommendation || "",
+    evidence: item.evidence || [],
+    chain: item.evidence_chain || null
   }))
 );
+
+// 维度证据链展开状态：默认收起，点击维度行展开完整证据链。
+const expandedDimensions = ref<string[]>([]);
+
+function toggleDimension(key: string) {
+  expandedDimensions.value = expandedDimensions.value.includes(key)
+    ? expandedDimensions.value.filter((item) => item !== key)
+    : [...expandedDimensions.value, key];
+}
+
+const DIMENSION_SOURCE_LABELS: Record<string, string> = {
+  deterministic: "确定性",
+  judge: "裁判",
+  "deterministic+judge": "确定性+裁判",
+  missing: "缺失"
+};
+
+function dimensionSourceLabel(source: string) {
+  return DIMENSION_SOURCE_LABELS[source] || source;
+}
+
+const CHECK_RESULT_LABELS: Record<string, string> = {
+  pass: "通过",
+  partial: "部分满足",
+  fail: "未满足",
+  unknown: "未知"
+};
+
+function checkResultLabel(result: string) {
+  return CHECK_RESULT_LABELS[result] || result;
+}
+
+const RULE_ACTION_LABELS: Record<string, string> = {
+  set: "确定性赋分",
+  cap: "确定性封顶",
+  keep: "保留裁判分"
+};
+
+function ruleActionLabel(action: string) {
+  return RULE_ACTION_LABELS[action] || action;
+}
+
+function formatTraceScore(value: number | null | undefined) {
+  return value == null ? "—" : String(value);
+}
+
+// 机械校验结果按维度聚合：invalid_evidence 的 location 形如 dimensions.<key>[.*]。
+// 「引用已验证」只表示 quote 在原始产物中逐字存在，不代表结论被系统证明。
+const invalidDimensionEvidence = computed(() => {
+  const rows = judge.value?.judge_reliability?.invalid_evidence || [];
+  const map = new Map<string, JudgeEvidence[]>();
+  for (const row of rows) {
+    const location = row.location || "";
+    if (!location.startsWith("dimensions.")) continue;
+    const key = location.split(".")[1] || "";
+    const list = map.get(key) || [];
+    list.push(row);
+    map.set(key, list);
+  }
+  return map;
+});
+
+function evidenceInvalidReason(dimensionKey: string, evidence: JudgeEvidence) {
+  const rows = invalidDimensionEvidence.value.get(dimensionKey) || [];
+  const hit = rows.find(
+    (row) => row.quote === evidence.quote && (row.message_index ?? undefined) === (evidence.message_index ?? undefined)
+  );
+  return hit ? hit.reason || "校验失败" : "";
+}
+
+function evidenceRefLabel(evidence: JudgeEvidence) {
+  return evidence.message_index != null ? `${evidence.source}#${evidence.message_index}` : evidence.source;
+}
 
 // 结构不完整的裁判报告：judge_incomplete=true 或存在 source=missing 的维度
 // （裁判 proposal 没有提交该维度，与诚实评估的 unknown 不同）。历史报告
@@ -292,6 +369,8 @@ const reliabilityRows = computed(() => {
     { label: "Unsupported Claims", value: formatNumber(reliability.unsupported_claim_count) },
     { label: "Invalid Evidence", value: formatNumber(reliability.invalid_evidence_count) },
     { label: "Fact/Inference Mismatch", value: formatNumber(reliability.fact_inference_mismatch_count) },
+    { label: "Unsupported Dimensions", value: formatNumber(reliability.unsupported_dimension_count ?? 0) },
+    { label: "Dimension Evidence Mismatch", value: formatNumber(reliability.dimension_evidence_mismatch_count ?? 0) },
     { label: "Valid Evidence", value: formatNumber(reliability.valid_evidence_count) },
     { label: "Total Evidence", value: formatNumber(reliability.total_evidence_count) }
   ];
@@ -1373,16 +1452,110 @@ onMounted(() => {
           </div>
           <p v-if="judgeIncomplete" class="judge-incomplete-warning" role="alert">{{ judgeIncompleteMessage }}</p>
           <div v-if="dimensionRows.length" class="dimension-list">
-            <div
-              v-for="row in dimensionRows"
-              :key="row.key"
-              class="dimension-row"
-            >
-              <span>{{ row.label }}</span>
-              <strong v-if="row.status !== 'unknown'">{{ row.score ?? "—" }}</strong>
-              <strong v-else>—</strong>
-              <em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
-              <small>{{ row.summary || row.recommendation || row.source }}</small>
+            <div v-for="row in dimensionRows" :key="row.key" class="dimension-item">
+              <button
+                type="button"
+                class="dimension-row dimension-toggle"
+                :aria-expanded="expandedDimensions.includes(row.key)"
+                @click="toggleDimension(row.key)"
+              >
+                <span>{{ row.label }}</span>
+                <strong v-if="row.status !== 'unknown'">{{ row.score ?? "—" }}</strong>
+                <strong v-else>—</strong>
+                <em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
+                <small>{{ row.summary || row.recommendation || dimensionSourceLabel(row.source) }}</small>
+                <small class="dimension-expand-hint">
+                  {{ expandedDimensions.includes(row.key) ? "收起证据链 ▴" : "展开证据链 ▾" }}
+                </small>
+              </button>
+              <div v-if="expandedDimensions.includes(row.key)" class="dimension-chain">
+                <p v-if="row.source === 'missing'" class="judge-incomplete-warning" role="alert">
+                  该维度未由裁判提交（结构缺失），无法评估。
+                </p>
+                <p class="dimension-chain-meta">
+                  最终分数：<strong>{{ row.status === "unknown" ? "—" : row.score ?? "—" }}</strong>
+                  状态：<em :data-status="row.status">{{ row.status === "unknown" ? "未评估" : row.status }}</em>
+                  来源：{{ dimensionSourceLabel(row.source) }}
+                </p>
+                <p v-if="row.recommendation" class="dimension-chain-meta">建议：{{ row.recommendation }}</p>
+
+                <template v-if="row.chain">
+                  <div v-if="row.chain.checks?.length" class="dimension-chain-section">
+                    <h4>原子检查项</h4>
+                    <ul>
+                      <li v-for="check in row.chain.checks" :key="check.id">
+                        <span class="chip quiet" :data-status="check.result">{{ checkResultLabel(check.result) }}</span>
+                        <strong>{{ check.criterion || check.id }}</strong>
+                        <span>{{ check.conclusion }}</span>
+                        <span class="chip quiet">{{ check.type === "fact" ? "事实" : "推断" }}</span>
+                        <ul v-if="check.evidence?.length" class="dimension-evidence-list">
+                          <li v-for="(ev, i) in check.evidence" :key="i">
+                            <code>{{ evidenceRefLabel(ev) }}</code>
+                            <span class="dimension-quote">{{ ev.quote }}</span>
+                            <em v-if="evidenceInvalidReason(row.key, ev)" class="dimension-evidence-invalid">
+                              校验失败：{{ evidenceInvalidReason(row.key, ev) }}
+                            </em>
+                            <em v-else class="dimension-evidence-valid">引用已验证</em>
+                          </li>
+                        </ul>
+                        <ul v-if="check.counter_evidence?.length" class="dimension-evidence-list">
+                          <li v-for="(ev, i) in check.counter_evidence" :key="i">
+                            <span class="chip quiet">反证</span>
+                            <code>{{ evidenceRefLabel(ev) }}</code>
+                            <span class="dimension-quote">{{ ev.quote }}</span>
+                          </li>
+                        </ul>
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div v-if="row.chain.score_trace" class="dimension-chain-section">
+                    <h4>分数推导</h4>
+                    <p class="dimension-chain-meta">
+                      Judge 原始分：<strong>{{ formatTraceScore(row.chain.score_trace.judge_score) }}</strong>
+                      （{{ row.chain.score_trace.judge_status || "unknown" }}） →
+                      确定性候选分：<strong>{{ formatTraceScore(row.chain.score_trace.deterministic_score) }}</strong> →
+                      最终分：<strong>{{ formatTraceScore(row.chain.score_trace.final_score) }}</strong>
+                    </p>
+                    <ul v-if="row.chain.score_trace.rules?.length">
+                      <li v-for="rule in row.chain.score_trace.rules" :key="rule.id">
+                        <code>{{ rule.id }}</code>
+                        <span class="chip quiet">{{ ruleActionLabel(rule.action) }}</span>
+                        {{ formatTraceScore(rule.before) }} → {{ formatTraceScore(rule.after) }}：{{ rule.reason }}
+                        <ul v-if="rule.evidence?.length" class="dimension-evidence-list">
+                          <li v-for="(ev, i) in rule.evidence" :key="i">
+                            <code>{{ evidenceRefLabel(ev) }}</code>
+                            <span class="dimension-quote">{{ ev.quote }}</span>
+                          </li>
+                        </ul>
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div v-if="row.chain.gaps?.length" class="dimension-chain-section">
+                    <h4>证据缺口</h4>
+                    <ul>
+                      <li v-for="(gap, i) in row.chain.gaps" :key="i">{{ gap }}</li>
+                    </ul>
+                  </div>
+                  <p class="dimension-chain-note">
+                    「引用已验证」仅表示引用在原始产物中逐字存在（机械校验），不代表结论已被系统证明。
+                  </p>
+                </template>
+                <template v-else>
+                  <p class="empty">旧报告未记录完整证据链，仅展示维度分数与摘要。</p>
+                  <ul v-if="row.evidence.length" class="dimension-evidence-list">
+                    <li v-for="(ev, i) in row.evidence" :key="i">
+                      <code>{{ evidenceRefLabel(ev) }}</code>
+                      <span class="dimension-quote">{{ ev.quote }}</span>
+                      <em v-if="evidenceInvalidReason(row.key, ev)" class="dimension-evidence-invalid">
+                        校验失败：{{ evidenceInvalidReason(row.key, ev) }}
+                      </em>
+                      <em v-else class="dimension-evidence-valid">引用已验证</em>
+                    </li>
+                  </ul>
+                </template>
+              </div>
             </div>
           </div>
           <p v-else class="empty">暂无维度评分。</p>
@@ -1555,6 +1728,86 @@ onMounted(() => {
 .dimension-row em[data-status="unknown"] {
   color: #5a6b7d;
   font-style: normal;
+}
+
+.dimension-item {
+  display: grid;
+  gap: 6px;
+}
+
+.dimension-toggle {
+  cursor: pointer;
+  font: inherit;
+}
+
+.dimension-toggle:hover {
+  border-color: rgba(31, 111, 235, 0.45);
+}
+
+.dimension-expand-hint {
+  color: #1f6feb;
+}
+
+.dimension-chain {
+  padding: 10px 12px;
+  border: 1px solid rgba(20, 32, 51, 0.08);
+  border-radius: 6px;
+  background: rgba(20, 32, 51, 0.02);
+  font-size: 13px;
+  display: grid;
+  gap: 8px;
+}
+
+.dimension-chain h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #5a6b7d;
+}
+
+.dimension-chain ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.dimension-chain-meta {
+  margin: 0;
+  color: #3d4d60;
+}
+
+.dimension-chain-note {
+  margin: 4px 0 0;
+  color: #8a97a6;
+  font-size: 12px;
+}
+
+.dimension-evidence-list {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #5a6b7d;
+}
+
+.dimension-evidence-list code {
+  background: rgba(20, 32, 51, 0.06);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.dimension-quote {
+  word-break: break-all;
+}
+
+.dimension-evidence-valid {
+  color: #0b7f74;
+  font-style: normal;
+  margin-left: 6px;
+}
+
+.dimension-evidence-invalid {
+  color: #b3261e;
+  font-style: normal;
+  margin-left: 6px;
 }
 
 .judge-incomplete-warning {

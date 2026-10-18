@@ -338,9 +338,17 @@ The command writes:
 `agent_judge.json` includes two reliability-focused sections:
 
 - `dimensions`: structured scores for intent recognition, task planning, tool selection, parameter generation, evidence citation, state tracking, final response, context management, execution closure, error recovery, verification, safety/permission, and efficiency. Missing evidence uses `unknown`, not fail.
-- `judge_reliability`: deterministic checks over the judge output, including evidence coverage, unsupported claims, invalid evidence references, fact claims with no valid evidence, and `invalid_evidence` detail.
+- `judge_reliability`: deterministic checks over the judge output, including evidence coverage, unsupported claims, invalid evidence references, fact claims with no valid evidence, and `invalid_evidence` detail. Dimension-level integrity is reported via `unsupported_dimension_count`, `dimension_evidence_mismatch_count` and `dimensions_without_valid_evidence`.
 
-Deterministic checks validate evidence against `summary.json`, `audit.json`, `trajectory.jsonl`, and `session.json` when available. This round scores `evidence_citation` and `execution_closure`, caps `error_recovery` only when a failure occurred, and caps `tool_selection` only when a tool failed. If no failure occurred, `error_recovery` remains `unknown`. LLM judge conclusions remain useful for semantic assessment, but unsupported factual claims are surfaced in reliability metrics. Completion still follows `assess_run_quality` deliverable checks.
+Each dimension may additionally carry an `evidence_chain` (additive and optional; old reports without it stay readable):
+
+- `checks`: atomic criteria the verdict rests on — `{id, criterion, result (pass|partial|fail|unknown), conclusion, type (fact|inference), evidence, counter_evidence}`. `conclusion` is a short auditable statement, never hidden chain-of-thought.
+- `score_trace`: how the score moved — `judge_score`/`judge_status` (the judge's raw submission), `deterministic_score` (the deterministic candidate), `final_score`, and `rules` (`{id, action: set|cap|keep, before, candidate, after, reason, evidence}`). A `keep` rule records that a deterministic rule ran and deliberately left the judge score unchanged.
+- `gaps`: what evidence is still missing.
+
+The dimension's top-level `evidence` remains the compatibility view: the original references plus the chain's supporting references (check evidence and rule evidence), deduplicated. Counter evidence stays inside the chain. Deterministic checks validate evidence against `summary.json`, `audit.json`, `trajectory.jsonl`, `session.json`, `expectations.json`, and `evaluation.json` when available. Quote validation is mechanical verbatim matching only: a valid quote proves the reference exists in the artifact, never that the conclusion follows semantically.
+
+Scoring authority: deterministic checks outrank the LLM judge. This round scores `evidence_citation` and `execution_closure`, caps `error_recovery` only when a failure occurred, and caps `tool_selection` only when a tool failed; every set/cap/keep is recorded in `score_trace`. If no failure occurred, `error_recovery` remains `unknown`. Shell tool results marked with a non-zero `[exit code: N]` (or a structured `exit_code`/`is_error` field) are audited as failures; a zero exit code or bare error keywords in otherwise successful output are not. A judge dimension scored pass/partial/fail without any mechanically valid evidence is normalized to `score=null, status=unknown, source=judge` with the gap recorded — `unknown` means "assessed but insufficient evidence", never a disguised fail. Completion still follows `assess_run_quality` deliverable checks, and quality findings go through the same evidence validation as judge findings.
 
 The existing deterministic commands do not require DeepAgent dependencies or model credentials.
 

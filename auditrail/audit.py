@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -231,18 +232,48 @@ def _tool_call_args(call: Dict) -> str:
 
 
 def _is_tool_error(message: Dict, content: str) -> bool:
-    """Prefer the structured ``is_error`` flag when the source provides one.
+    """Prefer structured signals; never guess failures from bare keywords.
 
-    DSH tool-result blocks carry an explicit ``isError`` marker (mapped to
-    ``is_error`` by ``dsh_source``); the content heuristic misfires on text
-    that merely *mentions* errors (stack traces in test output, auditrail's
-    own source code being read, PASS logs). Sources without the flag (e.g.
-    xuanjian sessions) keep the heuristic.
+    Priority:
+    1. The source-provided ``is_error`` flag (DSH tool-result blocks).
+    2. An explicit exit code: structured fields (``exit_code`` on the message
+       or inside a JSON payload) first, then the project-standard
+       ``[exit code: N]`` text marker. A non-zero code means the call failed;
+       an explicit zero means it succeeded even when the output text mentions
+       errors (test logs, LICENSE text, source being read).
+    3. The conservative content heuristic for sources without either signal.
     """
     flag = message.get("is_error")
     if isinstance(flag, bool):
         return flag
+    exit_code = _explicit_exit_code(message, content)
+    if exit_code is not None:
+        return exit_code != 0
     return _looks_like_tool_error(content)
+
+
+_EXIT_CODE_MARKER_RE = re.compile(r"\[exit code: (-?\d+)\]")
+
+
+def _explicit_exit_code(message: Dict, content: str) -> Optional[int]:
+    for key in ("exit_code", "exitCode", "exit_status", "exitStatus"):
+        value = message.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    try:
+        payload = json.loads(content)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        value = payload.get("exit_code")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    matches = _EXIT_CODE_MARKER_RE.findall(content)
+    if matches:
+        return int(matches[-1])
+    return None
 
 
 def _tool_results_by_id(messages: Iterable[Dict]) -> Dict[str, Dict]:

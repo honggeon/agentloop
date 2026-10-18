@@ -586,3 +586,223 @@ def test_missing_judge_dimensions_requires_an_explicit_source():
     assert missing_judge_dimensions({"dimensions": dimensions}) == ["efficiency"]
     assert len(missing_judge_dimensions({"overall_status": "success"})) == 13
     assert len(missing_judge_dimensions("not a report")) == 13
+
+
+# -- evidence_chain schema ------------------------------------------------
+
+
+def _chain_dimension():
+    return {
+        "score": 60,
+        "status": "partial",
+        "summary": "检测到工具失败，随后进行了纠正操作。",
+        "evidence": [{"source": "trajectory.jsonl", "message_index": 17, "quote": "[exit code: 1]"}],
+        "recommendation": "在最终回答中明确说明失败、重试和验证结果。",
+        "source": "deterministic+judge",
+        "evidence_chain": {
+            "checks": [
+                {
+                    "id": "failure_detected",
+                    "criterion": "是否出现明确的工具执行失败",
+                    "result": "fail",
+                    "conclusion": "bash 调用以非零退出码结束。",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 17, "quote": "[exit code: 1]"}],
+                    "counter_evidence": [],
+                },
+                {
+                    "id": "recovery_verified",
+                    "criterion": "纠正操作是否有成功结果证明",
+                    "result": "pass",
+                    "conclusion": "修正命令返回了成功结果。",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 19, "quote": "ok"}],
+                    "counter_evidence": [{"source": "audit.json", "quote": "err"}],
+                },
+            ],
+            "score_trace": {
+                "judge_score": 85,
+                "judge_status": "pass",
+                "deterministic_score": 60,
+                "final_score": 60,
+                "rules": [
+                    {
+                        "id": "error_recovery_cap",
+                        "action": "cap",
+                        "before": 85,
+                        "candidate": 60,
+                        "after": 60,
+                        "reason": "检测到失败和恢复动作，按确定性规则最高为 partial/60。",
+                        "evidence": [{"source": "trajectory.jsonl", "message_index": 17, "quote": "[exit code: 1]"}],
+                    }
+                ],
+            },
+            "gaps": ["最终回答未说明恢复结果。"],
+        },
+    }
+
+
+def test_normalize_dimension_evidence_chain_roundtrip():
+    report = normalize_judge_report(
+        {"overall_status": "partial", "dimensions": {"error_recovery": _chain_dimension()}}
+    )
+    dimension = report["dimensions"]["error_recovery"]
+
+    chain = dimension["evidence_chain"]
+    assert [check["id"] for check in chain["checks"]] == ["failure_detected", "recovery_verified"]
+    assert chain["checks"][0]["result"] == "fail"
+    assert chain["checks"][0]["type"] == "fact"
+    assert chain["checks"][1]["counter_evidence"] == [{"source": "audit.json", "quote": "err"}]
+    trace = chain["score_trace"]
+    assert trace["judge_score"] == 85
+    assert trace["judge_status"] == "pass"
+    assert trace["deterministic_score"] == 60
+    assert trace["final_score"] == 60
+    assert trace["rules"][0]["action"] == "cap"
+    assert trace["rules"][0]["before"] == 85
+    assert trace["rules"][0]["after"] == 60
+    assert chain["gaps"] == ["最终回答未说明恢复结果。"]
+
+    # Top-level evidence is the deduplicated compatibility view of the chain's
+    # supporting references (checks evidence + score-rule evidence). Counter
+    # evidence stays inside the chain — it rebuts, it does not support.
+    keys = {(row["source"], row.get("message_index"), row["quote"]) for row in dimension["evidence"]}
+    assert keys == {
+        ("trajectory.jsonl", 17, "[exit code: 1]"),
+        ("trajectory.jsonl", 19, "ok"),
+    }
+
+
+def test_normalize_dimension_evidence_chain_is_stable_under_renormalization():
+    report = normalize_judge_report(
+        {"overall_status": "partial", "dimensions": {"error_recovery": _chain_dimension()}}
+    )
+    twice = normalize_judge_report(report)
+    assert twice["dimensions"]["error_recovery"] == report["dimensions"]["error_recovery"]
+
+    # JSON round trip loses nothing.
+    loaded = json.loads(json.dumps(report, ensure_ascii=False))
+    thrice = normalize_judge_report(loaded)
+    assert thrice["dimensions"]["error_recovery"] == report["dimensions"]["error_recovery"]
+
+
+def test_normalize_dimension_without_chain_keeps_legacy_shape():
+    report = normalize_judge_report({"overall_status": "success"})
+    dimension = report["dimensions"]["intent_recognition"]
+    assert "evidence_chain" not in dimension
+    assert dimension == {
+        "score": None,
+        "status": "unknown",
+        "summary": "",
+        "evidence": [],
+        "recommendation": "",
+        "source": "missing",
+    }
+
+
+def test_normalize_dimension_chain_sanitizes_bad_types_and_enums():
+    report = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "dimensions": {
+                "verification": {
+                    "score": 50,
+                    "status": "partial",
+                    "source": "judge",
+                    "evidence_chain": {
+                        "checks": [
+                            "not-a-dict",
+                            {
+                                "id": "c1",
+                                "criterion": "标准",
+                                "result": "bogus",
+                                "conclusion": "结论",
+                                "type": "guess",
+                                "evidence": [42, {"source": "evaluation", "quote": "q"}],
+                                "counter_evidence": {"source": "expectations.json", "quote": "e"},
+                            },
+                        ],
+                        "score_trace": {
+                            "judge_score": "not-a-number" and 80,
+                            "rules": [{"id": "r", "action": "bogus", "before": "x", "after": 60}],
+                        },
+                        "gaps": ["", "缺证据", 42],
+                    },
+                }
+            },
+        }
+    )
+    chain = report["dimensions"]["verification"]["evidence_chain"]
+    assert len(chain["checks"]) == 1
+    check = chain["checks"][0]
+    assert check["result"] == "unknown"  # invalid enum falls back
+    assert check["type"] == "inference"  # invalid type never becomes fact
+    assert check["evidence"] == [{"source": "evaluation.json", "quote": "q"}]
+    assert check["counter_evidence"] == [{"source": "expectations.json", "quote": "e"}]
+    rule = chain["score_trace"]["rules"][0]
+    assert rule["action"] == "keep"  # invalid action normalized
+    assert rule["before"] is None
+    assert rule["after"] == 60
+    assert chain["gaps"] == ["缺证据", "42"]
+
+
+def test_normalize_dimension_chain_enforces_length_limits():
+    checks = [
+        {"id": "c%s" % i, "criterion": "x" * 1000, "result": "pass", "conclusion": "y" * 1000, "type": "fact"}
+        for i in range(30)
+    ]
+    gaps = ["g%s" % i for i in range(30)]
+    report = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "dimensions": {"efficiency": {"score": 50, "status": "partial", "source": "judge",
+                                          "evidence_chain": {"checks": checks, "gaps": gaps}}},
+        }
+    )
+    chain = report["dimensions"]["efficiency"]["evidence_chain"]
+    assert len(chain["checks"]) == 20
+    assert len(chain["checks"][0]["criterion"]) == 500
+    assert len(chain["checks"][0]["conclusion"]) == 500
+    assert len(chain["gaps"]) == 20
+
+
+def test_render_judge_markdown_shows_evidence_chain_and_legacy_fallback():
+    markdown = render_judge_markdown(
+        {"overall_status": "partial", "dimensions": {"error_recovery": _chain_dimension()}}
+    )
+    assert "#### 错误恢复（error_recovery）" in markdown
+    assert "原子检查项" in markdown
+    assert "failure_detected" in markdown
+    assert "反证" in markdown
+    assert "分数推导" in markdown
+    assert "error_recovery_cap" in markdown
+    assert "85" in markdown and "60" in markdown
+    assert "证据缺口" in markdown
+    assert "机械匹配" in markdown
+
+    legacy = render_judge_markdown(
+        {
+            "overall_status": "partial",
+            "dimensions": {
+                "intent_recognition": {"score": 80, "status": "pass", "summary": "s", "source": "judge"}
+            },
+        }
+    )
+    assert "旧报告未记录完整证据链" in legacy
+
+
+def test_render_reliability_markdown_shows_dimension_metrics():
+    markdown = render_judge_markdown(
+        {
+            "overall_status": "partial",
+            "dimensions": full_judge_dimensions(),
+            "judge_reliability": {
+                "unsupported_dimension_count": 2,
+                "dimension_evidence_mismatch_count": 1,
+                "dimensions_without_valid_evidence": ["verification", "efficiency"],
+            },
+        }
+    )
+    assert "Unsupported Dimensions" in markdown
+    assert "Dimension Evidence Mismatch" in markdown
+    assert "verification" in markdown

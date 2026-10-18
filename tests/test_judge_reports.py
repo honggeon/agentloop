@@ -313,7 +313,9 @@ def test_compare_reliability_and_fact_counts_are_per_engine(tmp_path):
     comparison = reports.compare_judge_reports(run)
 
     assert set(comparison["reliability"]) == {"deepagent", "dsh"}
-    assert comparison["reliability"]["deepagent"]["total_evidence_count"] == 0
+    # Deterministic dimension chains contribute validated evidence references
+    # even when the judge proposal itself carried none.
+    assert comparison["reliability"]["deepagent"]["total_evidence_count"] > 0
     assert comparison["judge_finding_counts"]["deepagent"]["total"] == 0
     assert set(comparison["fact_inference_mismatch"]) == {"deepagent", "dsh"}
 
