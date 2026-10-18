@@ -170,6 +170,8 @@ git status --short --branch
 
 ### 4.2 确认基础命令存在 `[只读]`
 
+先逐条查找命令：
+
 ```bash
 command -v uv
 command -v python3
@@ -180,11 +182,89 @@ command -v pnpm
 command -v jq
 ```
 
-判断方法：
+在本机当前基线环境中，预期依次输出：
 
-- 每条命令应输出一个路径。
-- `jq` 只用于方便查看 JSON；如果没有 `jq`，可以改用 `python3 -m json.tool`，但本文给出的筛选命令需要相应调整。
-- `uv run ...` 首次执行可能同步项目虚拟环境。如果本地缓存不完整，可能访问 Python 包源；等待完成后再继续。
+```text
+/Users/chen/.local/bin/uv
+/usr/bin/python3
+/Users/chen/.local/bin/dsh
+/Users/chen/.local/bin/node
+/Users/chen/.local/bin/npm
+/Users/chen/.local/bin/pnpm
+/opt/homebrew/bin/jq
+```
+
+路径判断规则：
+
+- `dsh` 必须输出 `/Users/chen/.local/bin/dsh`。如果不是这个路径，先不要继续，因为可能测试了另一个安装版本。
+- `uv`、`node`、`npm` 和 `pnpm` 当前都位于 `/Users/chen/.local/bin/`。如果路径不同，不一定是错误，但必须把实际路径写入环境记录，并确认没有因为 Node 版本管理器切换到另一套环境。
+- `python3` 当前输出 `/usr/bin/python3`。这是 macOS 系统 Python，只用于少量只读辅助命令；Auditrail 实际使用的是 `uv run python`，二者版本不同是正常现象。
+- `jq` 当前由 Homebrew 提供，路径为 `/opt/homebrew/bin/jq`。其他机器可能输出 `/usr/local/bin/jq`，只要后续 `jq --version` 成功即可。
+- 如果某条命令完全没有输出，表示 shell 没有在 `PATH` 中找到它。此时 `command -v` 的退出码通常是 1，不能继续依赖该命令执行后续步骤。
+
+然后检查版本：
+
+```bash
+uv --version
+python3 --version
+dsh --version
+node --version
+npm --version
+pnpm --version
+jq --version
+uv run python --version
+```
+
+本机当前预期输出为：
+
+```text
+uv 0.11.14 (3fdfdc7d4 2026-05-12 aarch64-apple-darwin)
+Python 3.9.6
+0.2.0-rc.2
+v22.23.0
+10.9.8
+11.9.0
+jq-1.8.1
+Python 3.11.17
+```
+
+说明：
+
+- `dsh --version` 的标准输出必须包含且应等于 `0.2.0-rc.2`。如果不是这个版本，暂停测试。
+- `dsh --version` 还可能向 stderr 输出代理或 `UNDICI-EHPA` 警告，所以终端中可能在版本号前后多出一行警告。第 5.2 节会把 stdout 和 stderr 分开保存。
+- `/usr/bin/python3` 当前是 Python 3.9.6，不满足本项目 `>=3.11` 的要求，但它不是 Auditrail 的项目解释器。
+- `uv run python --version` 必须输出 Python 3.11–3.x，且小于 4.0；当前应为 Python 3.11.17。后续所有 Auditrail Python 命令均通过 `uv run python` 执行。
+- `uv`、npm、pnpm 和 jq 的补丁版本将来可能变化；变化本身不自动判定失败，但必须记录，因为它可能影响依赖解析或输出文本。
+
+可以使用下面的汇总命令一次性打印“命令名 → 路径”。变量名必须使用 `tool_name`，不要在 zsh 中把循环变量命名为 `path`，因为 zsh 的 `path` 与 `PATH` 关联：
+
+```bash
+for tool_name in uv python3 dsh node npm pnpm jq; do
+  printf '%-8s -> ' "$tool_name"
+  command -v "$tool_name" || echo 'NOT FOUND'
+done
+```
+
+预期输出：
+
+```text
+uv       -> /Users/chen/.local/bin/uv
+python3  -> /usr/bin/python3
+dsh      -> /Users/chen/.local/bin/dsh
+node     -> /Users/chen/.local/bin/node
+npm      -> /Users/chen/.local/bin/npm
+pnpm     -> /Users/chen/.local/bin/pnpm
+jq       -> /opt/homebrew/bin/jq
+```
+
+如果出现 `NOT FOUND`：
+
+1. `dsh`、`node`、`uv` 任一缺失：停止基线测试，不要用其他同名程序临时替代。
+2. `npm` 或 `pnpm` 缺失：先停止插件相关用例；DSH 插件错误测试可能依赖它们。
+3. `jq` 缺失：不要继续照抄本文的 `jq` 命令。`python3 -m json.tool` 只能替代格式化和语法检查，不能直接替代本文全部筛选表达式。
+4. 修复环境后，重新执行本节全部路径和版本命令，并把新输出写入环境记录。
+
+最后注意：`uv run ...` 首次执行可能同步项目虚拟环境。如果本地缓存不完整，可能访问 Python 包源；等待完成后再继续。
 
 ### 4.3 确认 Auditrail Python 环境 `[只读]`
 
