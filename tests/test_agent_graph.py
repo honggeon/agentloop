@@ -45,3 +45,32 @@ def test_agent_module_imports_without_deepagent_installed():
     module = importlib.import_module("auditrail.agents.agent")
     assert hasattr(module, "get_agent")
     assert hasattr(module, "invoke_agent")
+
+
+def test_get_agent_builds_fresh_graph_per_event_loop(monkeypatch):
+    """Regression: a cached graph bound to a closed asyncio.run loop made every
+    judge after the first fail with "Event loop is closed". get_agent must
+    build a fresh graph per call so each event loop gets its own."""
+    import asyncio
+
+    from auditrail.agents import agent as agent_module
+
+    builds = []
+
+    def fake_create_deep_agent(model, **kwargs):
+        graph = object()
+        builds.append(graph)
+        return graph
+
+    monkeypatch.setattr(
+        agent_module,
+        "_load_deepagent_runtime",
+        lambda: (fake_create_deep_agent, lambda spec: object(), lambda: object()),
+    )
+    monkeypatch.setattr(agent_module, "_validate_model_spec", lambda init, spec: None)
+
+    first = asyncio.run(agent_module.get_agent())
+    second = asyncio.run(agent_module.get_agent())
+
+    assert first is not second
+    assert len(builds) == 2

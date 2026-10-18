@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Any, AsyncIterator
@@ -24,36 +23,35 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openai")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1")
 MODEL_SPEC = f"{MODEL_PROVIDER}:{MODEL_NAME}"
 
-_agent_graph: Any = None
-_agent_lock = asyncio.Lock()
-
 
 async def get_agent() -> Any:
-    global _agent_graph
-    if _agent_graph is not None:
-        return _agent_graph
-    async with _agent_lock:
-        if _agent_graph is not None:
-            return _agent_graph
-        create_deep_agent, init_chat_model, memory_saver = _load_deepagent_runtime()
-        _validate_model_spec(init_chat_model, MODEL_SPEC)
-        _agent_graph = create_deep_agent(
-            model=MODEL_SPEC,
-            tools=[
-                list_runs,
-                load_run_summary,
-                load_audit,
-                load_trajectory_slice,
-                search_trajectory,
-                get_tool_calls,
-                build_chart_data,
-            ],
-            system_prompt=MAIN_SYSTEM_PROMPT,
-            subagents=build_subagents(MODEL_SPEC),
-            checkpointer=memory_saver(),
-            name="Auditrail Analyst",
-        )
-        return _agent_graph
+    """Build a fresh DeepAgent graph bound to the current event loop.
+
+    The compiled graph and its async model client bind to the running loop.
+    Callers (CLI judge-run, backend judge route) wrap each invocation in
+    ``asyncio.run``, which closes the loop on exit; a module-level cached
+    graph would then be reused on a closed loop and every judge after the
+    first failed with "Event loop is closed". Construction is cheap compared
+    with the model calls, so each call builds its own graph.
+    """
+    create_deep_agent, init_chat_model, memory_saver = _load_deepagent_runtime()
+    _validate_model_spec(init_chat_model, MODEL_SPEC)
+    return create_deep_agent(
+        model=MODEL_SPEC,
+        tools=[
+            list_runs,
+            load_run_summary,
+            load_audit,
+            load_trajectory_slice,
+            search_trajectory,
+            get_tool_calls,
+            build_chart_data,
+        ],
+        system_prompt=MAIN_SYSTEM_PROMPT,
+        subagents=build_subagents(MODEL_SPEC),
+        checkpointer=memory_saver(),
+        name="Auditrail Analyst",
+    )
 
 
 async def graph() -> Any:
