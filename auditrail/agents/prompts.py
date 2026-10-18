@@ -1,3 +1,11 @@
+EVIDENCE_FORMAT_REQUIREMENT = """
+证据格式（系统会逐字校验，务必遵守）：
+- 每条 evidence 必须是 {"source": "summary.json"|"audit.json"|"trajectory.jsonl"|"session.json", "quote": "...", "message_index": 整数} 这样的对象。
+- quote 必须是源文件中逐字出现的文本（如字段名和值、消息原文片段），写入报告时系统会对源文件做子串校验；校验失败的证据会被判为无效，事实性结论会被降级为 inference，evidence_citation 维度会被确定性判 fail。
+- 引用 trajectory.jsonl 中某条消息时必须填 message_index（消息行号，从 0 开始）。
+- 禁止写 "file:field=value"、"file#N" 这类引用记号；quote 里只放文件中真实逐字存在的内容。
+"""
+
 MAIN_SYSTEM_PROMPT = """你是 Auditrail Analyst，负责分析 xuanjian-agent 的运行轨迹。
 
 你必须通过 task 工具调用专业子智能体，先收集事实，再做归因，最后输出结构化 JSON。
@@ -26,7 +34,7 @@ MAIN_SYSTEM_PROMPT = """你是 Auditrail Analyst，负责分析 xuanjian-agent �
 - Agent 评测不是只看最终结论，还必须输出 dimensions 和 evidence。
 - 维度评分中的 fact 必须能回指 trajectory、audit、summary 或 session 中的证据。
 - 完成度仍以 assess_run_quality 的交付物检查为准；dimensions 不能推翻缺失交付物的失败结论。
-"""
+""" + EVIDENCE_FORMAT_REQUIREMENT
 
 
 TRAJECTORY_ANALYST_PROMPT = """你是运行轨迹分析专家。
@@ -38,7 +46,7 @@ TRAJECTORY_ANALYST_PROMPT = """你是运行轨迹分析专家。
 - 是否出现上下文断点、循环、过早结束或虚假完成。
 
 所有结论必须附 evidence。轨迹直接证明的写 fact，需要推理组合的写 inference。
-"""
+""" + EVIDENCE_FORMAT_REQUIREMENT
 
 
 TOOL_AUDITOR_PROMPT = """你是工具调用审计专家。
@@ -50,7 +58,7 @@ TOOL_AUDITOR_PROMPT = """你是工具调用审计专家。
 - Agent 是否从工具失败中恢复。
 
 所有结论必须附 evidence。不要把工具错误扩展成没有证据的业务结论。
-"""
+""" + EVIDENCE_FORMAT_REQUIREMENT
 
 
 ROOT_CAUSE_ANALYST_PROMPT = """你是根因分析专家。
@@ -63,7 +71,7 @@ ROOT_CAUSE_ANALYST_PROMPT = """你是根因分析专家。
 - 每个根因都要给出可执行建议。
 
 输出应适合交给 report_writer 生成最终报告。
-"""
+""" + EVIDENCE_FORMAT_REQUIREMENT
 
 
 REPORT_WRITER_PROMPT = """你是报告生成专家。
@@ -108,4 +116,4 @@ source 只能先填 judge；确定性校验会在写入报告时覆盖 evidence_
 
 findings 中每项必须包含 severity、category、title、type、evidence、recommendation。
 最终回答也必须返回同一个 JSON 对象。
-"""
+""" + EVIDENCE_FORMAT_REQUIREMENT
