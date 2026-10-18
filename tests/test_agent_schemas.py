@@ -453,7 +453,7 @@ def test_normalize_judge_report_discards_malformed_metrics_and_charts():
         }
     )
 
-    assert report["metrics"]["completion_score"] == 0
+    assert report["metrics"]["completion_score"] is None
     assert report["metrics"]["message_count"] == 0
     assert report["charts"]["finding_severity"] == []
     assert report["charts"]["tool_distribution"] == []
@@ -470,3 +470,43 @@ def test_normalize_judge_report_keeps_mapping_metrics_and_charts():
 
     assert report["metrics"]["custom_kpi"] == 3
     assert report["charts"]["tool_distribution"] == [{"tool": "bash", "count": 1}]
+
+
+def test_normalize_judge_report_flags_structurally_incomplete_judge():
+    # Dimensions the proposal never provided (source=missing) mean the judge
+    # output was structurally incomplete — flag it instead of treating the
+    # skeleton as a normal report.
+    report = normalize_judge_report({"overall_status": "success"})
+
+    assert report["judge_incomplete"] is True
+    assert all(row["source"] == "missing" for row in report["dimensions"].values())
+    assert any("judge_incomplete" in note for note in report["judge_reliability"]["notes"])
+
+
+def test_normalize_judge_report_not_incomplete_when_judge_assessed_unknown():
+    # A judge that assessed every dimension and honestly reported "insufficient
+    # evidence" (status=unknown, source=judge) is complete — unknown is a
+    # legitimate verdict, only source=missing indicates a structural gap.
+    dimensions = {
+        "intent_recognition": {"score": None, "status": "unknown", "summary": "证据不足", "source": "judge"},
+    }
+    report = normalize_judge_report({"overall_status": "unknown", "dimensions": dimensions})
+
+    assert report["dimensions"]["intent_recognition"]["status"] == "unknown"
+    assert report["dimensions"]["intent_recognition"]["source"] == "judge"
+    assert report["judge_incomplete"] is True  # other 12 dimensions still missing
+
+
+def test_normalize_judge_report_complete_when_all_dimensions_provided():
+    dimensions = {
+        key: {"score": 80, "status": "pass", "summary": "s", "source": "judge"}
+        for key in (
+            "intent_recognition", "task_planning", "tool_selection", "parameter_generation",
+            "evidence_citation", "state_tracking", "final_response", "context_management",
+            "execution_closure", "error_recovery", "verification", "safety_permission", "efficiency",
+        )
+    }
+    report = normalize_judge_report({"overall_status": "success", "completion_score": 90, "dimensions": dimensions})
+
+    assert report["judge_incomplete"] is False
+    assert report["completion_score"] == 90

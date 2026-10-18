@@ -278,7 +278,9 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
     report = extract_json_object(raw)
     status = _choice(report.get("overall_status"), ALLOWED_STATUS, "unknown", "overall_status")
     confidence = _choice(report.get("confidence"), ALLOWED_CONFIDENCE, "low", "confidence")
-    score = _score(report.get("completion_score", 0))
+    # Missing completion_score stays None end to end: 0 is a verdict ("did
+    # poorly"), null is the absence of data. Never fabricate one from the other.
+    score = _score(report.get("completion_score"))
     findings = [_normalize_finding(item) for item in report.get("findings") or []]
     metrics = _object_or_empty(report.get("metrics"))
     metrics["completion_score"] = score
@@ -301,6 +303,20 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
         }
         for key, row in dimensions.items()
     ]
+    # Structural completeness is judged by source=missing (the judge proposal
+    # never provided the dimension), not status=unknown (the judge assessed it
+    # and honestly reported insufficient evidence — a legitimate verdict).
+    missing_dimensions = [key for key, row in dimensions.items() if row.get("source") == "missing"]
+    judge_incomplete = bool(missing_dimensions)
+    if judge_incomplete:
+        note = (
+            "judge_incomplete: %s dimension(s) were not provided by the judge proposal: %s"
+            % (len(missing_dimensions), ", ".join(missing_dimensions))
+        )
+        notes = list(judge_reliability.get("notes") or [])
+        if note not in notes:
+            notes.append(note)
+        judge_reliability["notes"] = notes
     normalized = {
         "overall_status": status,
         "completion_score": score,
@@ -311,6 +327,7 @@ def normalize_judge_report(raw: object) -> Dict[str, Any]:
         "charts": charts,
         "dimensions": dimensions,
         "judge_reliability": judge_reliability,
+        "judge_incomplete": judge_incomplete,
     }
     judge_metadata = _normalize_judge_metadata(report.get("judge"))
     if judge_metadata is not None:

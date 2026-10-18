@@ -494,7 +494,7 @@ def _engine_row(engine: str, report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "engine": engine,
         "overall_status": str(report.get("overall_status") or report.get("status") or "unknown"),
-        "completion_score": _int_or(report.get("completion_score"), 0),
+        "completion_score": _int_or_none(report.get("completion_score")),
         "confidence": str(report.get("confidence") or "low"),
         "evidence_coverage": _float_or(reliability.get("evidence_coverage"), 0.0),
         "invalid_evidence_count": _int_or(reliability.get("invalid_evidence_count"), 0),
@@ -510,11 +510,13 @@ def _overall_rows(engines: list[str], reports: Mapping[str, Mapping[str, Any]]) 
 
 
 def _completion_rows(engines: list[str], reports: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    by_engine = {engine: _int_or(reports[engine].get("completion_score"), 0) for engine in engines}
-    scores = sorted(by_engine.values())
+    # A missing completion_score is null ("no data"), never 0 ("did poorly");
+    # spread and disagreement are computed over engines that actually scored.
+    by_engine = {engine: _int_or_none(reports[engine].get("completion_score")) for engine in engines}
+    scores = sorted(score for score in by_engine.values() if score is not None)
     return {
         "by_engine": by_engine,
-        "spread": (scores[-1] - scores[0]) if scores else 0,
+        "spread": (scores[-1] - scores[0]) if len(scores) > 1 else 0,
         "disagreement": len(set(scores)) > 1,
     }
 
@@ -767,6 +769,16 @@ def _int_or(value: object, default: int) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _int_or_none(value: object) -> int | None:
+    """Coerce to int, preserving missing/invalid values as None (never as 0)."""
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _float_or(value: object, default: float) -> float:

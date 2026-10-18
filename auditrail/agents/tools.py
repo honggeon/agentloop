@@ -196,21 +196,30 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
     status = "unknown"
     score_cap = 100
 
+    # Inferred deliverable requests come from regexing user text; the agent may
+    # have written the file in its own workspace (the common case for imported
+    # DSH runs), which this gate must not scan — it is untrusted, mutable, and
+    # usually out of reach. Absence from the run bundle therefore means
+    # "unverifiable", not "missing": no cap, no hard failure. Only an
+    # authoritative source (evaluation.json artifact checks) may declare a
+    # deliverable missing and cap at 40.
     if missing:
-        status = "failed"
-        score_cap = 40
+        deliverable_verification = "unverifiable"
         findings.append(
             {
-                "severity": "critical",
+                "severity": "medium",
                 "category": "delivery",
-                "title": "Requested deliverable was not produced",
+                "title": "Requested deliverable cannot be verified from the run bundle",
                 "type": "fact",
                 "evidence": evidence_chain,
-                "recommendation": "Treat requested files as hard completion gates and verify they exist before reporting success.",
+                "recommendation": "Verify the deliverable in the agent workspace, or archive it into the run bundle for deterministic verification.",
             }
         )
     elif requested:
+        deliverable_verification = "verified"
         status = "success"
+    else:
+        deliverable_verification = "none"
 
     if tool_failure:
         findings.append(
@@ -233,7 +242,12 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
 
     return {
         "completion": {"status": status, "score_cap": score_cap},
-        "deliverables": {"requested": requested, "produced": produced, "missing": missing},
+        "deliverables": {
+            "requested": requested,
+            "produced": produced,
+            "missing": missing,
+            "verification": deliverable_verification,
+        },
         "evidence_chain": evidence_chain,
         "findings": findings,
         "evaluation": {"status": envelope_status, "note": envelope_note},
@@ -534,20 +548,20 @@ def _last_assistant_message(trajectory: Any) -> Optional[Dict[str, Any]]:
 
 
 def _first_tool_failure(audit: Dict[str, Any], trajectory: Any) -> Optional[Dict[str, Any]]:
+    """Return the first structured tool failure, or None.
+
+    Only the deterministic audit's structured status is trusted. Scanning
+    tool-result text for error keywords fabricated failures out of ordinary
+    content — e.g. the MIT LICENSE text "Permission is hereby granted"
+    matched a bare ``permission`` pattern and was reported as a tool failure.
+    Shell non-zero exits are a separate semantic, handled by the command-level
+    channel rather than keyword guessing.
+    """
     for call in audit.get("tool_calls") or []:
         if not isinstance(call, dict) or call.get("status") not in {"error", "blocked", "timeout"}:
             continue
         quote = call.get("result_preview") or call.get("args_preview") or call.get("message") or ""
         return {"source": "audit.json", "message_index": call.get("index"), "quote": _trim(quote)}
-    if isinstance(trajectory, list):
-        pattern = re.compile(r"(error|exception|modulenotfounderror|timeout|permission|blocked|失败|错误|缺失)", re.I)
-        for row in trajectory:
-            if isinstance(row, dict) and row.get("role") == "tool" and pattern.search(str(row.get("content") or "")):
-                return {
-                    "source": "trajectory.jsonl",
-                    "message_index": row.get("index"),
-                    "quote": _trim(row.get("content") or ""),
-                }
     return None
 
 

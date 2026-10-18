@@ -254,20 +254,19 @@ def test_compare_distinguishes_unknown_from_fail(tmp_path):
     assert all(row["status"]["deepagent"] != "fail" for row in unknown)
 
 
-def test_compare_keeps_deterministic_failures_visible_for_passing_judges(tmp_path):
-    # Both semantic judges claim success but the requested .pptx was never produced.
+def test_compare_keeps_deterministic_findings_visible_for_passing_judges(tmp_path):
+    # Both semantic judges claim success; the requested .pptx is absent from the
+    # run bundle. Inferred-missing is unverifiable rather than a failure, so the
+    # reports keep their scores — but the deterministic delivery finding must
+    # stay visible in the comparison instead of being hidden by the pass.
     run = _complete_ppt_run(tmp_path)
     _publish(run, "deepagent", "success", 95, published_at="2026-10-13T00:00:00+00:00")
     _publish(run, "dsh", "success", 92, published_at="2026-10-13T00:01:00+00:00")
 
     comparison = reports.compare_judge_reports(run)
 
-    assert comparison["overall_status"]["by_engine"] == {"deepagent": "failed", "dsh": "failed"}
-    assert comparison["completion_score"]["by_engine"] == {"deepagent": 40, "dsh": 40}
-    assert comparison["completion_score"]["disagreement"] is False
-    assert comparison["disagreements"] == []
-    assert comparison["dimensions"]["execution_closure"]["disagreement"] is False
-    assert comparison["dimensions"]["execution_closure"]["status"]["deepagent"] == "partial"
+    assert comparison["overall_status"]["by_engine"] == {"deepagent": "success", "dsh": "success"}
+    assert comparison["completion_score"]["by_engine"] == {"deepagent": 95, "dsh": 92}
     for engine in ("deepagent", "dsh"):
         findings = comparison["deterministic_findings"][engine]["findings"]
         assert any(finding["category"] == "delivery" for finding in findings)
@@ -478,5 +477,20 @@ def test_judge_archive_does_not_count_as_a_produced_deliverable(tmp_path):
     archived = json.loads((run / "judges" / "deepagent" / "agent_judge.json").read_text(encoding="utf-8"))
     assert archived["metrics"]["produced_deliverables"] == []
     assert archived["metrics"]["missing_deliverables"] == [".md"]
-    assert archived["completion_score"] == 40
-    assert archived["overall_status"] == "failed"
+    # inferred-missing is unverifiable, not a failure: no cap, no forced failed
+    assert archived["completion_score"] == 95
+    assert archived["overall_status"] == "success"
+
+
+def test_compare_preserves_null_completion_scores(tmp_path):
+    # A missing completion_score is null ("no data"), never 0 ("did poorly");
+    # spread/disagreement are computed only over engines that actually scored.
+    run = _write_run(tmp_path)
+    _publish(run, "deepagent", "success", 90, published_at="2026-10-13T00:00:00+00:00")
+    _publish(run, "dsh", "unknown", None, published_at="2026-10-13T00:01:00+00:00")
+
+    comparison = reports.compare_judge_reports(run)
+
+    assert comparison["completion_score"]["by_engine"] == {"deepagent": 90, "dsh": None}
+    assert comparison["completion_score"]["spread"] == 0
+    assert comparison["completion_score"]["disagreement"] is False

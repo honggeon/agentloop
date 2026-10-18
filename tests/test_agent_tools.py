@@ -164,13 +164,19 @@ def test_assess_run_quality_flags_missing_requested_deliverable(tmp_path):
     run = _write_incomplete_ppt_run(tmp_path)
     quality = assess_run_quality(str(run))
 
-    assert quality["completion"]["status"] == "failed"
-    assert quality["completion"]["score_cap"] == 40
+    # Inferred deliverable requests are not authoritative: the agent may have
+    # written the file in its own (untrusted, unscannable) workspace, so an
+    # empty run bundle means "unverifiable" — no cap, no hard failure. Only
+    # evaluation.json artifact checks may declare a deliverable missing.
+    assert quality["completion"]["status"] == "unknown"
+    assert quality["completion"]["score_cap"] == 100
     assert quality["deliverables"]["requested"] == [".pptx"]
     assert quality["deliverables"]["produced"] == []
+    assert quality["deliverables"]["verification"] == "unverifiable"
     assert quality["evidence_chain"][0]["source"] == "summary.json"
     assert quality["evidence_chain"][1]["message_index"] == 2
-    assert any(item["category"] == "delivery" for item in quality["findings"])
+    delivery = [item for item in quality["findings"] if item["category"] == "delivery"]
+    assert delivery and delivery[0]["severity"] == "medium"
 
 
 def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
@@ -203,7 +209,7 @@ def test_write_judge_report_adds_dimensions_and_reliability(tmp_path):
     assert report["judge_reliability"]["valid_evidence_count"] == 1
     assert report["judge_reliability"]["invalid_evidence_count"] == 0
     assert report["judge_reliability"]["invalid_evidence"] == []
-    assert any(finding["title"] == "Requested deliverable was not produced" for finding in report["findings"])
+    assert any(finding["title"] == "Requested deliverable cannot be verified from the run bundle" for finding in report["findings"])
     assert any(row["dimension"] == "tool_selection" for row in report["charts"]["dimension_scores"])
     assert any(row["dimension"] == "tool_selection" for row in charts["dimension_scores"])
     assert "### Evaluation Dimensions" in markdown
@@ -285,8 +291,11 @@ def test_write_judge_report_merges_quality_checks_and_caps_completion(tmp_path):
     )
 
     report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
-    assert report["overall_status"] == "failed"
-    assert report["completion_score"] == 40
+    # Inferred-missing deliverables are unverifiable, not failures: the gate no
+    # longer caps the score or forces overall_status=failed (only an
+    # authoritative evaluation.json artifact check may do that).
+    assert report["overall_status"] == "success"
+    assert report["completion_score"] == 95
     assert report["metrics"]["requested_deliverables"] == [".pptx"]
     assert report["metrics"]["produced_deliverables"] == []
     assert report["charts"]["quality_summary"]["missing_deliverables"] == 1
@@ -318,7 +327,9 @@ def test_write_judge_report_recomputes_finding_severity_after_quality_merge(tmp_
     report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
     severity = {item["severity"]: item["count"] for item in report["charts"]["finding_severity"]}
 
-    assert severity == {"critical": 1, "high": 1, "medium": 1}
+    # gate adds one medium delivery finding (unverifiable, no longer critical)
+    # and one high tool-failure finding on top of the proposed medium finding
+    assert severity == {"high": 1, "medium": 2}
 
 
 def test_tools_resolve_partial_run_path(tmp_path, monkeypatch):
@@ -337,3 +348,34 @@ def test_tools_return_error_for_unknown_run(tmp_path, monkeypatch):
     assert "list_runs" in result["error"]
     assert "error" in search_trajectory("no-such-run", "x")
     assert "error" in get_tool_calls("no-such-run")
+
+
+def test_first_tool_failure_ignores_keyword_lookalikes(tmp_path):
+    # Regression: a bare-keyword text scan reported the MIT LICENSE line
+    # "Permission is hereby granted" as the run's first tool failure. Only the
+    # audit's structured status may report failures now.
+    run = tmp_path / "runs" / "license-read"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1"}), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps(
+            {
+                "message_count": 2,
+                "tool_call_count": 1,
+                "tool_result_count": 1,
+                "findings": [],
+                "tool_calls": [{"index": 1, "tool": "read", "status": "ok", "args_preview": "LICENSE"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {"index": 0, "role": "user", "content": "read the license"},
+        {"index": 1, "role": "tool", "content": "MIT License\n\nPermission is hereby granted, free of charge, to deal in the Software without restriction..."},
+        {"index": 2, "role": "assistant", "content": "The license is MIT."},
+    ]
+    (run / "trajectory.jsonl").write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    quality = assess_run_quality(str(run))
+
+    assert all(finding["category"] != "tool" for finding in quality["findings"])

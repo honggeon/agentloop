@@ -473,6 +473,16 @@ def test_dsh_engine_proposal_is_normalized_and_capped_by_shared_pipeline(base):
 def test_malformed_dsh_proposal_cannot_weaken_deterministic_failure(base):
     run = _write_run(base / "runs")
     (run / "report.md").unlink()
+    # An inferred-missing deliverable is only unverifiable; the deterministic
+    # failure this test needs must come from an authoritative source. Declare
+    # the artifact missing via evaluation.json (required artifact check).
+    from auditrail.evaluation import make_artifact_check, new_envelope, write_evaluation
+
+    envelope = new_envelope("completed")
+    envelope["artifact_checks"] = [
+        make_artifact_check("report.md", required=True, status="fail", exists=False, valid=False)
+    ]
+    write_evaluation(run, envelope)
     settings = _settings(base)
     captured = []
     engine = DshJudgeEngine(
