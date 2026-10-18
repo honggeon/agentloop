@@ -443,8 +443,12 @@ def write_judge_report(
     normalized["judge_reliability"] = reliability
     normalized = normalize_judge_report(normalized)
     chart_data = build_chart_data(str(run_dir))
-    charts = dict(chart_data)
-    charts.update(normalized.get("charts") or {})
+    # Judge-proposal charts first (custom keys survive), then the
+    # deterministic audit-derived charts overwrite their keys: the proposal's
+    # normalized defaults (empty tool_distribution/phase_timeline) must never
+    # blank out real audit data.
+    charts = dict(normalized.get("charts") or {})
+    charts.update(chart_data)
     charts["finding_severity"] = _count_by(normalized.get("findings") or [], "severity")
     charts["quality_summary"] = {
         "requested_deliverables": len(quality["deliverables"]["requested"]),

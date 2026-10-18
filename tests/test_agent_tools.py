@@ -643,3 +643,24 @@ def test_write_judge_report_engine_archive_matches_root_contract(tmp_path):
     archived = json.loads((run / "judges" / "dsh" / "agent_judge.json").read_text(encoding="utf-8"))
     assert root == archived
     assert "evidence_chain" in json.dumps(root["dimensions"])
+
+
+def test_write_judge_report_deterministic_charts_survive_proposal_charts(tmp_path):
+    # Regression: the judge proposal's charts carry normalized defaults
+    # (tool_distribution: [], phase_timeline: []), and the merge order let them
+    # overwrite the deterministic build_chart_data values, leaving the tool
+    # distribution and phase timeline panels empty.
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        _complete_proposal(charts={"tool_distribution": [], "phase_timeline": [], "custom": {"a": 1}}),
+    )
+
+    charts = json.loads((run / "chart_data.json").read_text(encoding="utf-8"))
+    assert charts["tool_distribution"] == [{"tool": "read_file", "count": 1}, {"tool": "terminal", "count": 1}]
+    assert charts["phase_timeline"][0]["phase"] == "execute"
+    # Proposal-only custom chart keys are preserved.
+    assert charts["custom"] == {"a": 1}
+    # And the same data lands in the report's own charts snapshot.
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    assert report["charts"]["tool_distribution"] == charts["tool_distribution"]
