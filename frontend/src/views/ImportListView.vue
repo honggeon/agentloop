@@ -6,6 +6,7 @@ import {
   fetchAuthContext,
   fetchImportJobs,
   IMPORT_JOB_STATUS_LABELS,
+  pauseImport,
   type AuthContext,
   type ImportJobSummary
 } from "../api";
@@ -15,6 +16,8 @@ const PAGE_SIZE = 50;
 
 // 「进行中」聚合排队 / 校验 / 运行 / 暂停四种活跃状态。
 const ACTIVE_STATUSES = new Set(["queued", "validating", "running", "paused"]);
+// 只有真正占用或等待 worker 的状态可以协作式暂停。
+const PAUSABLE_STATUSES = new Set(["queued", "validating", "running"]);
 
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: "all", label: "全部" },
@@ -34,8 +37,15 @@ const hasMore = ref(false);
 const loading = ref(false);
 const error = ref("");
 const statusFilter = ref("all");
+const pausingId = ref("");
 
 const isLocalDevMode = computed(() => authContext.value?.auth_mode === "disabled");
+// 暂停按钮仅 operator+（permissions.import）且任务处于可暂停状态时可用。
+const canImport = computed(() => Boolean(authContext.value?.permissions?.import));
+
+function canPauseJob(job: ImportJobSummary): boolean {
+  return canImport.value && PAUSABLE_STATUSES.has(String(job.status));
+}
 
 const filteredImports = computed(() => {
   if (statusFilter.value === "all") return imports.value;
@@ -103,6 +113,22 @@ function openImport(job: ImportJobSummary) {
   void router.push({ name: "integration-import-detail", params: { importId: job.import_id } });
 }
 
+async function pauseJob(job: ImportJobSummary, event: Event) {
+  event.stopPropagation();
+  event.preventDefault();
+  if (!canPauseJob(job) || pausingId.value) return;
+  pausingId.value = job.import_id;
+  error.value = "";
+  try {
+    await pauseImport(job.import_id);
+    await loadImports();
+  } catch (err) {
+    error.value = apiErrorMessage(err);
+  } finally {
+    pausingId.value = "";
+  }
+}
+
 onMounted(loadAuth);
 onMounted(loadImports);
 </script>
@@ -154,6 +180,7 @@ onMounted(loadImports);
             <th>失败</th>
             <th>重试</th>
             <th>创建时间</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -181,6 +208,19 @@ onMounted(loadImports);
             <td>{{ job.failed_records ?? 0 }}</td>
             <td>{{ job.retry_count ?? 0 }}</td>
             <td>{{ job.created_at || "—" }}</td>
+            <td>
+              <button
+                v-if="canPauseJob(job)"
+                class="ghost small"
+                type="button"
+                :disabled="pausingId === job.import_id"
+                title="协作式暂停：worker 在下一个批次/分页边界停下"
+                @click="pauseJob(job, $event)"
+              >
+                {{ pausingId === job.import_id ? "暂停中…" : "暂停" }}
+              </button>
+              <span v-else>—</span>
+            </td>
           </tr>
         </tbody>
       </table>

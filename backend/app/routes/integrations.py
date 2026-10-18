@@ -135,10 +135,12 @@ def import_integration(
         return body
 
     import_worker.submit_import(import_id, settings)
+    degraded = import_worker.deliver_async(import_id, settings)
     body = {
         "import_id": import_id,
         "status": job.get("status"),
         "mode": "async",
+        "queue_degraded": degraded,
         "status_url": "/api/integrations/imports/%s/status" % import_id,
         "request_id": request_id,
     }
@@ -164,15 +166,24 @@ def validate_integration(source: str, payload: dict[str, Any]) -> dict[str, Any]
 
 @router.get("/integrations/imports")
 def list_integration_imports(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    from auditrail.db import StorageUnavailableError
+
     try:
         return integration_service.list_import_jobs(get_settings(), limit=limit, offset=offset)
+    except StorageUnavailableError:
+        raise _error(503, "storage_unavailable", "平台元数据存储不可用", retryable=True)
     except (TypeError, ValueError) as exc:
         raise _error(400, "invalid_pagination", str(exc)) from exc
 
 
 @router.get("/integrations/imports/{import_id}")
 def get_integration_import(import_id: str) -> dict[str, Any]:
-    job = integration_service.get_import_job(import_id, get_settings())
+    from auditrail.db import StorageUnavailableError
+
+    try:
+        job = integration_service.get_import_job(import_id, get_settings())
+    except StorageUnavailableError:
+        raise _error(503, "storage_unavailable", "平台元数据存储不可用", retryable=True)
     if job is None:
         raise _error(404, "import_not_found", "unknown integration import %s" % import_id)
     return job
@@ -198,6 +209,12 @@ def get_integration_import_status(import_id: str) -> dict[str, Any]:
         "invalid_records": job.get("invalid_records"),
         "failed_records": job.get("failed_records"),
         "retry_count": job.get("retry_count"),
+        "lease_version": job.get("lease_version"),
+        "attempt_count": job.get("attempt_count"),
+        "max_attempts": job.get("max_attempts"),
+        "next_retry_at": job.get("next_retry_at"),
+        "pause_requested": bool(job.get("pause_requested")),
+        "queue_degraded": bool(job.get("queue_degraded")),
         "checkpoint": job.get("checkpoint"),
         "checkpoint_at": job.get("checkpoint_at"),
         "restart_from_beginning": bool(job.get("restart_from_beginning")),
@@ -224,7 +241,27 @@ def cancel_integration_import(import_id: str) -> dict[str, Any]:
     if job is None:
         raise _error(404, "import_not_found", "unknown integration import %s" % import_id)
     _audit(settings, identity, "import_cancel", "import_job", import_id)
-    view = import_jobs.job_view(import_jobs.load_import_job(settings.platform_dir, import_id) or job)
+    view = integration_service.get_import_job(import_id, settings) or import_jobs.job_view(job)
+    view = dict(view)
+    view.update(_auth_block(settings))
+    return view
+
+
+@router.post("/integrations/imports/{import_id}/pause")
+def pause_integration_import(import_id: str) -> dict[str, Any]:
+    """Cooperative pause: the worker stops at the next batch/page boundary
+    (the record in flight may complete) and the lease is released."""
+    settings = get_settings()
+    identity = auth.require_role(settings, "operator")
+    try:
+        job = import_worker.request_pause(import_id, settings)
+    except import_jobs.ImportJobError as exc:
+        raise _error(409, exc.code, str(exc)) from exc
+    if job is None:
+        raise _error(404, "import_not_found", "unknown integration import %s" % import_id)
+    _audit(settings, identity, "import_pause", "import_job", import_id)
+    view = integration_service.get_import_job(import_id, settings) or import_jobs.job_view(job)
+    view = dict(view)
     view.update(_auth_block(settings))
     return view
 
@@ -232,11 +269,18 @@ def cancel_integration_import(import_id: str) -> dict[str, Any]:
 @router.post("/integrations/imports/{import_id}/retry")
 @router.post("/integrations/imports/{import_id}/resume")
 def resume_integration_import(import_id: str) -> Any:
-    """Retry/resume a failed/partial/stale job from its checkpoint."""
+    """Retry/resume a failed/partial/stale job from its checkpoint, or
+    re-queue a paused job to continue from it."""
     settings = get_settings()
     identity = auth.require_role(settings, "operator")
     try:
-        job = import_worker.prepare_retry(import_id, settings)
+        existing = integration_service.get_import_job(import_id, settings)
+        if existing is None:
+            raise KeyError(import_id)
+        if str(existing.get("status") or "") == "paused":
+            job = import_worker.prepare_resume(import_id, settings)
+        else:
+            job = import_worker.prepare_retry(import_id, settings)
     except KeyError:
         raise _error(404, "import_not_found", "unknown integration import %s" % import_id)
     except import_jobs.ImportJobError as exc:
@@ -244,12 +288,14 @@ def resume_integration_import(import_id: str) -> Any:
         raise _error(status_code, exc.code, str(exc), retryable=exc.retryable) from exc
     _audit(settings, identity, "import_resume", "import_job", import_id)
     import_worker.submit_import(import_id, settings)
+    degraded = import_worker.deliver_async(import_id, settings)
     body = {
         "import_id": import_id,
         "status": job.get("status"),
         "retry_count": job.get("retry_count"),
         "resumed_from_checkpoint": bool(import_jobs.resume_position(job)),
         "restart_from_beginning": bool(job.get("restart_from_beginning")),
+        "queue_degraded": degraded,
         "status_url": "/api/integrations/imports/%s/status" % import_id,
     }
     body.update(_auth_block(settings))

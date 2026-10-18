@@ -90,6 +90,56 @@ const router = createRouter({
       meta: { title: "审计日志" }
     },
     {
+      path: "/login",
+      name: "login",
+      component: () => import("./views/LoginView.vue"),
+      meta: { title: "登录" }
+    },
+    {
+      // OIDC 回调把 token 放在 URL fragment（/login/callback#token=...）：
+      // fragment 不进 access log 与服务器历史，由 LoginView 解析后存入 sessionStorage。
+      path: "/login/callback",
+      name: "login-callback",
+      component: () => import("./views/LoginView.vue"),
+      meta: { title: "登录" }
+    },
+    {
+      path: "/403",
+      name: "forbidden",
+      component: () => import("./views/ForbiddenView.vue"),
+      meta: { title: "无权限" }
+    },
+    {
+      path: "/admin/health",
+      name: "admin-health",
+      component: () => import("./views/AdminHealthView.vue"),
+      meta: { title: "平台健康" }
+    },
+    {
+      path: "/admin/workers",
+      name: "admin-workers",
+      component: () => import("./views/AdminWorkersView.vue"),
+      meta: { title: "Worker 状态" }
+    },
+    {
+      path: "/admin/migrations",
+      name: "admin-migrations",
+      component: () => import("./views/AdminMigrationsView.vue"),
+      meta: { title: "数据库迁移" }
+    },
+    {
+      path: "/admin/backups",
+      name: "admin-backups",
+      component: () => import("./views/AdminBackupsView.vue"),
+      meta: { title: "备份" }
+    },
+    {
+      path: "/admin/users",
+      name: "admin-users",
+      component: () => import("./views/AdminUsersView.vue"),
+      meta: { title: "用户管理" }
+    },
+    {
       path: "/:pathMatch(.*)*",
       redirect: "/"
     }

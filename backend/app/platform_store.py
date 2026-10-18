@@ -466,7 +466,43 @@ def save_suite_job(record: Dict[str, Any], settings: Optional[Settings] = None) 
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
         suite_mod.write_suite_job(path, record)
+    _record_suite_job_metric(record)
     return record
+
+
+_SUITE_JOB_METRIC_RECORDED: set = set()
+
+
+def _record_suite_job_metric(record: Dict[str, Any]) -> None:
+    """Terminal SuiteJob metric (once per job; bounded status label only)."""
+    try:
+        status = str(record.get("status") or "")
+        if not record.get("finished_at") or suite_mod.is_active_job_status(status):
+            return
+        job_id = str(record.get("job_id") or "")
+        if not job_id or job_id in _SUITE_JOB_METRIC_RECORDED:
+            return
+        _SUITE_JOB_METRIC_RECORDED.add(job_id)
+        duration = None
+        started, finished = record.get("created_at"), record.get("finished_at")
+        if started and finished:
+            from datetime import datetime
+
+            try:
+                duration = max(
+                    (
+                        datetime.fromisoformat(str(finished).replace("Z", "+00:00"))
+                        - datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                    ).total_seconds(),
+                    0.0,
+                )
+            except ValueError:
+                duration = None
+        from backend.app import metrics
+
+        metrics.record_suite_job(status, duration)
+    except Exception:
+        pass  # metrics must never fail a suite job write
 
 
 def get_suite_job(job_id: str, settings: Optional[Settings] = None) -> Optional[Dict[str, Any]]:

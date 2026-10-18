@@ -23,6 +23,29 @@ agent = [
   "langgraph>=0.2",
   "langgraph-checkpoint>=2",
 ]
+# Phase 5 production extras. All three are imported lazily: the application
+# still boots in file/inline/local mode without them, and every entry point
+# that needs one fails with an explicit, actionable error instead.
+# - psycopg: PostgreSQL metadata backend (SQLite stays the embedded default).
+# - redis:   optional queue broker hint (database stays the source of truth).
+# - PyJWT + cryptography: OIDC/JWT token verification (JWKS, RS256/HS256).
+production = [
+  "psycopg[binary]>=3.1",
+  "redis>=5",
+  "PyJWT>=2.8",
+  "cryptography>=41",
+]
+# The canonical test environment exercises the production code paths too
+# (SQLite is stdlib, but the OIDC/JWT and Postgres/Redis adapter tests need
+# these importable), so dev includes them.
+dev-full = [
+  "pytest>=8",
+  "httpx>=0.27",
+  "psycopg[binary]>=3.1",
+  "redis>=5",
+  "PyJWT>=2.8",
+  "cryptography>=41",
+]
 
 [project.scripts]
 auditrail = "auditrail.cli:main"

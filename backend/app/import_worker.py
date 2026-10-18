@@ -1,25 +1,35 @@
-"""Phase 4 in-process ImportJob worker.
+"""Phase 4/5 ImportJob worker.
 
-Executes persisted ImportJobs (``platform/external/imports/<import_id>.json``)
-asynchronously on a small thread pool, or inline for the synchronous
-compatibility path. The worker:
+Executes persisted ImportJobs through the configured store
+(``backend.app.job_store``):
+
+- ``storage_mode=file``: the Phase 4 in-process executor on the JSON record
+  store. Single-process; no cross-process claims are made or implied.
+- ``storage_mode=database|dual``: jobs are claimed with database
+  transactions and every write is fenced by ``worker_id + lease_version``
+  (see ``auditrail.db.job_store``), so API and worker can run as separate
+  processes. A retryable failure is requeued with ``next_retry_at`` backoff
+  instead of sleeping while holding the lease.
+
+The worker itself:
 
 - checkpoints every ``import_checkpoint_records`` records (and after every
-  HTTP page), atomically, so a retry/resume continues instead of restarting;
-- honors the persisted ``cancel_requested`` flag between read / normalize /
-  link / persist steps — cancellation never fabricates unprocessed records
-  as invalid and never rolls back already-imported evidence;
-- classifies errors as retryable (transient HTTP: 408/429/5xx, timeouts) or
-  non-retryable (schema, auth, SSRF, path) and auto-retries only the former,
-  with bounded attempts and capped backoff; everything else needs an
-  explicit ``retry``/``resume`` call;
-- holds a per-job lease (``worker_id``/``lease_expires_at``); a crashed
-  process leaves an active job whose lease expires and is then marked
-  ``stale`` — never ``completed`` — and an old worker can never overwrite a
-  newer worker's state.
+  HTTP page), atomically with the counter carry-over, so a retry/resume
+  continues instead of restarting;
+- honors the persisted ``cancel_requested``/``pause_requested`` flags
+  between read / normalize / link / persist steps — cancellation never
+  fabricates unprocessed records as invalid, never rolls back
+  already-imported evidence, and a pause stops at the next batch boundary
+  (the record in flight may complete);
+- classifies errors as retryable or non-retryable and auto-retries only the
+  former, with bounded attempts and capped backoff; everything else needs
+  an explicit ``retry``/``resume`` call;
+- holds a per-job lease; a crashed process leaves an active job whose lease
+  expires and is then marked ``stale`` — never ``completed``.
 
-The worker is a single-process, file-based executor. It is not a distributed
-queue: no cross-machine locking is claimed or implied.
+Phase 5 also routes cost imports (``kind="cost_records"``) through this
+same state machine, with observed-data priority and price-versioned
+estimation preserved (see ``auditrail.costs``).
 """
 
 from __future__ import annotations
@@ -29,12 +39,14 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from auditrail import costs as cost_mod
 from auditrail.integrations import external_models as ext
 from auditrail.integrations import import_jobs
 from auditrail.integrations import langfuse as langfuse_adapter
 from auditrail.integrations import promptfoo as promptfoo_adapter
 
 from backend.app import integration_service
+from backend.app import job_store as job_store_mod
 from backend.app.config import Settings, get_settings
 
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="auditrail-import")
@@ -58,6 +70,10 @@ def _peek_fetcher(import_id: str) -> Any:
         return _FETCHERS.get(import_id)
 
 
+def _store(settings: Settings) -> job_store_mod.JobStore:
+    return job_store_mod.job_store(settings)
+
+
 # ---------------------------------------------------------------------------
 # lifecycle
 # ---------------------------------------------------------------------------
@@ -65,11 +81,33 @@ def _peek_fetcher(import_id: str) -> Any:
 
 def start_import_worker(settings: Optional[Settings] = None) -> List[str]:
     """Startup hook: mark expired-lease jobs stale (never completed) and
-    return their ids. Does not auto-resume anything — resume is explicit."""
+    return their ids. Does not auto-resume anything — resume is explicit.
+    Every stale transition is audited."""
     current = settings or get_settings()
     if not current.import_worker_enabled:
         return []
-    return import_jobs.refresh_stale_jobs(Path(current.platform_dir))
+    stale_ids = _store(current).refresh_stale()
+    if stale_ids:
+        from backend.app import audit_service, metrics
+
+        for import_id in stale_ids:
+            try:
+                audit_service.append_event(
+                    current,
+                    actor="system-worker",
+                    role="system",
+                    action="import_stale",
+                    resource_type="import_job",
+                    resource_id=import_id,
+                    result="success",
+                    reason="worker lease expired; marked stale (never auto-completed)",
+                )
+            except Exception:
+                pass  # audit failure must not block stale recovery
+            metrics.counter_inc(
+                "auditrail_import_job_stale_total", _help="ImportJobs marked stale", mode="recovery"
+            )
+    return stale_ids
 
 
 def stop_import_worker() -> None:
@@ -88,6 +126,31 @@ def is_active(import_id: str) -> bool:
     return bool(future is not None and not future.done())
 
 
+def deliver_async(import_id: str, settings: Settings) -> bool:
+    """Best-effort broker hint for an async job; returns True when degraded.
+
+    In ``queue_mode=redis`` a broker outage marks the job ``queue_degraded``
+    (delivery is never faked); the database row stays the queued source of
+    truth and the worker's poll still picks the job up. Other queue modes
+    need no hint and never degrade.
+    """
+    from backend.app import queue_adapter
+
+    try:
+        queue_adapter.enqueue_hint(import_id, settings)
+        return False
+    except queue_adapter.QueueUnavailableError:
+        store = _store(settings)
+
+        def mark(job: Dict[str, Any]) -> Dict[str, Any]:
+            job = dict(job)
+            job["queue_degraded"] = True
+            return job
+
+        store.mutate(import_id, mark)
+        return True
+
+
 # ---------------------------------------------------------------------------
 # submission / control
 # ---------------------------------------------------------------------------
@@ -100,16 +163,24 @@ def submit_import(
     fetcher: Optional[Any] = None,
     sleeper: Optional[Callable[[float], None]] = None,
 ) -> str:
-    """Queue an existing persisted job for async execution (idempotent)."""
+    """Queue an existing persisted job for async execution (idempotent).
+
+    In ``file`` storage mode this drives the in-process pool. In database
+    modes the queued row is the submission: an embedded or standalone
+    worker claims it transactionally, so this is a no-op beyond fetcher
+    registration.
+    """
     if fetcher is not None:
         register_import_fetcher(import_id, fetcher)
+    if job_store_mod.storage_mode(settings) != "file":
+        return import_id
     with _LOCK:
         existing = _ACTIVE.get(import_id)
         if existing is not None and not existing.done():
             return import_id
         event = threading.Event()
         _CANCEL_EVENTS[import_id] = event
-        future = _POOL.submit(_run_job_guarded, import_id, settings, event, sleeper)
+        future = _POOL.submit(_run_job_guarded, import_id, settings, event, sleeper, False)
         _ACTIVE[import_id] = future
     return import_id
 
@@ -125,38 +196,80 @@ def execute_import_inline(
     if fetcher is not None:
         register_import_fetcher(import_id, fetcher)
     event = threading.Event()
-    return _run_job_guarded(import_id, settings, event, sleeper)
+    return _run_job_guarded(import_id, settings, event, sleeper, False)
 
 
 def request_cancel(import_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
-    """Persist the cooperative cancel flag and signal the in-process worker.
+    """Persist the cooperative cancel flag and signal any in-process worker.
 
     Idempotent: repeated cancels return the current job. Terminal jobs raise
-    ``ImportJobError(import_invalid_state)``.
+    ``ImportJobError(import_invalid_state)``. A queued job no worker holds
+    is finalized ``cancelled`` immediately, atomically with the flag write;
+    already-written evidence is never rolled back.
     """
-    platform_dir = Path(settings.platform_dir)
-    job = import_jobs.load_import_job(platform_dir, import_id)
-    if job is None:
+    store = _store(settings)
+
+    def apply(job: Dict[str, Any]) -> Dict[str, Any]:
+        updated = import_jobs.request_cancel(job)
+        if str(updated.get("status") or "") in ("queued", "validating") and not updated.get("worker_id"):
+            updated = import_jobs.transition(
+                updated,
+                "cancelled",
+                error={"code": "import_cancelled", "message": "cancelled before execution", "retryable": False},
+            )
+        return updated
+
+    updated = store.mutate(import_id, apply)
+    if updated is None:
         return None
-    updated = import_jobs.request_cancel(job)
-    if updated != job:
-        import_jobs.save_import_job(platform_dir, updated)
     with _LOCK:
         event = _CANCEL_EVENTS.get(import_id)
     if event is not None:
         event.set()
-    elif not is_active(import_id) and str(updated.get("status") or "") in ("queued", "validating"):
-        # No worker holds this job (queued before submission or the pool is
-        # busy): finalize the cancel now so the job never lingers in an
-        # active status with the flag set. Already-written evidence (none
-        # for a queued job) is never rolled back.
-        final = import_jobs.transition(
-            updated,
-            "cancelled",
-            error={"code": "import_cancelled", "message": "cancelled before execution", "retryable": False},
-        )
-        import_jobs.save_import_job(platform_dir, final)
-        return final
+    elif (
+        store.mode == "file"
+        and not is_active(import_id)
+        and str(updated.get("status") or "") in ("queued", "validating")
+    ):
+        # File mode, no in-process worker holds this job (queued before
+        # submission or the pool is busy): finalize the cancel now so the
+        # job never lingers in an active status with the flag set.
+        def finalize(job: Dict[str, Any]) -> Dict[str, Any]:
+            if str(job.get("status") or "") in ("queued", "validating"):
+                return import_jobs.transition(
+                    job,
+                    "cancelled",
+                    error={"code": "import_cancelled", "message": "cancelled before execution", "retryable": False},
+                )
+            return job
+
+        finalized = store.mutate(import_id, finalize)
+        if finalized is not None:
+            return finalized
+    return updated
+
+
+def request_pause(import_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
+    """Persist the cooperative pause flag (boundary stop).
+
+    Running jobs pause at the next batch/page boundary; queued jobs move to
+    ``paused`` immediately. Terminal/stale jobs raise
+    ``ImportJobError(import_invalid_state)``.
+    """
+    store = _store(settings)
+
+    def apply(job: Dict[str, Any]) -> Dict[str, Any]:
+        return import_jobs.request_pause(job)
+
+    return store.mutate(import_id, apply)
+
+
+def prepare_resume(import_id: str, settings: Settings) -> Dict[str, Any]:
+    """Re-queue a paused job to continue from its checkpoint."""
+    store = _store(settings)
+    updated = store.mutate(import_id, import_jobs.prepare_resume)
+    if updated is None:
+        raise KeyError(import_id)
     return updated
 
 
@@ -168,28 +281,30 @@ def prepare_retry(import_id: str, settings: Settings) -> Dict[str, Any]:
     evidence and never clears the checkpoint (unless the source declared
     ``restart_from_beginning``).
     """
-    platform_dir = Path(settings.platform_dir)
-    job = import_jobs.load_import_job(platform_dir, import_id)
-    if job is None:
+    store = _store(settings)
+
+    def apply(job: Dict[str, Any]) -> Dict[str, Any]:
+        status = str(job.get("status") or "")
+        if status not in import_jobs.RESUMABLE_STATUSES:
+            raise import_jobs.ImportJobError(
+                "import_invalid_state",
+                "only failed/partial/stale import jobs can be retried (current: %s)" % status,
+                retryable=False,
+            )
+        if int(job.get("retry_count") or 0) >= int(settings.import_max_retries):
+            raise import_jobs.ImportJobError(
+                "import_invalid_state",
+                "import job exhausted the maximum retry count (%d)" % int(settings.import_max_retries),
+                retryable=False,
+            )
+        job = dict(job)
+        job["retry_count"] = int(job.get("retry_count") or 0) + 1
+        return import_jobs.transition(job, "queued", phase="validating")
+
+    updated = store.mutate(import_id, apply)
+    if updated is None:
         raise KeyError(import_id)
-    status = str(job.get("status") or "")
-    if status not in import_jobs.RESUMABLE_STATUSES:
-        raise import_jobs.ImportJobError(
-            "import_invalid_state",
-            "only failed/partial/stale import jobs can be retried (current: %s)" % status,
-            retryable=False,
-        )
-    if int(job.get("retry_count") or 0) >= int(settings.import_max_retries):
-        raise import_jobs.ImportJobError(
-            "import_invalid_state",
-            "import job exhausted the maximum retry count (%d)" % int(settings.import_max_retries),
-            retryable=False,
-        )
-    job = dict(job)
-    job["retry_count"] = int(job.get("retry_count") or 0) + 1
-    job = import_jobs.transition(job, "queued", phase="validating")
-    import_jobs.save_import_job(platform_dir, job)
-    return job
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +317,10 @@ def _run_job_guarded(
     settings: Settings,
     cancel_event: threading.Event,
     sleeper: Optional[Callable[[float], None]],
+    requeue_on_retry: bool,
 ) -> Dict[str, Any]:
     try:
-        return _run_job(import_id, settings, cancel_event, sleeper)
+        return _run_job(import_id, settings, cancel_event, sleeper, requeue_on_retry)
     finally:
         with _LOCK:
             _ACTIVE.pop(import_id, None)
@@ -212,17 +328,27 @@ def _run_job_guarded(
             _FETCHERS.pop(import_id, None)
 
 
-def _load_owned_job(import_id: str, settings: Settings, worker_id: str) -> Dict[str, Any]:
+def _load_owned_job(
+    import_id: str,
+    settings: Settings,
+    worker_id: str,
+    store: job_store_mod.JobStore,
+) -> Dict[str, Any]:
     """Reload the job and verify this worker still owns the lease."""
-    job = import_jobs.load_import_job(Path(settings.platform_dir), import_id)
+    job = store.load(import_id)
     if job is None:
         raise import_jobs.ImportJobError("import_not_found", "import job vanished", retryable=False)
     import_jobs.assert_worker_owner(job, worker_id)
     return job
 
 
-def _persist(job: Dict[str, Any], settings: Settings, worker_id: str) -> Dict[str, Any]:
-    return import_jobs.save_import_job(Path(settings.platform_dir), job, worker_id=worker_id)
+def _persist(
+    job: Dict[str, Any],
+    settings: Settings,
+    worker_id: str,
+    store: job_store_mod.JobStore,
+) -> Dict[str, Any]:
+    return store.save(job, worker_id=worker_id)
 
 
 def _run_job(
@@ -230,19 +356,55 @@ def _run_job(
     settings: Settings,
     cancel_event: threading.Event,
     sleeper: Optional[Callable[[float], None]],
+    requeue_on_retry: bool,
 ) -> Dict[str, Any]:
-    platform_dir = Path(settings.platform_dir)
-    job = import_jobs.load_import_job(platform_dir, import_id)
+    store = _store(settings)
+    worker_id = import_jobs.new_worker_id()
+    job = store.claim(import_id, worker_id, lease_seconds=int(settings.import_lease_seconds))
     if job is None:
-        raise import_jobs.ImportJobError("import_not_found", "unknown import job", retryable=False)
+        raise import_jobs.ImportJobError(
+            "import_not_found", "unknown import job or live lease held by another worker", retryable=False
+        )
     if str(job.get("status") or "") in import_jobs.TERMINAL_STATUSES:
         return job  # idempotent: never re-execute a terminal job
+    return _drive(job, settings, cancel_event, sleeper, requeue_on_retry, store)
 
-    worker_id = import_jobs.new_worker_id()
-    job = import_jobs.acquire_lease(job, worker_id, lease_seconds=int(settings.import_lease_seconds))
-    job = import_jobs.transition(job, "validating", phase="validating")
-    _persist(job, settings, worker_id)
 
+def execute_claimed_job(
+    job: Dict[str, Any],
+    settings: Settings,
+    *,
+    cancel_event: Optional[threading.Event] = None,
+    sleeper: Optional[Callable[[float], None]] = None,
+) -> Dict[str, Any]:
+    """Drive a job this process already claimed (cross-process worker loop).
+
+    The claim (transaction + fencing token) happened in the caller; this
+    entry owns execution, checkpointing and the terminal write under that
+    lease. Retryable failures are requeued with backoff (the lease is
+    released; no worker sleeps while holding a claim).
+    """
+    store = _store(settings)
+    return _drive(
+        dict(job),
+        settings,
+        cancel_event or threading.Event(),
+        sleeper,
+        True,
+        store,
+    )
+
+
+def _drive(
+    job: Dict[str, Any],
+    settings: Settings,
+    cancel_event: threading.Event,
+    sleeper: Optional[Callable[[float], None]],
+    requeue_on_retry: bool,
+    store: job_store_mod.JobStore,
+) -> Dict[str, Any]:
+    import_id = str(job["import_id"])
+    worker_id = str(job.get("worker_id") or "")
     # Backoff sleeps are cancel-aware: a cancel request interrupts the wait
     # immediately instead of being noticed only after the backoff elapsed.
     sleep = sleeper or cancel_event.wait
@@ -250,7 +412,7 @@ def _run_job(
     max_retries = int(settings.import_max_retries)
     while True:
         try:
-            return _execute(import_id, settings, worker_id, cancel_event)
+            return _execute(import_id, settings, worker_id, cancel_event, store)
         except import_jobs.StaleWorkerError:
             raise  # another worker owns the job now; never touch its state
         except (import_jobs.ImportJobError, langfuse_adapter.LangfuseSourceError) as exc:
@@ -258,28 +420,37 @@ def _run_job(
             retryable = bool(getattr(exc, "retryable", False))
             message = str(exc)[:300]
             if code == "import_cancelled":
-                job = _load_owned_job(import_id, settings, worker_id)
+                job = _load_owned_job(import_id, settings, worker_id, store)
                 job = import_jobs.transition(
                     job, "cancelled", error={"code": code, "message": message, "retryable": False}
                 )
-                return _persist(job, settings, worker_id)
+                return _persist(job, settings, worker_id, store)
+            if code == "import_paused":
+                job = _load_owned_job(import_id, settings, worker_id, store)
+                job = import_jobs.transition(job, "paused")
+                return _persist(job, settings, worker_id, store)
             if retryable and backoff_attempts < max_retries:
                 backoff_attempts += 1
-                job = _load_owned_job(import_id, settings, worker_id)
+                job = _load_owned_job(import_id, settings, worker_id, store)
                 job = dict(job)
-                job["retry_count"] = int(job.get("retry_count") or 0) + 1
                 job["error"] = {"code": code, "message": message, "retryable": True}
-                job = import_jobs.heartbeat(job, worker_id, lease_seconds=int(settings.import_lease_seconds))
-                _persist(job, settings, worker_id)
+                if requeue_on_retry and store.mode == "database":
+                    # Release the lease and let the scheduler re-drive after
+                    # the backoff — no worker holds a claim while sleeping.
+                    delay = min(2.0**backoff_attempts, import_jobs.MAX_BACKOFF_SECONDS)
+                    return store.requeue_retryable(job, worker_id, delay_seconds=delay)
+                job["retry_count"] = int(job.get("retry_count") or 0) + 1
+                job = store.heartbeat(job, worker_id, lease_seconds=int(settings.import_lease_seconds))
+                _persist(job, settings, worker_id, store)
                 sleep(min(2.0**backoff_attempts, import_jobs.MAX_BACKOFF_SECONDS))
                 continue
-            job = _load_owned_job(import_id, settings, worker_id)
+            job = _load_owned_job(import_id, settings, worker_id, store)
             job = import_jobs.transition(
                 job, "failed", error={"code": code, "message": message, "retryable": retryable}
             )
-            return _persist(job, settings, worker_id)
+            return _persist(job, settings, worker_id, store)
         except Exception as exc:  # noqa: BLE001 - redacted type-only message
-            job = _load_owned_job(import_id, settings, worker_id)
+            job = _load_owned_job(import_id, settings, worker_id, store)
             job = import_jobs.transition(
                 job,
                 "failed",
@@ -289,7 +460,7 @@ def _run_job(
                     "retryable": False,
                 },
             )
-            return _persist(job, settings, worker_id)
+            return _persist(job, settings, worker_id, store)
 
 
 def _check_cancel(
@@ -297,20 +468,24 @@ def _check_cancel(
     settings: Settings,
     worker_id: str,
     cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
     *,
     disk: bool = False,
 ) -> None:
-    """Cooperative cancel check. The in-memory event is consulted at every
-    record; the persisted flag is re-read at batch/page boundaries
-    (``disk=True``) so a cancel issued outside this thread lands too."""
+    """Cooperative cancel/pause check. The in-memory event is consulted at
+    every record; the persisted flags are re-read at batch/page boundaries
+    (``disk=True``) so a control request issued from another process lands
+    too."""
     if cancel_event.is_set():
         raise import_jobs.ImportJobError("import_cancelled", "import job cancellation was requested", retryable=False)
     if disk:
-        job = _load_owned_job(import_id, settings, worker_id)
+        job = _load_owned_job(import_id, settings, worker_id, store)
         if job.get("cancel_requested"):
             raise import_jobs.ImportJobError(
                 "import_cancelled", "import job cancellation was requested", retryable=False
             )
+        if job.get("pause_requested"):
+            raise import_jobs.ImportJobError("import_paused", "import job pause was requested", retryable=False)
 
 
 def _execute(
@@ -318,62 +493,86 @@ def _execute(
     settings: Settings,
     worker_id: str,
     cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
 ) -> Dict[str, Any]:
-    platform_dir = Path(settings.platform_dir)
-    job = _load_owned_job(import_id, settings, worker_id)
+    job = _load_owned_job(import_id, settings, worker_id, store)
     if str(job.get("status") or "") == "validating":
         job = import_jobs.transition(job, "running", phase="reading")
     else:
         job = dict(job)
         job["phase"] = "reading"
-    _persist(job, settings, worker_id)
+    _persist(job, settings, worker_id, store)
 
     source_system = str(job.get("source_system") or "")
-    if source_system == "langfuse":
-        job = _execute_langfuse(job, settings, worker_id, cancel_event)
+    kind = str(job.get("kind") or "")
+    if kind == "cost_records":
+        job = _execute_costs(job, settings, worker_id, cancel_event, store)
+    elif source_system == "langfuse":
+        job = _execute_langfuse(job, settings, worker_id, cancel_event, store)
     elif source_system == "promptfoo":
-        job = _execute_promptfoo(job, settings, worker_id, cancel_event)
+        job = _execute_promptfoo(job, settings, worker_id, cancel_event, store)
     else:
         raise import_jobs.ImportJobError(
             "invalid_import", "unsupported import source %r" % source_system, retryable=False
         )
 
-    _check_cancel(import_id, settings, worker_id, cancel_event, disk=True)
-    return _finalize(job, settings, worker_id)
+    _check_cancel(import_id, settings, worker_id, cancel_event, store, disk=True)
+    return _finalize(job, settings, worker_id, store)
 
 
-def _finalize(job: Dict[str, Any], settings: Settings, worker_id: str) -> Dict[str, Any]:
+def _finalize(
+    job: Dict[str, Any],
+    settings: Settings,
+    worker_id: str,
+    store: job_store_mod.JobStore,
+) -> Dict[str, Any]:
     """Build the Phase 3-compatible report and land the terminal status."""
-    job = _load_owned_job(str(job["import_id"]), settings, worker_id)
+    job = _load_owned_job(str(job["import_id"]), settings, worker_id, store)
     job = dict(job)
     job["phase"] = "finalizing"
 
-    report = ext.new_import_report(str(job.get("source_system") or ""), dry_run=bool(job.get("dry_run")))
-    report["import_id"] = str(job["import_id"])
-    report["kind"] = job.get("kind")
-    report["total_records"] = int(job.get("processed_records") or 0)
-    report["duplicate_records"] = int(job.get("duplicate_records") or 0)
-    report["unlinked_records"] = int(job.get("unlinked_records") or 0)
-    report["invalid_records"] = int(job.get("invalid_records") or 0)
-    report["imported_records"] = int(job.get("imported_records") or 0)
-    report["warnings"] = list(job.get("warnings") or [])[: ext.MAX_IMPORT_ERRORS]
-    report["errors"] = list(job.get("errors") or [])[: ext.MAX_IMPORT_ERRORS]
-    if str(job.get("source_system") or "") == "promptfoo":
-        report["draft_count"] = int(job.get("processed_records") or 0) - int(job.get("invalid_records") or 0)
-    ext.finalize_import_report(report)
+    if str(job.get("kind") or "") == "cost_records":
+        report = _cost_report(job)
+    else:
+        report = ext.new_import_report(str(job.get("source_system") or ""), dry_run=bool(job.get("dry_run")))
+        report["import_id"] = str(job["import_id"])
+        report["kind"] = job.get("kind")
+        report["total_records"] = int(job.get("processed_records") or 0)
+        report["duplicate_records"] = int(job.get("duplicate_records") or 0)
+        report["unlinked_records"] = int(job.get("unlinked_records") or 0)
+        report["invalid_records"] = int(job.get("invalid_records") or 0)
+        report["imported_records"] = int(job.get("imported_records") or 0)
+        report["warnings"] = list(job.get("warnings") or [])[: ext.MAX_IMPORT_ERRORS]
+        report["errors"] = list(job.get("errors") or [])[: ext.MAX_IMPORT_ERRORS]
+        if str(job.get("source_system") or "") == "promptfoo":
+            report["draft_count"] = int(job.get("processed_records") or 0) - int(job.get("invalid_records") or 0)
+        ext.finalize_import_report(report)
 
     job["report"] = report
     job["total_records"] = int(job.get("processed_records") or 0)
     if job.get("dry_run"):
         status = "completed"
-    elif report.get("status") == "partial":
+    elif str(report.get("status") or "") in ("partial", "completed_with_errors"):
         status = "partial"
-    elif report.get("status") == "failed":
+    elif str(report.get("status") or "") == "failed":
         status = "failed"
     else:
         status = "completed"
     job = import_jobs.transition(job, status)
-    persisted = _persist(job, settings, worker_id)
+    persisted = _persist(job, settings, worker_id, store)
+    try:
+        from backend.app import metrics
+
+        metrics.record_import_finished(persisted)
+    except Exception:
+        pass  # metrics must never fail an import
+    # Cost imports keep the legacy report directory readable: the same
+    # report is mirrored to ``cost_imports/<import_id>.json``.
+    if str(job.get("kind") or "") == "cost_records" and not job.get("dry_run"):
+        try:
+            cost_mod.save_import_report(Path(settings.platform_dir), report)
+        except Exception:
+            pass  # the job record is authoritative; the mirror is compat
     # Phase 4: hint the (optional, disabled-by-default) run-index watcher so
     # cost-bearing index entries refresh with reason=import_complete.
     try:
@@ -383,6 +582,31 @@ def _finalize(job: Dict[str, Any], settings: Settings, worker_id: str) -> Dict[s
     except Exception:
         pass  # the watcher is strictly optional; a hint failure never fails an import
     return persisted
+
+
+def _cost_report(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Legacy-shaped cost import report (field compatibility with Phase 2)."""
+    report = {
+        "schema_version": cost_mod.SCHEMA_VERSION,
+        "import_id": str(job["import_id"]),
+        "status": "completed",
+        "source_system": str(job.get("source_system") or ""),
+        "kind": "cost_records",
+        "source_file": job.get("source_file_name"),
+        "dry_run": bool(job.get("dry_run")),
+        "total_records": int(job.get("processed_records") or 0),
+        "imported_records": int(job.get("imported_records") or 0),
+        "duplicate_records": int(job.get("duplicate_records") or 0),
+        "invalid_records": int(job.get("invalid_records") or 0),
+        "errors": list(job.get("errors") or [])[: cost_mod.MAX_IMPORT_ERRORS],
+        "warnings": list(job.get("warnings") or [])[: cost_mod.MAX_IMPORT_ERRORS],
+        "imported_at": job.get("finished_at") or job.get("started_at"),
+    }
+    if report["invalid_records"]:
+        report["status"] = "completed_with_errors" if report["imported_records"] else "failed"
+    if job.get("dry_run"):
+        report["status"] = "dry_run"
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +619,7 @@ def _flush(
     settings: Settings,
     worker_id: str,
     cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
     *,
     position: Dict[str, Any],
     merge: Optional[Callable[[], int]] = None,
@@ -402,11 +627,11 @@ def _flush(
     """Persist one batch: merge records (unless dry-run), then checkpoint.
 
     Counters accumulate in memory between flushes; each flush re-reads the
-    on-disk job (ownership + cancel check), carries the counters over, merges
-    the batch idempotently and writes the checkpoint atomically.
+    stored job (ownership + cancel/pause check), carries the counters over,
+    merges the batch idempotently and writes the checkpoint atomically.
     """
-    _check_cancel(str(job["import_id"]), settings, worker_id, cancel_event, disk=True)
-    on_disk = _load_owned_job(str(job["import_id"]), settings, worker_id)
+    _check_cancel(str(job["import_id"]), settings, worker_id, cancel_event, store, disk=True)
+    on_disk = _load_owned_job(str(job["import_id"]), settings, worker_id, store)
     duplicates = 0
     dry_run = bool(on_disk.get("dry_run"))
     if not dry_run and merge is not None:
@@ -424,6 +649,7 @@ def _flush(
         "warnings",
         "errors",
         "total_records",
+        "source_file_name",
     ):
         if key in job:
             merged_job[key] = job.get(key)
@@ -432,8 +658,8 @@ def _flush(
         merged_job["duplicate_records"] = int(merged_job.get("duplicate_records") or 0) + duplicates
         merged_job["imported_records"] = max(int(merged_job.get("imported_records") or 0) - duplicates, 0)
     merged_job = import_jobs.update_checkpoint(merged_job, **position)
-    merged_job = import_jobs.heartbeat(merged_job, worker_id, lease_seconds=int(settings.import_lease_seconds))
-    return _persist(merged_job, settings, worker_id)
+    merged_job = store.heartbeat(merged_job, worker_id, lease_seconds=int(settings.import_lease_seconds))
+    return _persist(merged_job, settings, worker_id, store)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +672,7 @@ def _execute_langfuse(
     settings: Settings,
     worker_id: str,
     cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
 ) -> Dict[str, Any]:
     platform_dir = Path(settings.platform_dir)
     import_id = str(job["import_id"])
@@ -537,7 +764,7 @@ def _execute_langfuse(
         def should_cancel() -> bool:
             if cancel_event.is_set():
                 return True
-            current = import_jobs.load_import_job(platform_dir, import_id) or {}
+            current = store.load(import_id) or {}
             return bool(current.get("cancel_requested"))
 
         for page_info in langfuse_adapter.iter_http_pages(
@@ -548,7 +775,7 @@ def _execute_langfuse(
             start_page=checkpoint.get("page"),
             should_cancel=should_cancel,
         ):
-            _check_cancel(import_id, settings, worker_id, cancel_event)
+            _check_cancel(import_id, settings, worker_id, cancel_event, store)
             for message in page_info.get("warnings") or []:
                 import_jobs.record_warning(job, message)
             batch = process(page_info.get("records") or [])
@@ -562,6 +789,7 @@ def _execute_langfuse(
                 settings,
                 worker_id,
                 cancel_event,
+                store,
                 position=position,
                 merge=merge_batch(batch),
             )
@@ -578,7 +806,7 @@ def _execute_langfuse(
     for index, raw, offset in langfuse_adapter.iter_file_records(
         path, start_index=start_index, start_byte_offset=start_offset
     ):
-        _check_cancel(import_id, settings, worker_id, cancel_event)
+        _check_cancel(import_id, settings, worker_id, cancel_event, store)
         pending.append(raw)
         pending_since_flush += 1
         last_index, last_offset = index, offset
@@ -589,6 +817,7 @@ def _execute_langfuse(
                 settings,
                 worker_id,
                 cancel_event,
+                store,
                 position={"index": last_index, "byte_offset": last_offset},
                 merge=merge_batch(batch),
             )
@@ -599,6 +828,7 @@ def _execute_langfuse(
         settings,
         worker_id,
         cancel_event,
+        store,
         position={"index": last_index, "byte_offset": last_offset},
         merge=merge_batch(batch),
     )
@@ -615,6 +845,7 @@ def _execute_promptfoo(
     settings: Settings,
     worker_id: str,
     cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
 ) -> Dict[str, Any]:
     platform_dir = Path(settings.platform_dir)
     import_id = str(job["import_id"])
@@ -678,7 +909,7 @@ def _execute_promptfoo(
     for position, raw in enumerate(tests_raw, start=1):
         if position <= start_index:
             continue
-        _check_cancel(import_id, settings, worker_id, cancel_event)
+        _check_cancel(import_id, settings, worker_id, cancel_event, store)
         item_warnings: List[str] = []
         job["processed_records"] = int(job.get("processed_records") or 0) + 1
         last_index = position
@@ -703,6 +934,7 @@ def _execute_promptfoo(
                 settings,
                 worker_id,
                 cancel_event,
+                store,
                 position={"index": last_index},
                 merge=flush_drafts(pending, last_index),
             )
@@ -712,7 +944,170 @@ def _execute_promptfoo(
         settings,
         worker_id,
         cancel_event,
+        store,
         position={"index": last_index},
         merge=flush_drafts(pending, last_index),
+    )
+    return job
+
+
+# ---------------------------------------------------------------------------
+# cost import execution (Phase 5: unified into the ImportJob state machine)
+# ---------------------------------------------------------------------------
+
+
+def _execute_costs(
+    job: Dict[str, Any],
+    settings: Settings,
+    worker_id: str,
+    cancel_event: threading.Event,
+    store: job_store_mod.JobStore,
+) -> Dict[str, Any]:
+    """Import one JSONL cost log through the ImportJob state machine.
+
+    Semantics preserved from the Phase 2 pipeline (``auditrail.costs``):
+
+    - idempotent on ``(source_system, source_id)`` — re-importing is a
+      duplicate, never a second record;
+    - observed data (run ``llm_calls.json``) is never touched, so imports
+      can never overwrite it;
+    - records without an explicit cost are estimated only from a configured
+      price table and keep the ``price_version``;
+    - token counts never become currency; a missing cost stays ``null``.
+    """
+    platform_dir = Path(settings.platform_dir)
+    import_id = str(job["import_id"])
+    payload = integration_service.load_import_payload(import_id, settings) or {}
+    path = integration_service.resolve_import_source(payload.get("source_file"), settings)
+    job["source_file_name"] = path.name
+    default_run_id = payload.get("run_id")
+    default_agent_id = payload.get("agent_id")
+    source_system = str(job.get("source_system") or "")
+    checkpoint = import_jobs.resume_position(job)
+    start_index = int(checkpoint.get("index") or 0)
+    start_offset = int(checkpoint.get("byte_offset") or 0)
+    batch_size = max(int(settings.import_checkpoint_records), 1)
+    price_table = cost_mod.load_price_table(platform_dir)
+    imported_at = job.get("started_at") or job.get("created_at")
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise import_jobs.ImportJobError(
+            "invalid_import", "source_file is not readable: %s" % type(exc).__name__, retryable=False
+        ) from exc
+    if size > cost_mod.MAX_IMPORT_BYTES:
+        raise import_jobs.ImportJobError(
+            "invalid_import",
+            "source_file exceeds the %d byte limit" % cost_mod.MAX_IMPORT_BYTES,
+            retryable=False,
+        )
+
+    job["phase"] = "normalizing"
+
+    def process(raws: List[Any]) -> List[Dict[str, Any]]:
+        batch: List[Dict[str, Any]] = []
+        for raw in raws:
+            job["processed_records"] = int(job.get("processed_records") or 0) + 1
+            if raw is None or not isinstance(raw, dict):
+                job["invalid_records"] = int(job.get("invalid_records") or 0) + 1
+                errors = job.setdefault("errors", [])
+                if len(errors) < cost_mod.MAX_IMPORT_ERRORS:
+                    errors.append({"error": "invalid JSONL line" if raw is None else "line is not a JSON object"})
+                continue
+            if default_run_id and not raw.get("run_id"):
+                raw = {**raw, "run_id": default_run_id}
+            if default_agent_id and not raw.get("agent_id"):
+                raw = {**raw, "agent_id": default_agent_id}
+            try:
+                record = cost_mod.normalize_cost_record(raw, source="imported")
+            except ValueError as exc:
+                job["invalid_records"] = int(job.get("invalid_records") or 0) + 1
+                errors = job.setdefault("errors", [])
+                if len(errors) < cost_mod.MAX_IMPORT_ERRORS:
+                    errors.append({"error": str(exc)[:200]})
+                continue
+            record["source_system"] = source_system
+            if not record.get("source_id"):
+                record["source_id"] = "line-%d" % int(job["processed_records"])
+            record["record_id"] = cost_mod.record_id_for(source_system, str(record["source_id"]))
+            record["imported_at"] = imported_at
+            if record.get("total_cost") is None:
+                # No explicit cost: estimate only from a configured price.
+                estimate = cost_mod.estimate_cost(
+                    price_table,
+                    str(record.get("model") or ""),
+                    int(record.get("input_tokens") or 0),
+                    int(record.get("output_tokens") or 0),
+                )
+                if estimate is not None:
+                    record.update(estimate)
+                    record["source"] = "estimated"
+            job["imported_records"] = int(job.get("imported_records") or 0) + 1
+            batch.append(record)
+        return batch
+
+    def merge_batch(batch: List[Dict[str, Any]]) -> Callable[[], int]:
+        def do_merge() -> int:
+            if not batch:
+                return 0
+            existing = cost_mod.load_cost_records(platform_dir)
+            seen = {
+                (str(item.get("source_system") or ""), str(item.get("source_id") or ""))
+                for item in existing
+                if item.get("source_id")
+            }
+            duplicates = 0
+            merged = list(existing)
+            for record in batch:
+                key = (str(record.get("source_system") or ""), str(record.get("source_id") or ""))
+                if key in seen:
+                    duplicates += 1
+                    continue
+                seen.add(key)
+                merged.append(record)
+            if duplicates or len(merged) != len(existing):
+                cost_mod.save_cost_records(platform_dir, merged)
+            return duplicates
+
+        return do_merge
+
+    pending: List[Any] = []
+    pending_since_flush = 0
+    last_index = start_index
+    last_offset = start_offset
+    line_count = start_index
+    for index, raw, offset in langfuse_adapter.iter_file_records(
+        path, start_index=start_index, start_byte_offset=start_offset
+    ):
+        _check_cancel(import_id, settings, worker_id, cancel_event, store)
+        line_count += 1
+        if line_count > cost_mod.MAX_IMPORT_LINES:
+            import_jobs.record_warning(job, "import stopped at the %d line limit" % cost_mod.MAX_IMPORT_LINES)
+            break
+        pending.append(raw)
+        pending_since_flush += 1
+        last_index, last_offset = index, offset
+        if pending_since_flush >= batch_size:
+            batch = process(pending)
+            job = _flush(
+                job,
+                settings,
+                worker_id,
+                cancel_event,
+                store,
+                position={"index": last_index, "byte_offset": last_offset},
+                merge=merge_batch(batch),
+            )
+            pending, pending_since_flush = [], 0
+    batch = process(pending)
+    job = _flush(
+        job,
+        settings,
+        worker_id,
+        cancel_event,
+        store,
+        position={"index": last_index, "byte_offset": last_offset},
+        merge=merge_batch(batch),
     )
     return job

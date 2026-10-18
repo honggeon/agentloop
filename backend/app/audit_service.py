@@ -48,8 +48,10 @@ AUDIT_ACTIONS = frozenset(
         "price_version_delete",
         "import_create",
         "import_cancel",
+        "import_pause",
         "import_retry",
         "import_resume",
+        "import_stale",
         "promptfoo_draft_approve",
         "promptfoo_draft_reject",
         "promptfoo_draft_archive",
@@ -58,6 +60,11 @@ AUDIT_ACTIONS = frozenset(
         "index_resume",
         "watcher_enable",
         "watcher_disable",
+        "auth_logout",
+        "user_roles_update",
+        "backup_create",
+        "backup_restore",
+        "migration_run",
     }
 )
 

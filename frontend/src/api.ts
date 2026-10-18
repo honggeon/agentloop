@@ -2,6 +2,56 @@
 // 需要直连远程后端时，显式设置 VITE_API_BASE_URL（会重新引入跨域，需在 CORS_ORIGINS 放行）。
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
+// --- Phase 5：浏览器 Bearer token（sessionStorage） ------------------------------
+// token 只存 sessionStorage（关闭标签页即失效），不落 localStorage，缩小 XSS 窃取窗口。
+const AUTH_TOKEN_STORAGE_KEY = "auditrail.auth_token";
+
+export function getAuthToken(): string | null {
+  try {
+    return window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // sessionStorage 不可用（隐私模式等）时静默降级：本次会话不携带 token。
+  }
+}
+
+export function clearAuthToken(): void {
+  try {
+    window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    // 同上，忽略存储不可用。
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// 统一认证跳转：401（token 缺失/过期/无效）清空 token 并回登录页（带 next 回跳）；
+// 403（已认证但权限不足）跳无权限页。只在响应失败分支调用，不影响正常响应与 SSE 流。
+function handleAuthRedirect(status: number): void {
+  if (typeof window === "undefined") return;
+  if (status === 401) {
+    clearAuthToken();
+    if (window.location.pathname !== "/login") {
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+    }
+  } else if (status === 403) {
+    if (window.location.pathname !== "/403") {
+      window.location.assign("/403");
+    }
+  }
+}
+
 export interface RunItem {
   name: string;
   path: string;
@@ -776,8 +826,9 @@ export function respondDshAcpPermission(
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`);
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers: authHeaders() });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -1561,8 +1612,10 @@ export function importCosts(payload: {
   return apiPostJson<CostImportReport>("/api/costs/import", payload);
 }
 
-export function fetchCostImport(importId: string): Promise<CostImportReport> {
-  return apiGet<CostImportReport>(`/api/costs/imports/${encodeURIComponent(importId)}`);
+// Phase 5 起返回与集成导入同形的 ImportJob job view（含状态机与控制字段）；
+// 早期同步导入的 CostImportReport 仍由 POST /api/costs/import 返回。
+export function fetchCostImport(importId: string): Promise<ImportJob> {
+  return apiGet<ImportJob>(`/api/costs/imports/${encodeURIComponent(importId)}`);
 }
 
 // 本地运行索引管理（无生产级权限控制，后端响应含 authority: "local"）。
@@ -1868,10 +1921,11 @@ export function fetchIntegrationImports(): Promise<{ imports: IntegrationImport[
 export async function apiPostJsonWithHeaders<T>(path: string, body: unknown, headers: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...headers },
     body: JSON.stringify(body)
   });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -1907,16 +1961,18 @@ export async function startLocalServices(): Promise<LauncherResult> {
 }
 
 export async function apiDownload(path: string): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}${path}`);
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers: authHeaders() });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.blob();
 }
 
 export async function apiPost<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: "POST" });
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: "POST", headers: authHeaders() });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -1929,18 +1985,20 @@ export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
 export async function apiPutJson<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body)
   });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: "DELETE" });
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: "DELETE", headers: authHeaders() });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
@@ -1949,10 +2007,11 @@ export async function apiDelete<T>(path: string): Promise<T> {
 export async function streamPostJson(path: string, body: unknown, onEvent: (event: LiveEvent) => void): Promise<void> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body)
   });
   if (!response.ok) {
+    handleAuthRedirect(response.status);
     throw new Error(await response.text());
   }
   if (!response.body) {
@@ -2027,11 +2086,11 @@ export function apiErrorMessage(err: unknown): string {
   return raw;
 }
 
-// GET /api/auth/context：当前身份、角色与能力开关。production_ready 恒为 false。
+// GET /api/auth/context：当前身份、角色与能力开关。production_ready 恒为 false（local/disabled）。
 export interface AuthContext {
-  auth_mode: "local" | "disabled" | string;
-  role: "viewer" | "operator" | "admin" | string;
-  actor: string;
+  auth_mode: "local" | "disabled" | "oidc" | "jwt" | string;
+  role: "viewer" | "operator" | "admin" | "owner" | string | null;
+  actor: string | null;
   roles: string[];
   permissions: {
     import: boolean;
@@ -2041,12 +2100,25 @@ export interface AuthContext {
     manage_agents: boolean;
     manage_index: boolean;
   };
+  // Phase 5 细粒度能力列表（RBAC capability model），permissions 是兼容布尔映射。
+  capabilities: string[];
+  authenticated: boolean;
+  tenant?: { tenant_id: string; single_tenant: boolean };
   note: string;
   production_ready: boolean;
+  user?: { subject?: string | null; email?: string | null; display_name?: string | null } | null;
+  // 仅 oidc 模式返回：浏览器跳转登录 / 登出入口。
+  login_url?: string;
+  logout_url?: string;
 }
 
 export function fetchAuthContext(): Promise<AuthContext> {
   return apiGet<AuthContext>("/api/auth/context");
+}
+
+// POST /api/auth/logout：无状态确认，前端随后丢弃本地 token。仅 oidc 模式调用。
+export function logout(): Promise<{ status: string }> {
+  return apiPost<{ status: string }>("/api/auth/logout");
 }
 
 // --- ImportJob 状态机 -----------------------------------------------------
@@ -2125,6 +2197,13 @@ export interface ImportJob {
   heartbeat_at?: string | null;
   lease_expires_at?: string | null;
   legacy_report?: boolean;
+  // Phase 5：租约版本、尝试计数与队列降级标记（status 响应同样携带）。
+  lease_version?: number;
+  attempt_count?: number;
+  max_attempts?: number;
+  next_retry_at?: string | null;
+  pause_requested?: boolean;
+  queue_degraded?: boolean;
 }
 
 // 列表行（GET /api/integrations/imports 的 imports 数组元素）。
@@ -2191,15 +2270,24 @@ export interface ImportJobStatusPayload {
   created_at?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  // Phase 5 新增：租约版本、尝试计数与队列降级标记。
+  lease_version?: number;
+  attempt_count?: number;
+  max_attempts?: number;
+  next_retry_at?: string | null;
+  pause_requested?: boolean;
+  queue_degraded?: boolean;
 }
 
-// POST retry/resume 的 202 响应。
+// POST retry/resume 的 202 响应。queue_degraded=true 表示队列不可达、
+// 任务已标记降级，等待队列恢复后自动续跑。
 export interface ImportJobResumeResult {
   import_id: string;
   status: ImportJobStatus;
   retry_count: number;
   resumed_from_checkpoint: boolean;
   restart_from_beginning?: boolean;
+  queue_degraded?: boolean;
   status_url: string;
   auth_mode?: string;
   role?: string;
@@ -2252,6 +2340,33 @@ export function retryImportJob(importId: string): Promise<ImportJobResumeResult>
 
 export function resumeImportJob(importId: string): Promise<ImportJobResumeResult> {
   return apiPost<ImportJobResumeResult>(`/api/integrations/imports/${encodeURIComponent(importId)}/resume`);
+}
+
+// 协作式暂停：worker 在下一个批次/分页边界停下并释放租约，进行中的记录可能完成。
+// 返回完整 ImportJob（与 cancel 同形状）。
+export function pauseImport(importId: string): Promise<ImportJob> {
+  return apiPost<ImportJob>(`/api/integrations/imports/${encodeURIComponent(importId)}/pause`);
+}
+
+// --- 成本导入（kind === "cost_records"） ----------------------------------------
+// 与集成导入共用同一状态机；GET /api/costs/imports/{id} 返回同形 job view
+// （fetchCostImport，见上文 Phase 2 成本区块），详情页按 kind 选择 costs 或
+// integrations 的控制端点。
+
+export function pauseCostImport(importId: string): Promise<ImportJob> {
+  return apiPost<ImportJob>(`/api/costs/imports/${encodeURIComponent(importId)}/pause`);
+}
+
+export function resumeCostImport(importId: string): Promise<ImportJobResumeResult> {
+  return apiPost<ImportJobResumeResult>(`/api/costs/imports/${encodeURIComponent(importId)}/resume`);
+}
+
+export function retryCostImport(importId: string): Promise<ImportJobResumeResult> {
+  return apiPost<ImportJobResumeResult>(`/api/costs/imports/${encodeURIComponent(importId)}/retry`);
+}
+
+export function cancelCostImport(importId: string): Promise<ImportJob> {
+  return apiPost<ImportJob>(`/api/costs/imports/${encodeURIComponent(importId)}/cancel`);
 }
 
 // --- promptfoo 草稿审核 -----------------------------------------------------
@@ -2441,4 +2556,195 @@ export function pauseRunIndex(): Promise<RunIndexPauseResult> {
 
 export function resumeRunIndex(): Promise<RunIndexPauseResult> {
   return apiPost<RunIndexPauseResult>("/api/admin/run-index/resume");
+}
+
+// --- Phase 5：readiness、平台健康、worker、迁移、备份、用户管理 --------------------
+
+// GET /api/health/ready 与 GET /api/admin/health 共用同一报告形状。
+// not_ready 时 /api/health/ready 返回 503，但 body 仍是完整报告。
+export type ReadinessStatus = "ready" | "degraded" | "not_ready" | string;
+
+export interface ReadinessCheck {
+  name: string;
+  critical: boolean;
+  status: "ok" | "fail" | "skipped" | "unknown" | string;
+  detail?: string | null;
+}
+
+export interface ReadinessImportFailure {
+  import_id: string;
+  source_system?: string;
+  status?: string;
+  error_code?: string | null;
+}
+
+export interface ReadinessOperational {
+  stale_import_jobs: number;
+  queue_degraded_jobs: number;
+  recent_import_failures: ReadinessImportFailure[];
+  index_watcher: { status?: string; paused?: boolean; [key: string]: unknown };
+  run_index: { status?: string; [key: string]: unknown };
+}
+
+export interface ReadinessReport {
+  status: ReadinessStatus;
+  timestamp?: string;
+  deployment_mode: string;
+  storage_mode: string;
+  queue_mode: string;
+  auth_mode: string;
+  single_tenant: boolean;
+  checks: ReadinessCheck[];
+  operational: ReadinessOperational;
+  degraded_reasons: string[];
+}
+
+export const READINESS_STATUS_LABELS: Record<string, string> = {
+  ready: "就绪",
+  degraded: "降级",
+  not_ready: "未就绪"
+};
+
+export const READINESS_CHECK_STATUS_LABELS: Record<string, string> = {
+  ok: "正常",
+  fail: "失败",
+  skipped: "跳过",
+  unknown: "未知"
+};
+
+// readiness 端点对未认证请求也可能返回 503：两种情况都解析 body，不当作普通错误。
+export async function fetchReadiness(): Promise<ReadinessReport> {
+  const response = await fetch(`${API_BASE_URL}/api/health/ready`, { headers: authHeaders() });
+  if (response.ok || response.status === 503) {
+    return response.json() as Promise<ReadinessReport>;
+  }
+  handleAuthRedirect(response.status);
+  throw new Error(await response.text());
+}
+
+export function fetchAdminHealth(): Promise<ReadinessReport> {
+  return apiGet<ReadinessReport>("/api/admin/health");
+}
+
+// --- Worker 状态 ------------------------------------------------------------------
+
+export interface AdminWorker {
+  worker_id: string;
+  pid?: number | null;
+  started_at?: string | null;
+  heartbeat_at?: string | null;
+  status: string;
+  seconds_since_heartbeat?: number | null;
+}
+
+export interface EmbeddedWorkerStatus {
+  worker_id?: string;
+  running?: boolean;
+  executed_jobs?: number;
+  claim_errors?: number;
+  mode?: string;
+}
+
+export interface AdminWorkersPayload {
+  workers: AdminWorker[];
+  registry_available: boolean;
+  embedded_worker: EmbeddedWorkerStatus | null;
+  queue_mode: string;
+  queue_reachable: boolean;
+  auth_mode?: string;
+}
+
+export function fetchAdminWorkers(): Promise<AdminWorkersPayload> {
+  return apiGet<AdminWorkersPayload>("/api/admin/workers");
+}
+
+// --- 数据库迁移（viewer 可读，apply 需要 admin） -------------------------------------
+
+export interface MigrationApplied {
+  version: number;
+  name: string;
+  applied_at?: string | null;
+}
+
+export interface AdminMigrationsState {
+  storage_mode: string;
+  required: boolean;
+  up_to_date: boolean;
+  pending: number[];
+  applied: MigrationApplied[];
+  current_version: number;
+  schema_version_target: number;
+  // 仅 POST apply 的响应携带：本次新应用的版本列表。
+  applied_now?: number[];
+  auth_mode?: string;
+}
+
+export function fetchAdminMigrations(): Promise<AdminMigrationsState> {
+  return apiGet<AdminMigrationsState>("/api/admin/migrations");
+}
+
+export function applyMigrations(): Promise<AdminMigrationsState> {
+  return apiPost<AdminMigrationsState>("/api/admin/migrations/apply");
+}
+
+// --- 平台备份（runs/ 证据不在平台备份内，见 note） ------------------------------------
+
+export interface AdminBackupSummary {
+  backup_id: string;
+  created_at?: string | null;
+  file_count: number;
+  table_count: number;
+  contains_secrets: boolean;
+}
+
+export interface AdminBackupsPayload {
+  backups: AdminBackupSummary[];
+  backup_root_configured: boolean;
+  note?: string;
+  auth_mode?: string;
+}
+
+export interface AdminBackupCreateResult {
+  backup_id: string;
+  created_at?: string | null;
+  components: Record<string, { file_count?: number; table_count?: number; entries?: unknown }>;
+  contains_secrets: boolean;
+  auth_mode?: string;
+}
+
+export function fetchAdminBackups(): Promise<AdminBackupsPayload> {
+  return apiGet<AdminBackupsPayload>("/api/admin/backups");
+}
+
+export function createAdminBackup(): Promise<AdminBackupCreateResult> {
+  return apiPost<AdminBackupCreateResult>("/api/admin/backups");
+}
+
+// --- 用户管理（users:admin = owner） -------------------------------------------------
+
+export interface AdminUser {
+  user_id: string;
+  issuer?: string | null;
+  subject?: string | null;
+  email?: string | null;
+  display_name?: string | null;
+  roles: string[];
+  status?: string;
+  last_seen_at?: string | null;
+}
+
+export interface AdminUsersPayload {
+  users: AdminUser[];
+  available: boolean;
+  note?: string;
+  auth_mode?: string;
+}
+
+export function fetchAdminUsers(): Promise<AdminUsersPayload> {
+  return apiGet<AdminUsersPayload>("/api/admin/users");
+}
+
+// 角色整体替换（不是增量）：body 是目标角色全集。仅 owner 可调。
+export function updateUserRoles(userId: string, roles: string[]): Promise<{ user: AdminUser }> {
+  return apiPutJson<{ user: AdminUser }>(`/api/admin/users/${encodeURIComponent(userId)}/roles`, { roles });
 }

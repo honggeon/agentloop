@@ -3782,3 +3782,89 @@ body {
   gap: 12px;
   margin-top: 12px;
 }
+
+/* --- Phase 5：认证 / readiness / 导入暂停 ------------------------------------ */
+
+.banner.warning {
+  border-color: #e7c877;
+  background: rgba(176, 118, 20, 0.1);
+  color: #8a5a08;
+}
+
+.banner.success {
+  background: rgba(22, 122, 74, 0.08);
+}
+
+.global-readiness {
+  margin-bottom: 12px;
+}
+
+.global-readiness a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.sidebar-user {
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 10px;
+}
+
+.sidebar-user .user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-user .user-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user .user-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.sidebar-user .user-link {
+  font-size: 0.75rem;
+  color: var(--muted, #64748b);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.sidebar-user .user-link:hover {
+  color: inherit;
+}
+
+.sidebar-auth-banner {
+  margin: 0 0 12px;
+}
+
+/* readiness / 健康检查状态徽标 */
+.chip[data-status="ready"],
+.chip[data-status="ok"] {
+  color: #177a4c;
+  background: rgba(22, 122, 74, 0.12);
+}
+
+.chip[data-status="degraded"],
+.chip[data-status="paused"] {
+  color: #8a5a08;
+  background: rgba(176, 118, 20, 0.14);
+}
+
+.chip[data-status="not_ready"],
+.chip[data-status="fail"] {
+  color: #b3261e;
+  background: rgba(179, 38, 30, 0.12);
+}

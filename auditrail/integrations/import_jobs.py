@@ -101,6 +101,7 @@ NON_RETRYABLE_ERROR_CODES = frozenset(
         "source_rejected",
         "invalid_import",
         "import_cancelled",
+        "import_paused",
         "import_conflict",
     }
 )
@@ -175,6 +176,14 @@ def new_import_job(
         "invalid_records": 0,
         "failed_records": 0,
         "retry_count": 0,
+        # Phase 5: fencing token and attempt bookkeeping. ``lease_version``
+        # increments on every claim; state writes from a stale lease are
+        # rejected. ``attempt_count`` counts claims, ``max_attempts`` bounds
+        # them; ``next_retry_at`` schedules automatic retryable re-drives.
+        "lease_version": 0,
+        "attempt_count": 0,
+        "max_attempts": MAX_RETRY_COUNT,
+        "next_retry_at": None,
         "checkpoint_at": None,
         "checkpoint": None,
         "restart_from_beginning": bool(restart_from_beginning),
@@ -185,6 +194,7 @@ def new_import_job(
         "worker_id": None,
         "heartbeat_at": None,
         "lease_expires_at": None,
+        "pause_requested": False,
         "actor": (str(actor)[:64] if actor else None),
         # Filled by the worker at finalization: the Phase 3 import report.
         "report": None,
@@ -214,10 +224,12 @@ def validate_transition(current: Any, target: str) -> str:
     if target not in JOB_STATUSES:
         raise ImportJobError("import_invalid_state", "unknown import job status %r" % target, retryable=False)
     legal = {
-        "queued": {"validating", "cancelled", "stale"},
-        "validating": {"running", "failed", "cancelled", "stale"},
-        "running": {"completed", "partial", "failed", "cancelled", "paused", "stale"},
-        "paused": {"running", "cancelled", "stale"},
+        "queued": {"validating", "cancelled", "stale", "paused"},
+        # validating/running -> queued is the Phase 5 retry-backoff requeue:
+        # the lease is released and ``next_retry_at`` schedules the re-drive.
+        "validating": {"running", "failed", "cancelled", "stale", "paused", "queued"},
+        "running": {"completed", "partial", "failed", "cancelled", "paused", "stale", "queued"},
+        "paused": {"running", "queued", "cancelled", "stale"},
         "stale": {"queued"},
         "failed": {"queued"},
         "partial": {"queued"},
@@ -259,9 +271,17 @@ def transition(
         job["started_at"] = None
         job["finished_at"] = None
         job["cancel_requested"] = False
+        job["pause_requested"] = False
         job["worker_id"] = None
         job["heartbeat_at"] = None
         job["lease_expires_at"] = None
+        job["next_retry_at"] = None
+    if status == "paused":
+        # Pausing releases the lease: a resume re-queues for a fresh claim.
+        job["worker_id"] = None
+        job["heartbeat_at"] = None
+        job["lease_expires_at"] = None
+        job["pause_requested"] = False
     if error is not None:
         job["error"] = {
             "code": str(error.get("code") or "invalid_import")[:64],
@@ -371,6 +391,53 @@ def request_cancel(job: Dict[str, Any]) -> Dict[str, Any]:
 def raise_if_cancelled(job: Dict[str, Any]) -> None:
     if job.get("cancel_requested"):
         raise ImportJobError("import_cancelled", "import job cancellation was requested", retryable=False)
+
+
+# ---------------------------------------------------------------------------
+# pause / resume (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def request_pause(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist the cooperative pause flag from an active status.
+
+    Pause is a boundary stop: the worker finishes the record in flight, then
+    halts before the next page/batch and lands in ``paused`` with the lease
+    released. Queued (not yet claimed) jobs transition to ``paused``
+    immediately. Terminal jobs raise ``ImportJobError``; an already-paused
+    job is an idempotent no-op.
+    """
+    job = dict(job)
+    status = str(job.get("status") or "")
+    if status == "paused":
+        return job
+    if status in TERMINAL_STATUSES or status == "stale":
+        raise ImportJobError(
+            "import_invalid_state",
+            "import job is %s and cannot be paused" % status,
+            retryable=False,
+        )
+    if status == "queued":
+        job = transition(job, "paused")
+        return job
+    job["pause_requested"] = True
+    return job
+
+
+def raise_if_paused(job: Dict[str, Any]) -> None:
+    if job.get("pause_requested"):
+        raise ImportJobError("import_paused", "import job pause was requested", retryable=False)
+
+
+def prepare_resume(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-queue a paused job so the next claim continues from its checkpoint."""
+    if str(job.get("status") or "") != "paused":
+        raise ImportJobError(
+            "import_invalid_state",
+            "only paused import jobs can be resumed (current: %s)" % job.get("status"),
+            retryable=False,
+        )
+    return transition(dict(job), "queued", phase="validating")
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +616,10 @@ def job_view(record: Dict[str, Any]) -> Dict[str, Any]:
         "invalid_records": record.get("invalid_records"),
         "failed_records": 0,
         "retry_count": 0,
+        "lease_version": 0,
+        "attempt_count": 0,
+        "max_attempts": MAX_RETRY_COUNT,
+        "next_retry_at": None,
         "checkpoint_at": None,
         "checkpoint": None,
         "restart_from_beginning": True,
@@ -558,6 +629,7 @@ def job_view(record: Dict[str, Any]) -> Dict[str, Any]:
         "worker_id": None,
         "heartbeat_at": None,
         "lease_expires_at": None,
+        "pause_requested": False,
         "report": record,
     }
 

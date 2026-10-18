@@ -91,8 +91,8 @@ class Settings:
     #: Phase 4 local permission boundary. ``local`` (default): one configured
     #: identity (``auth_role``/``auth_actor``) authorizes requests;
     #: ``disabled`` allows everything and is a local-development-only mode
-    #: that must be surfaced in API responses and the UI. Neither is a
-    #: production authentication capability.
+    #: that must be surfaced in API responses and the UI. Phase 5 adds the
+    #: production modes ``oidc`` and ``jwt`` (server-verified Bearer tokens).
     auth_mode: str = "local"
     auth_role: str = "admin"
     auth_actor: str = ""
@@ -101,6 +101,59 @@ class Settings:
     import_lease_seconds: int = 60
     import_checkpoint_records: int = 100
     import_max_retries: int = 5
+
+    # ------------------------------------------------------------------
+    # Phase 5 production architecture (see docs/phase5-production-architecture.md)
+    # ------------------------------------------------------------------
+    #: Deployment shape. ``local``: developer machine, everything optional.
+    #: ``single_process``: one host, API + worker processes, database storage.
+    #: ``production``: multi-instance; requires database storage, a real auth
+    #: mode and (for multiple instances) the redis queue mode.
+    deployment_mode: str = "local"
+    #: Platform metadata store. ``file``: Phase 0-4 JSON files (default).
+    #: ``database``: the database is authoritative; files stay read-only
+    #: compatibility. ``dual``: database is the write master, files are
+    #: mirrored; reads prefer the database and degrade to files explicitly.
+    storage_mode: str = "file"
+    #: ImportJob execution infrastructure. ``inline``: in-process pool
+    #: (single process, no cross-process claims). ``local_worker``: workers
+    #: claim jobs with database transactions (cross-process, single host).
+    #: ``redis``: database stays the source of truth; a Redis list is only a
+    #: delivery hint on top of the database claim.
+    queue_mode: str = "inline"
+    #: ``sqlite:///path`` (embedded default) or ``postgresql://...`` conninfo
+    #: (psycopg; TLS via sslmode parameters in the URL). Never logged.
+    database_url: str = ""
+    redis_url: str = ""
+    #: OIDC/JWT verification settings (auth_mode=oidc|jwt). Secrets come from
+    #: the environment only and never enter logs, audit events or responses.
+    auth_required: bool = True
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_audience: str = ""
+    oidc_scopes: str = "openid,profile,email"
+    oidc_redirect_uri: str = ""
+    oidc_jwks_cache_seconds: int = 3600
+    #: Provider unreachable: cached JWKS may keep validating tokens for this
+    #: long after its last successful fetch; beyond it verification fails
+    #: closed (expired keys are never trusted indefinitely).
+    oidc_jwks_max_stale_seconds: int = 86400
+    oidc_clock_skew_seconds: int = 60
+    oidc_roles_claim: str = "roles"
+    #: HS256 shared secret for auth_mode=jwt (local/self-issued tokens). Empty
+    #: means jwt mode requires a JWKS-capable issuer just like oidc.
+    jwt_secret: str = ""
+    jwt_algorithms: tuple[str, ...] = ("RS256", "HS256")
+    #: Single-tenant boundary: the tenant id is server-owned configuration,
+    #: never accepted from requests. Multi-tenant deployment is not claimed.
+    tenant_id: str = "default"
+    #: Cross-process worker tuning (queue_mode=local_worker|redis).
+    worker_poll_interval_ms: int = 1000
+    worker_heartbeat_seconds: int = 15
+    #: Backup output root for the admin backup endpoint (CLI --output is
+    #: independent). Never contains secrets (see auditrail.platform_backup).
+    backup_dir: Path | None = None
 
 
 @lru_cache(maxsize=1)
@@ -142,14 +195,77 @@ def get_settings() -> Settings:
         run_index_debounce_ms=_positive_int("AUDITRAIL_RUN_INDEX_DEBOUNCE_MS", 500),
         run_index_max_batch=_positive_int("AUDITRAIL_RUN_INDEX_MAX_BATCH", 1000),
         run_index_poll_interval_ms=_positive_int("AUDITRAIL_RUN_INDEX_POLL_INTERVAL_MS", 2000),
-        auth_mode=_env_choice("AUDITRAIL_AUTH_MODE", "local", ("local", "disabled")),
-        auth_role=_env_choice("AUDITRAIL_AUTH_ROLE", "admin", ("viewer", "operator", "admin")),
+        auth_mode=_env_choice("AUDITRAIL_AUTH_MODE", "local", ("local", "disabled", "oidc", "jwt")),
+        auth_role=_env_choice("AUDITRAIL_AUTH_ROLE", "admin", ("viewer", "operator", "admin", "owner")),
         auth_actor=os.getenv("AUDITRAIL_AUTH_ACTOR", "").strip(),
         import_worker_enabled=_env_bool("AUDITRAIL_IMPORT_WORKER", True),
         import_lease_seconds=_positive_int("AUDITRAIL_IMPORT_LEASE_SECONDS", 60),
         import_checkpoint_records=_positive_int("AUDITRAIL_IMPORT_CHECKPOINT_RECORDS", 100),
         import_max_retries=_positive_int("AUDITRAIL_IMPORT_MAX_RETRIES", 5),
+        deployment_mode=_env_choice(
+            "AUDITRAIL_DEPLOYMENT_MODE", "local", ("local", "single_process", "production")
+        ),
+        storage_mode=_env_choice("AUDITRAIL_STORAGE_MODE", "file", ("file", "database", "dual")),
+        queue_mode=_env_choice("AUDITRAIL_QUEUE_MODE", "inline", ("inline", "local_worker", "redis")),
+        database_url=os.getenv("AUDITRAIL_DATABASE_URL", "").strip(),
+        redis_url=os.getenv("AUDITRAIL_REDIS_URL", "").strip(),
+        auth_required=_env_bool("AUDITRAIL_AUTH_REQUIRED", True),
+        oidc_issuer_url=os.getenv("AUDITRAIL_OIDC_ISSUER_URL", "").strip(),
+        oidc_client_id=os.getenv("AUDITRAIL_OIDC_CLIENT_ID", "").strip(),
+        oidc_client_secret=os.getenv("AUDITRAIL_OIDC_CLIENT_SECRET", "").strip(),
+        oidc_audience=os.getenv("AUDITRAIL_OIDC_AUDIENCE", "").strip(),
+        oidc_scopes=os.getenv("AUDITRAIL_OIDC_SCOPES", "openid,profile,email").strip(),
+        oidc_redirect_uri=os.getenv("AUDITRAIL_OIDC_REDIRECT_URI", "").strip(),
+        oidc_jwks_cache_seconds=_positive_int("AUDITRAIL_OIDC_JWKS_CACHE_SECONDS", 3600),
+        oidc_jwks_max_stale_seconds=_positive_int("AUDITRAIL_OIDC_JWKS_MAX_STALE_SECONDS", 86400),
+        oidc_clock_skew_seconds=int(os.getenv("AUDITRAIL_OIDC_CLOCK_SKEW_SECONDS", "60")),
+        oidc_roles_claim=os.getenv("AUDITRAIL_OIDC_ROLES_CLAIM", "roles").strip() or "roles",
+        jwt_secret=os.getenv("AUDITRAIL_JWT_SECRET", "").strip(),
+        jwt_algorithms=_csv_values(os.getenv("AUDITRAIL_JWT_ALGORITHMS", "RS256,HS256")) or ("RS256", "HS256"),
+        tenant_id=os.getenv("AUDITRAIL_TENANT_ID", "default").strip() or "default",
+        worker_poll_interval_ms=_positive_int("AUDITRAIL_WORKER_POLL_INTERVAL_MS", 1000),
+        worker_heartbeat_seconds=_positive_int("AUDITRAIL_WORKER_HEARTBEAT_SECONDS", 15),
+        backup_dir=_optional_path(os.getenv("AUDITRAIL_BACKUP_DIR")),
     )
+
+
+def resolved_database_url(settings: Settings | None = None) -> str:
+    """The effective database conninfo. When unset, storage modes that need a
+    database default to an embedded SQLite file under the platform directory
+    (single-host; PostgreSQL is required for production multi-instance)."""
+    current = settings or get_settings()
+    url = str(current.database_url or "").strip()
+    if url:
+        return url
+    return "sqlite:///%s" % (Path(current.platform_dir) / "auditrail.db")
+
+
+def validate_startup_settings(settings: Settings | None = None) -> None:
+    """Fail-fast startup validation. A production-shaped deployment with an
+    impossible combination (e.g. ``production + disabled auth``) must refuse
+    to start instead of silently running unauthenticated."""
+    current = settings or get_settings()
+    errors: list[str] = []
+    if current.deployment_mode == "production":
+        if current.auth_mode == "disabled":
+            errors.append("production deployment requires a real auth mode (not AUDITRAIL_AUTH_MODE=disabled)")
+        if current.storage_mode == "file":
+            errors.append("production deployment requires AUDITRAIL_STORAGE_MODE=database|dual")
+        if resolved_database_url(current).startswith("sqlite:"):
+            errors.append("production deployment requires PostgreSQL (SQLite is single-host only)")
+    if current.auth_mode in ("oidc", "jwt"):
+        if not current.oidc_issuer_url and not current.jwt_secret:
+            errors.append(
+                "auth_mode=%s requires AUDITRAIL_OIDC_ISSUER_URL or AUDITRAIL_JWT_SECRET" % current.auth_mode
+            )
+        if current.auth_mode == "oidc" and not current.oidc_issuer_url:
+            errors.append("auth_mode=oidc requires AUDITRAIL_OIDC_ISSUER_URL")
+    if current.queue_mode in ("local_worker", "redis") and current.storage_mode == "file":
+        errors.append("queue_mode=%s requires AUDITRAIL_STORAGE_MODE=database|dual" % current.queue_mode)
+    if current.queue_mode == "redis" and not current.redis_url:
+        errors.append("queue_mode=redis requires AUDITRAIL_REDIS_URL")
+    if errors:
+        raise ValueError("invalid startup configuration: %s" % "; ".join(errors))
 
 
 def build_dsh_runtime_config(settings: Settings | None = None) -> DshRuntimeConfig:

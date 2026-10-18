@@ -14,9 +14,9 @@ server-owned ``local_admin_enabled`` setting and every response states its
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from auditrail import run_index
 
@@ -50,26 +50,221 @@ def get_agent_costs(agent_id: str) -> dict[str, Any]:
 
 
 @router.post("/costs/import")
-def import_costs(payload: dict[str, Any]) -> dict[str, Any]:
+def import_costs(payload: dict[str, Any], idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")) -> Any:
+    """Create a cost ImportJob. Small/dry-run imports execute inline and
+    return the Phase 2-compatible report; large imports run asynchronously
+    on the worker (202 + ``status_url``). Same state machine as the
+    Langfuse/promptfoo imports."""
+    import uuid
+
+    from fastapi.responses import JSONResponse
+
+    from auditrail.integrations import import_jobs
+
+    from backend.app import audit_service, auth, import_worker, integration_service, queue_adapter
+
     settings = get_settings()
+    identity = auth.require_role(settings, "operator")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail={"code": "invalid_import", "message": "import payload must be an object"})
+    request_id = "req-%s" % uuid.uuid4().hex[:12]
+    fingerprint = integration_service.job_fingerprint("costs", payload)
+
+    if idempotency_key:
+        existing = integration_service.lookup_import_idempotency(idempotency_key, settings)
+        if existing is not None:
+            if existing.get("fingerprint") != fingerprint:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "idempotency_conflict", "message": "Idempotency-Key was already used with a different import payload"},
+                )
+            replay = cost_service.get_cost_import(str(existing.get("import_id") or ""), settings)
+            if replay is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "idempotency_conflict", "message": "Idempotency-Key references an import that no longer exists"},
+                )
+            body = _cost_job_response(replay)
+            body["idempotent_replay"] = True
+            body["auth_mode"] = identity["mode"]
+            status_code = 202 if replay.get("status") in import_jobs.ACTIVE_STATUSES else 200
+            return JSONResponse(status_code=status_code, content=body)
+
     try:
-        report = cost_service.import_costs(payload, settings)
+        job = cost_service.create_cost_import_job(payload, settings, actor=identity["actor"], idempotency_key=idempotency_key)
     except ValueError as exc:
         raise HTTPException(
             status_code=400, detail={"code": "invalid_import", "message": str(exc)}
         ) from exc
-    return report
+
+    import_id = str(job["import_id"])
+    try:
+        audit_service.append_event(
+            settings,
+            actor=identity["actor"],
+            role=identity["role"],
+            action="import_create",
+            resource_type="import_job",
+            resource_id=import_id,
+            result="success",
+        )
+    except audit_service.AuditLogError as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "audit_unavailable", "message": "审计日志写入失败：%s" % str(exc)[:200]}
+        ) from exc
+    if idempotency_key:
+        integration_service.store_import_idempotency(idempotency_key, fingerprint, import_id, settings)
+
+    if job.get("mode") == "sync":
+        finished = import_worker.execute_import_inline(import_id, settings)
+        body = _cost_job_response(import_jobs.job_view(finished))
+        body["auth_mode"] = identity["mode"]
+        body["request_id"] = request_id
+        return body
+
+    import_worker.submit_import(import_id, settings)
+    degraded = _deliver_async(import_id, settings)
+    body = {
+        "import_id": import_id,
+        "status": job.get("status"),
+        "mode": "async",
+        "queue_degraded": degraded,
+        "status_url": "/api/costs/imports/%s" % import_id,
+        "request_id": request_id,
+        "auth_mode": identity["mode"],
+    }
+    return JSONResponse(status_code=202, content=body)
+
+
+def _deliver_async(import_id: str, settings) -> bool:
+    """Broker hint for async jobs (see ``import_worker.deliver_async``)."""
+    from backend.app import import_worker
+
+    return import_worker.deliver_async(import_id, settings)
+
+
+def _cost_job_response(view: dict[str, Any]) -> dict[str, Any]:
+    """The sync/async response shape: the embedded legacy report when the
+    job finished, additive job fields always."""
+    report = view.get("report") if isinstance(view.get("report"), dict) else None
+    if report is None:
+        return {
+            "import_id": view.get("import_id"),
+            "source_system": view.get("source_system"),
+            "kind": view.get("kind"),
+            "status": view.get("status"),
+            "mode": view.get("mode"),
+            "job_status": view.get("status"),
+            "dry_run": bool(view.get("dry_run")),
+        }
+    body = dict(report)
+    body["mode"] = view.get("mode")
+    body["job_status"] = view.get("status")
+    return body
 
 
 @router.get("/costs/imports/{import_id}")
 def get_cost_import(import_id: str) -> dict[str, Any]:
-    report = cost_service.get_import_report(import_id, get_settings())
-    if report is None:
+    view = cost_service.get_cost_import(import_id, get_settings())
+    if view is None:
         raise HTTPException(
             status_code=404,
             detail={"code": "import_not_found", "message": "unknown cost import %s" % import_id},
         )
-    return report
+    return view
+
+
+@router.post("/costs/imports/{import_id}/cancel")
+def cancel_cost_import(import_id: str) -> dict[str, Any]:
+    return _control_cost_import(import_id, "cancel")
+
+
+@router.post("/costs/imports/{import_id}/pause")
+def pause_cost_import(import_id: str) -> dict[str, Any]:
+    return _control_cost_import(import_id, "pause")
+
+
+@router.post("/costs/imports/{import_id}/resume")
+@router.post("/costs/imports/{import_id}/retry")
+def resume_cost_import(import_id: str) -> Any:
+    return _control_cost_import(import_id, "resume")
+
+
+def _control_cost_import(import_id: str, action: str) -> Any:
+    """cancel/pause/resume for cost imports — identical semantics to the
+    integration ImportJob controls (same state machine, same audit)."""
+    import uuid
+
+    from fastapi.responses import JSONResponse
+
+    from auditrail.integrations import import_jobs
+
+    from backend.app import audit_service, auth, import_worker
+
+    settings = get_settings()
+    identity = auth.require_role(settings, "operator")
+    try:
+        if action == "cancel":
+            job = import_worker.request_cancel(import_id, settings)
+            audit_action = "import_cancel"
+        elif action == "pause":
+            job = import_worker.request_pause(import_id, settings)
+            audit_action = "import_pause"
+        else:
+            existing = cost_service.get_cost_import(import_id, settings)
+            if existing is None:
+                raise KeyError(import_id)
+            if str(existing.get("status") or "") == "paused":
+                job = import_worker.prepare_resume(import_id, settings)
+            else:
+                job = import_worker.prepare_retry(import_id, settings)
+            audit_action = "import_resume"
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail={"code": "import_not_found", "message": "unknown cost import %s" % import_id}
+        )
+    except import_jobs.ImportJobError as exc:
+        status_code = 409 if exc.code == "import_invalid_state" else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "message": str(exc)[:300], "retryable": exc.retryable},
+        ) from exc
+    if job is None:
+        raise HTTPException(
+            status_code=404, detail={"code": "import_not_found", "message": "unknown cost import %s" % import_id}
+        )
+    try:
+        audit_service.append_event(
+            settings,
+            actor=identity["actor"],
+            role=identity["role"],
+            action=audit_action,
+            resource_type="import_job",
+            resource_id=import_id,
+            result="success",
+        )
+    except audit_service.AuditLogError as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "audit_unavailable", "message": "审计日志写入失败：%s" % str(exc)[:200]}
+        ) from exc
+    if action == "resume":
+        import_worker.submit_import(import_id, settings)
+        _deliver_async(import_id, settings)
+        body = {
+            "import_id": import_id,
+            "status": job.get("status"),
+            "retry_count": job.get("retry_count"),
+            "resumed_from_checkpoint": bool(import_jobs.resume_position(job)),
+            "status_url": "/api/costs/imports/%s" % import_id,
+            "request_id": "req-%s" % uuid.uuid4().hex[:12],
+            "auth_mode": identity["mode"],
+        }
+        return JSONResponse(status_code=202, content=body)
+    view = cost_service.get_cost_import(import_id, settings) or job
+    if isinstance(view, dict):
+        view = dict(view)
+        view["auth_mode"] = identity["mode"]
+    return view
 
 
 # ------------------------------------------------------------- run index admin

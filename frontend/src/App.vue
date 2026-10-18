@@ -6,7 +6,13 @@ import {
   apiGet,
   canLaunchLocally,
   checkBackendHealth,
+  clearAuthToken,
+  fetchAuthContext,
+  fetchReadiness,
+  logout,
   startLocalServices,
+  type AuthContext,
+  type ReadinessReport,
   type RunItem
 } from "./api";
 
@@ -27,9 +33,26 @@ const collapsedHosts = ref<Record<string, boolean>>({});
 const backendDown = ref(false);
 const launcherBusy = ref(false);
 const launcherMessage = ref("");
+// Phase 5：全局身份与平台就绪状态（启动时各拉一次）。
+const authContext = ref<AuthContext | null>(null);
+const readiness = ref<ReadinessReport | null>(null);
+const logoutBusy = ref(false);
 
 const activeRunId = computed(() => (route.name === "run" ? String(route.params.runId || "") : ""));
 const analyzedCount = computed(() => runs.value.filter((item) => item.has_judge).length);
+
+// 当前用户展示：display_name > email > actor；无认证模式退回本地身份。
+const currentUserLabel = computed(() => {
+  const ctx = authContext.value;
+  if (!ctx) return "";
+  return ctx.user?.display_name || ctx.user?.email || ctx.actor || "本地用户";
+});
+const currentRole = computed(() => authContext.value?.role || "");
+const isAuthDisabled = computed(() => authContext.value?.auth_mode === "disabled");
+const isOidcMode = computed(() => authContext.value?.auth_mode === "oidc");
+// 仅 oidc 模式提供服务端登出入口；jwt/local/disabled 无需登出按钮。
+const canLogout = computed(() => isOidcMode.value && Boolean(authContext.value?.logout_url));
+const readinessDegradedReasons = computed(() => readiness.value?.degraded_reasons ?? []);
 
 const runGroups = computed<RunGroup[]>(() => {
   const buckets = new Map<string, RunItem[]>();
@@ -113,6 +136,37 @@ async function checkBackend() {
   backendDown.value = !(await checkBackendHealth());
 }
 
+async function loadAuthContext() {
+  try {
+    authContext.value = await fetchAuthContext();
+  } catch {
+    authContext.value = null;
+  }
+}
+
+async function loadReadiness() {
+  try {
+    readiness.value = await fetchReadiness();
+  } catch {
+    readiness.value = null;
+  }
+}
+
+// oidc 模式登出：先通知服务端（审计），再丢弃本地 token 并回登录页。
+async function logoutCurrentUser() {
+  if (logoutBusy.value) return;
+  logoutBusy.value = true;
+  try {
+    await logout();
+  } catch {
+    // 服务端登出失败也继续清理本地 token。
+  } finally {
+    clearAuthToken();
+    logoutBusy.value = false;
+    await router.push({ name: "login" });
+  }
+}
+
 async function startServices() {
   if (launcherBusy.value) return;
   launcherBusy.value = true;
@@ -146,6 +200,8 @@ provide("deleteRunById", removeRun);
 
 onMounted(loadRuns);
 onMounted(checkBackend);
+onMounted(loadAuthContext);
+onMounted(loadReadiness);
 </script>
 
 <template>
@@ -164,6 +220,20 @@ onMounted(checkBackend);
           <p>轨迹评测控制台</p>
         </div>
       </div>
+
+      <div v-if="authContext" class="sidebar-user" aria-label="当前用户">
+        <div class="user-row">
+          <span class="user-name">{{ currentUserLabel }}</span>
+          <span v-if="currentRole" class="chip" data-status="running">{{ currentRole }}</span>
+        </div>
+        <div class="user-actions">
+          <RouterLink class="user-link" :to="{ name: 'login' }">登录页</RouterLink>
+          <button v-if="canLogout" class="user-link logout" type="button" :disabled="logoutBusy" @click="logoutCurrentUser">
+            {{ logoutBusy ? "登出中…" : "登出" }}
+          </button>
+        </div>
+      </div>
+      <p v-if="isAuthDisabled" class="banner quiet sidebar-auth-banner">本地开发：认证已禁用，所有请求按本地身份放行。</p>
 
       <nav class="nav-block" aria-label="Primary">
         <RouterLink class="nav-link" :class="{ active: route.name === 'batch' }" to="/">
@@ -208,6 +278,31 @@ onMounted(checkBackend);
           <span class="nav-dot" aria-hidden="true"></span>
           <span class="nav-label">审计日志</span>
           <small>本地审计 · 运行索引</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'admin-health' }" to="/admin/health">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">平台健康</span>
+          <small>readiness · 依赖检查</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'admin-workers' }" to="/admin/workers">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">Worker</span>
+          <small>队列 · 注册表</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'admin-migrations' }" to="/admin/migrations">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">迁移</span>
+          <small>数据库 schema 版本</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'admin-backups' }" to="/admin/backups">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">备份</span>
+          <small>平台备份 · 恢复</small>
+        </RouterLink>
+        <RouterLink class="nav-link" :class="{ active: route.name === 'admin-users' }" to="/admin/users">
+          <span class="nav-dot" aria-hidden="true"></span>
+          <span class="nav-label">用户</span>
+          <small>用户注册表 · 角色</small>
         </RouterLink>
       </nav>
 
@@ -282,6 +377,14 @@ onMounted(checkBackend);
     </aside>
 
     <section class="workspace">
+      <p v-if="readiness?.status === 'not_ready'" class="banner error global-readiness" role="alert">
+        平台不可用：关键依赖未就绪，部分功能可能无法使用。详见
+        <RouterLink to="/admin/health">平台健康</RouterLink>。
+      </p>
+      <p v-else-if="readiness?.status === 'degraded'" class="banner warning global-readiness" role="alert">
+        平台处于降级状态：{{ readinessDegradedReasons.join("、") || "存在非关键依赖异常" }}。详见
+        <RouterLink to="/admin/health">平台健康</RouterLink>。
+      </p>
       <RouterView />
     </section>
 

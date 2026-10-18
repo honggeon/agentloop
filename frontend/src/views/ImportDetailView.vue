@@ -3,13 +3,19 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import {
   apiErrorMessage,
+  cancelCostImport,
   cancelImportJob,
   fetchAuthContext,
+  fetchCostImport,
   fetchImportJob,
   fetchImportJobStatus,
   IMPORT_JOB_PHASE_LABELS,
   IMPORT_JOB_STATUS_LABELS,
+  pauseCostImport,
+  pauseImport,
+  resumeCostImport,
   resumeImportJob,
+  retryCostImport,
   retryImportJob,
   type AuthContext,
   type ImportJob,
@@ -17,28 +23,43 @@ import {
 } from "../api";
 
 const route = useRoute();
-const POLL_INTERVAL_MS = 2000;
+const BASE_POLL_INTERVAL_MS = 2000;
+const MAX_POLL_INTERVAL_MS = 30000;
 const ACTIVE_STATUSES = new Set(["queued", "validating", "running", "paused"]);
-const RESUMABLE_STATUSES = new Set(["failed", "partial", "cancelled", "stale"]);
+const PAUSABLE_STATUSES = new Set(["queued", "validating", "running"]);
+const RESUMABLE_STATUSES = new Set(["failed", "partial", "cancelled", "stale", "paused"]);
 
 const importId = computed(() => String(route.params.importId || ""));
 const authContext = ref<AuthContext | null>(null);
 const job = ref<ImportJob | null>(null);
 const stale = ref(false);
+// 成本导入（kind === "cost_records"）走 /api/costs/imports 控制端点（同形 job view）。
+const isCostImport = ref(false);
 const loading = ref(false);
 const error = ref("");
 const actionError = ref("");
 const actionBusy = ref(false);
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let pollFailures = 0;
+let pollingActive = false;
 
 const isLocalDevMode = computed(() => authContext.value?.auth_mode === "disabled");
 const canImport = computed(() => Boolean(authContext.value?.permissions?.import));
 const isActive = computed(() => ACTIVE_STATUSES.has(String(job.value?.status)) && !stale.value);
+const isPausable = computed(() => PAUSABLE_STATUSES.has(String(job.value?.status)) && !stale.value && !job.value?.pause_requested);
 const isCancellable = computed(() => isActive.value && !job.value?.cancel_requested);
 const isResumable = computed(() => RESUMABLE_STATUSES.has(String(job.value?.status)) || stale.value);
 
+const canPause = computed(() => canImport.value && isPausable.value && !actionBusy.value);
 const canCancel = computed(() => canImport.value && isCancellable.value && !actionBusy.value);
 const canResume = computed(() => canImport.value && isResumable.value && !actionBusy.value);
+
+const pauseTitle = computed(() => {
+  if (!canImport.value) return "当前角色无导入权限（需要 operator）";
+  if (job.value?.pause_requested) return "已请求暂停，等待 worker 在批次边界停下";
+  if (!isPausable.value) return "仅排队中 / 校验中 / 运行中的任务可以暂停";
+  return "协作式暂停：worker 在下一个批次/分页边界停下并释放租约";
+});
 
 const cancelTitle = computed(() => {
   if (!canImport.value) return "当前角色无导入权限（需要 operator）";
@@ -49,7 +70,7 @@ const cancelTitle = computed(() => {
 
 const resumeTitle = computed(() => {
   if (!canImport.value) return "当前角色无导入权限（需要 operator）";
-  if (!isResumable.value) return "仅失败 / 部分完成 / 已取消 / 已失联的任务可以恢复";
+  if (!isResumable.value) return "仅失败 / 部分完成 / 已取消 / 已失联 / 已暂停的任务可以恢复";
   return "从最近一次 checkpoint 断点续跑";
 });
 
@@ -81,12 +102,28 @@ function applyStatus(payload: ImportJobStatusPayload) {
   job.value = { ...job.value, ...rest };
 }
 
+function isTerminalStatus(status: string): boolean {
+  return !ACTIVE_STATUSES.has(status);
+}
+
 async function loadDetail() {
   loading.value = true;
   error.value = "";
   try {
-    job.value = await fetchImportJob(importId.value);
+    try {
+      job.value = await fetchImportJob(importId.value);
+      isCostImport.value = String(job.value.kind || "") === "cost_records";
+    } catch (integrationErr) {
+      // 成本导入不在 integrations 详情端点下：回退到 costs 端点（同形 job view）。
+      try {
+        job.value = await fetchCostImport(importId.value);
+        isCostImport.value = true;
+      } catch {
+        throw integrationErr;
+      }
+    }
     stale.value = String(job.value.status) === "stale";
+    pollFailures = 0;
     if (isActive.value) {
       startPolling();
     } else {
@@ -101,24 +138,85 @@ async function loadDetail() {
   }
 }
 
-// 活跃状态每 2 秒轮询状态子集；终态或失联时停止。
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(async () => {
-    try {
+// 轮询降频策略：任务进入终态（completed/partial/failed/cancelled）即停止；
+// 页面不可见（document.hidden）时暂停，重新可见时恢复；
+// 连续失败 3 次后指数退避（2s → 4s → 8s …），最长 30s。
+function currentPollDelay(): number {
+  if (pollFailures < 3) return BASE_POLL_INTERVAL_MS;
+  return Math.min(MAX_POLL_INTERVAL_MS, BASE_POLL_INTERVAL_MS * 2 ** (pollFailures - 2));
+}
+
+function scheduleNextPoll() {
+  if (!pollingActive || pollTimer) return;
+  if (typeof document !== "undefined" && document.hidden) return;
+  pollTimer = setTimeout(runPollOnce, currentPollDelay());
+}
+
+async function runPollOnce() {
+  pollTimer = null;
+  if (!pollingActive) return;
+  try {
+    if (isCostImport.value) {
+      // 成本导入没有 /status 子端点，直接拉完整 job view。
+      const latest = await fetchCostImport(importId.value);
+      if (job.value) {
+        job.value = { ...job.value, ...latest };
+      }
+      stale.value = String(latest.status) === "stale";
+      if (isTerminalStatus(String(latest.status)) || stale.value) {
+        stopPolling();
+        return;
+      }
+    } else {
       const payload = await fetchImportJobStatus(importId.value);
       applyStatus(payload);
-      if (!ACTIVE_STATUSES.has(String(payload.status)) || payload.stale) stopPolling();
-    } catch {
-      stopPolling();
+      if (isTerminalStatus(String(payload.status)) || payload.stale) {
+        stopPolling();
+        return;
+      }
     }
-  }, POLL_INTERVAL_MS);
+    pollFailures = 0;
+  } catch {
+    pollFailures += 1;
+  }
+  scheduleNextPoll();
+}
+
+function startPolling() {
+  stopPolling();
+  pollingActive = true;
+  scheduleNextPoll();
 }
 
 function stopPolling() {
+  pollingActive = false;
   if (pollTimer) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  } else {
+    scheduleNextPoll();
+  }
+}
+
+async function pauseJob() {
+  if (!canPause.value) return;
+  actionBusy.value = true;
+  actionError.value = "";
+  try {
+    job.value = isCostImport.value ? await pauseCostImport(importId.value) : await pauseImport(importId.value);
+  } catch (err) {
+    actionError.value = apiErrorMessage(err);
+  } finally {
+    actionBusy.value = false;
   }
 }
 
@@ -127,7 +225,7 @@ async function cancelJob() {
   actionBusy.value = true;
   actionError.value = "";
   try {
-    job.value = await cancelImportJob(importId.value);
+    job.value = isCostImport.value ? await cancelCostImport(importId.value) : await cancelImportJob(importId.value);
   } catch (err) {
     actionError.value = apiErrorMessage(err);
   } finally {
@@ -140,10 +238,19 @@ async function resumeJob(useRetry: boolean) {
   actionBusy.value = true;
   actionError.value = "";
   try {
-    const action = useRetry ? retryImportJob : resumeImportJob;
+    const action = isCostImport.value
+      ? useRetry
+        ? retryCostImport
+        : resumeCostImport
+      : useRetry
+        ? retryImportJob
+        : resumeImportJob;
     const result = await action(importId.value);
     if (result.resumed_from_checkpoint === false && job.value) {
       actionError.value = "该任务将从头重新执行（无可用 checkpoint）。";
+    }
+    if (result.queue_degraded) {
+      actionError.value = "队列当前不可达，任务已标记为队列降级，恢复后自动续跑。";
     }
     await loadDetail();
   } catch (err) {
@@ -156,10 +263,12 @@ async function resumeJob(useRetry: boolean) {
 
 watch(importId, () => {
   stopPolling();
+  isCostImport.value = false;
   void loadDetail();
 });
 
 onMounted(async () => {
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   try {
     authContext.value = await fetchAuthContext();
   } catch {
@@ -167,7 +276,10 @@ onMounted(async () => {
   }
   void loadDetail();
 });
-onUnmounted(stopPolling);
+onUnmounted(() => {
+  stopPolling();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+});
 </script>
 
 <template>
@@ -178,8 +290,11 @@ onUnmounted(stopPolling);
         <h2 class="run-title">
           <span class="mono">{{ importId }}</span>
           <span v-if="job" class="chip" :data-status="displayStatus">{{ statusLabel(displayStatus) }}</span>
+          <span v-if="isCostImport" class="chip quiet">成本导入</span>
           <span v-if="stale" class="chip quiet">worker 已失联（stale）</span>
           <span v-if="job?.cancel_requested" class="chip quiet">已请求取消</span>
+          <span v-if="job?.pause_requested" class="chip quiet">已请求暂停</span>
+          <span v-if="job?.queue_degraded" class="chip warning">队列降级</span>
           <span v-if="job?.legacy_report" class="chip quiet">旧版导入报告</span>
         </h2>
         <p v-if="job" class="lede agent-header-meta">
@@ -191,10 +306,16 @@ onUnmounted(stopPolling);
           <span>开始：{{ job.started_at || "—" }}</span>
           <span>结束：{{ job.finished_at || "—" }}</span>
           <span v-if="job.worker_id">worker：{{ job.worker_id }}</span>
+          <span>尝试：{{ job.attempt_count ?? 0 }} / {{ job.max_attempts ?? "—" }}</span>
+          <span>租约版本：{{ job.lease_version ?? "—" }}</span>
+          <span v-if="job.next_retry_at">下次重试：{{ job.next_retry_at }}</span>
         </p>
       </div>
       <div class="hero-actions">
         <router-link class="back-link" :to="{ name: 'integration-imports' }">返回导入列表</router-link>
+        <button class="ghost" type="button" :disabled="!canPause" :title="pauseTitle" @click="pauseJob">
+          暂停导入
+        </button>
         <button class="ghost danger" type="button" :disabled="!canCancel" :title="cancelTitle" @click="cancelJob">
           取消导入
         </button>

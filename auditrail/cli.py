@@ -77,6 +77,57 @@ def main(argv=None) -> int:
     run_cases.add_argument("--no-write", action="store_true", help="Print results without writing report files.")
     run_cases.add_argument("--json", action="store_true", help="Print the full JSON report instead of the summary.")
 
+    # ------------------------------------------------------------------
+    # Phase 5: database schema + platform data migration + backup/restore
+    # ------------------------------------------------------------------
+
+    migrate_db = subparsers.add_parser(
+        "migrate-db", help="Apply pending schema migrations (idempotent; never runs implicitly at API startup)."
+    )
+    _add_db_args(migrate_db)
+    migrate_db.add_argument("--status", action="store_true", help="Only print migration status.")
+
+    migrate_platform = subparsers.add_parser(
+        "migrate-platform", help="Migrate platform metadata from files into the database (dry-run by default)."
+    )
+    _add_db_args(migrate_platform)
+    migrate_platform.add_argument("--source", default="file", choices=["file"])
+    migrate_platform.add_argument("--target", default="database", choices=["database"])
+    migrate_platform.add_argument("--dry-run", action="store_true", default=None, help="Preview only (default).")
+    migrate_platform.add_argument("--yes", action="store_true", help="Actually write (disables dry-run).")
+
+    verify_migration = subparsers.add_parser(
+        "verify-platform-migration", help="Compare file-side and database-side entity counts."
+    )
+    _add_db_args(verify_migration)
+
+    rollback = subparsers.add_parser(
+        "rollback-platform-migration",
+        help="Delete only the rows one migration imported (dry-run by default; never touches files or runs).",
+    )
+    _add_db_args(rollback)
+    rollback.add_argument("--migration-id", default=None, help="Defaults to the latest completed migration.")
+    rollback.add_argument("--dry-run", action="store_true", default=None)
+    rollback.add_argument("--yes", action="store_true", help="Actually delete (disables dry-run).")
+
+    backup = subparsers.add_parser("backup-platform", help="Backup platform files + database (no secrets, no run evidence).")
+    _add_db_args(backup, db_required=False)
+    backup.add_argument("--output", required=True, help="Backup output directory.")
+    backup.add_argument("--include-database", action="store_true", help="Also export database tables as JSONL.")
+
+    verify_backup = subparsers.add_parser("verify-platform-backup", help="Verify a backup manifest and checksums.")
+    verify_backup.add_argument("--backup", required=True, help="Backup directory (contains manifest.json).")
+
+    restore = subparsers.add_parser(
+        "restore-platform", help="Restore a backup (dry-run by default; never overwrites without --force)."
+    )
+    _add_db_args(restore, db_required=False)
+    restore.add_argument("--backup", required=True)
+    restore.add_argument("--restore-database", action="store_true", help="Also restore database tables.")
+    restore.add_argument("--force", action="store_true", help="Allow overlaying a non-empty platform directory.")
+    restore.add_argument("--dry-run", action="store_true", default=None)
+    restore.add_argument("--yes", action="store_true", help="Actually restore (disables dry-run).")
+
     args = parser.parse_args(argv)
     if args.command == "fetch-session":
         return _fetch_session(args)
@@ -96,8 +147,174 @@ def main(argv=None) -> int:
         return _import_dsh_session(args)
     if args.command == "run-cases":
         return _run_cases(args)
+    if args.command == "migrate-db":
+        return _migrate_db(args)
+    if args.command == "migrate-platform":
+        return _migrate_platform(args)
+    if args.command == "verify-platform-migration":
+        return _verify_platform_migration(args)
+    if args.command == "rollback-platform-migration":
+        return _rollback_platform_migration(args)
+    if args.command == "backup-platform":
+        return _backup_platform(args)
+    if args.command == "verify-platform-backup":
+        return _verify_platform_backup(args)
+    if args.command == "restore-platform":
+        return _restore_platform(args)
     parser.error("unknown command")
     return 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 platform administration commands
+# ---------------------------------------------------------------------------
+
+
+def _add_db_args(parser: argparse.ArgumentParser, *, db_required: bool = True) -> None:
+    parser.add_argument(
+        "--platform-dir",
+        default=None,
+        help="Platform data directory (default: AUDITRAIL_PLATFORM_DIR or ./platform).",
+    )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="sqlite:///path or postgresql://... (default: AUDITRAIL_DATABASE_URL or sqlite under --platform-dir).",
+    )
+
+
+def _platform_dir_arg(args) -> Path:
+    import os
+
+    raw = args.platform_dir or os.getenv("AUDITRAIL_PLATFORM_DIR") or "platform"
+    return Path(raw).expanduser()
+
+
+def _database_url_arg(args) -> str:
+    import os
+
+    url = args.database_url or os.getenv("AUDITRAIL_DATABASE_URL") or ""
+    if not url:
+        url = "sqlite:///%s" % (_platform_dir_arg(args) / "auditrail.db")
+    return url
+
+
+def _open_database(args):
+    from .db import Database
+
+    db = Database(_database_url_arg(args))
+    return db
+
+
+def _require_migrated(db) -> None:
+    """Data operations need the schema; the API/CLI never auto-migrates."""
+    from .db import MigrationError, migration_status
+
+    status = migration_status(db)
+    if not status.get("up_to_date"):
+        raise SystemExit(
+            "数据库 schema 未就绪（pending=%s）。请先运行 `auditrail migrate-db`。" % status.get("pending")
+        )
+
+
+def _migrate_db(args) -> int:
+    from .db import apply_migrations, migration_status
+
+    db = _open_database(args)
+    if args.status:
+        print(json.dumps(migration_status(db), ensure_ascii=False, indent=2))
+        return 0
+    applied = apply_migrations(db)
+    status = migration_status(db)
+    print(
+        "migrate-db: applied=%s current_version=%d up_to_date=%s"
+        % (applied or "[]", status["current_version"], status["up_to_date"])
+    )
+    return 0
+
+
+def _migrate_platform(args) -> int:
+    from . import platform_migrate
+
+    dry_run = not args.yes
+    db = _open_database(args)
+    _require_migrated(db)
+    report = platform_migrate.migrate_platform(_platform_dir_arg(args), db, dry_run=dry_run)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if dry_run:
+        print("dry-run：未写入任何数据。加 --yes 执行真实迁移。")
+    return 0
+
+
+def _verify_platform_migration(args) -> int:
+    from . import platform_migrate
+
+    db = _open_database(args)
+    _require_migrated(db)
+    report = platform_migrate.verify_platform_migration(_platform_dir_arg(args), db)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["consistent"] else 1
+
+
+def _rollback_platform_migration(args) -> int:
+    from . import platform_migrate
+
+    dry_run = not args.yes
+    db = _open_database(args)
+    _require_migrated(db)
+    migration_id = args.migration_id or platform_migrate.latest_migration_id(db)
+    if not migration_id:
+        print("没有可回滚的已完成迁移。")
+        return 1
+    report = platform_migrate.rollback_platform_migration(db, migration_id, dry_run=dry_run)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if dry_run:
+        print("dry-run：未删除任何数据。加 --yes 执行真实回滚。")
+    return 0
+
+
+def _backup_platform(args) -> int:
+    from . import platform_backup
+
+    db = None
+    if args.include_database:
+        db = _open_database(args)
+        _require_migrated(db)
+    manifest = platform_backup.backup_platform(_platform_dir_arg(args), Path(args.output), db=db)
+    print(
+        "backup %s created: files=%d tables=%d"
+        % (
+            manifest["backup_id"],
+            manifest["components"].get("platform_files", {}).get("file_count", 0),
+            manifest["components"].get("database", {}).get("table_count", 0),
+        )
+    )
+    return 0
+
+
+def _verify_platform_backup(args) -> int:
+    from . import platform_backup
+
+    result = platform_backup.verify_platform_backup(Path(args.backup))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["valid"] else 1
+
+
+def _restore_platform(args) -> int:
+    from . import platform_backup
+
+    dry_run = not args.yes
+    db = None
+    if args.restore_database:
+        db = _open_database(args)
+        _require_migrated(db)
+    report = platform_backup.restore_platform(
+        Path(args.backup), _platform_dir_arg(args), db=db, dry_run=dry_run, force=bool(args.force)
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if dry_run:
+        print("dry-run：未恢复任何数据。加 --yes 执行真实恢复。")
+    return 0
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:

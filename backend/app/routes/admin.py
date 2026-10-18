@@ -149,3 +149,151 @@ def resume_run_index() -> dict[str, Any]:
         "authority": "local",
         "auth_mode": identity["mode"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: platform health / workers / migrations / backups
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/health")
+def get_admin_health() -> dict[str, Any]:
+    """Detailed platform health: database, queue, storage, workers, stale
+    jobs, index, recent failures, audit writability. Never exposes secrets,
+    connection strings or absolute paths."""
+    from backend.app import health as health_mod
+
+    settings = get_settings()
+    auth.require_role(settings, "viewer")
+    return health_mod.readiness(settings)
+
+
+@router.get("/admin/workers")
+def get_admin_workers() -> dict[str, Any]:
+    """Worker registry + embedded worker status."""
+    settings = get_settings()
+    identity = auth.require_role(settings, "viewer")
+    from backend.app import job_store as job_store_mod, queue_adapter, worker_main
+
+    workers: list = []
+    registry_available = False
+    if job_store_mod.storage_mode(settings) != "file":
+        try:
+            store = job_store_mod.job_store(settings)
+            raw = getattr(store, "raw", None)
+            if raw is not None:
+                workers = raw.list_workers()
+                registry_available = True
+        except Exception:
+            registry_available = False
+    return {
+        "workers": workers,
+        "registry_available": registry_available,
+        "embedded_worker": worker_main.embedded_worker_status(),
+        "queue_mode": queue_adapter.queue_mode(settings),
+        "queue_reachable": queue_adapter.queue_ping(settings),
+        "auth_mode": identity["mode"],
+    }
+
+
+@router.get("/admin/migrations")
+def get_admin_migrations() -> dict[str, Any]:
+    """Schema migration status (applied/pending). Never auto-applies."""
+    settings = get_settings()
+    auth.require_role(settings, "viewer")
+    from backend.app import job_store as job_store_mod
+
+    return job_store_mod.migration_state(settings)
+
+
+@router.post("/admin/migrations/apply")
+def apply_admin_migrations() -> dict[str, Any]:
+    """Explicitly apply pending schema migrations (admin, audited)."""
+    settings = get_settings()
+    identity = auth.require_role(settings, "admin")
+    from auditrail.db import MigrationError, apply_migrations
+
+    from backend.app import job_store as job_store_mod
+
+    if job_store_mod.storage_mode(settings) == "file":
+        raise _error(400, "storage_file_mode", "storage_mode=file 不使用数据库，无需 migration")
+    try:
+        db = job_store_mod.database_for_settings(settings)
+        applied = apply_migrations(db)
+    except MigrationError as exc:
+        raise _error(500, "migration_failed", str(exc)) from exc
+    _audit(settings, identity, "migration_run", "database", "schema", reason="applied=%s" % (applied or []))
+    state = job_store_mod.migration_state(settings)
+    state["applied_now"] = applied
+    state["auth_mode"] = identity["mode"]
+    return state
+
+
+@router.get("/admin/backups")
+def list_admin_backups() -> dict[str, Any]:
+    """List backup manifests under the configured backup root."""
+    import json as json_mod
+
+    settings = get_settings()
+    identity = auth.require_role(settings, "viewer")
+    root = Path(settings.backup_dir) if settings.backup_dir else (Path(settings.platform_dir) / "backups")
+    backups: list = []
+    if root.is_dir():
+        for child in sorted(root.iterdir(), reverse=True):
+            manifest_path = child / "manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = json_mod.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json_mod.JSONDecodeError):
+                continue
+            components = manifest.get("components") or {}
+            backups.append(
+                {
+                    "backup_id": manifest.get("backup_id") or child.name,
+                    "created_at": manifest.get("created_at"),
+                    "file_count": (components.get("platform_files") or {}).get("file_count", 0),
+                    "table_count": (components.get("database") or {}).get("table_count", 0),
+                    "contains_secrets": bool(manifest.get("contains_secrets")),
+                }
+            )
+    return {
+        "backups": backups[:50],
+        "backup_root_configured": bool(settings.backup_dir),
+        "auth_mode": identity["mode"],
+        "note": "备份由 `auditrail backup-platform` / POST /api/admin/backups 创建；runs/ 证据不包含在内",
+    }
+
+
+@router.post("/admin/backups")
+def create_admin_backup() -> dict[str, Any]:
+    """Create a platform backup now (admin, audited). runs/ evidence is not
+    included — see docs/backup-restore.md."""
+    settings = get_settings()
+    identity = auth.require_role(settings, "admin")
+    from auditrail import platform_backup
+
+    root = Path(settings.backup_dir) if settings.backup_dir else (Path(settings.platform_dir) / "backups")
+    db = None
+    from backend.app import job_store as job_store_mod
+
+    if job_store_mod.storage_mode(settings) != "file":
+        try:
+            db = job_store_mod.database_for_settings(settings)
+        except Exception as exc:
+            raise _error(503, "storage_unavailable", "数据库不可用：%s" % type(exc).__name__, retryable=True) from exc
+    try:
+        manifest = platform_backup.backup_platform(Path(settings.platform_dir), root, db=db)
+    except ValueError as exc:
+        raise _error(400, "backup_failed", str(exc)) from exc
+    _audit(settings, identity, "backup_create", "backup", str(manifest.get("backup_id")))
+    return {
+        "backup_id": manifest.get("backup_id"),
+        "created_at": manifest.get("created_at"),
+        "components": {
+            name: {key: value for key, value in component.items() if key in ("file_count", "table_count", "entries")}
+            for name, component in (manifest.get("components") or {}).items()
+        },
+        "contains_secrets": False,
+        "auth_mode": identity["mode"],
+    }

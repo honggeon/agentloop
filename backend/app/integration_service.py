@@ -358,12 +358,15 @@ def create_import_job(
     settings: Settings,
     *,
     actor: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create and persist a queued ImportJob plus its payload sidecar.
 
     Validation (kind, source_file presence, path safety) happens here so a
     malformed request fails synchronously with 400 instead of queuing a job
-    that can never run.
+    that can never run. The job is persisted through the configured store
+    (file or database); the record carries the idempotency coordinates so
+    the database store enforces them with a unique constraint.
     """
     kind = str(payload.get("kind") or ("promptfoo_config" if source == "promptfoo" else "traces")).strip()
     source_file = payload.get("source_file")
@@ -389,18 +392,24 @@ def create_import_job(
 
     dry_run = bool(payload.get("dry_run"))
     mode = "async" if should_run_async(source, payload, settings) and not dry_run else "sync"
+    fingerprint = job_fingerprint(source, payload)
     job = import_jobs.new_import_job(
         source_system=source,
         source_type=source_type,
         kind=kind,
-        source_fingerprint=job_fingerprint(source, payload),
+        source_fingerprint=fingerprint,
         mode=mode,
         dry_run=dry_run,
         options=payload.get("options") if isinstance(payload.get("options"), dict) else {},
         actor=actor,
     )
+    job["request_fingerprint"] = fingerprint
+    if idempotency_key:
+        job["idempotency_key"] = str(idempotency_key)[:128]
+    from backend.app import job_store as job_store_mod
+
     with _LOCK:
-        import_jobs.save_import_job(Path(settings.platform_dir), job)
+        job_store_mod.job_store(settings).save(job)
         save_import_payload(
             str(job["import_id"]),
             {
@@ -436,7 +445,9 @@ def import_report_response(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_import_jobs(settings: Settings, *, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
-    records = import_jobs.list_import_jobs(Path(settings.platform_dir))
+    from backend.app import job_store as job_store_mod
+
+    records = job_store_mod.job_store(settings).list_jobs()
     total = len(records)
     limit = min(max(int(limit), 1), 200)
     offset = max(int(offset), 0)
@@ -452,12 +463,14 @@ def list_import_jobs(settings: Settings, *, limit: int = 50, offset: int = 0) ->
 
 
 def get_import_job(import_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
-    platform_dir = Path(settings.platform_dir)
-    import_jobs.refresh_stale_jobs(platform_dir)
-    record = import_jobs.load_import_job(platform_dir, import_id)
+    from backend.app import job_store as job_store_mod
+
+    store = job_store_mod.job_store(settings)
+    store.refresh_stale()
+    record = store.load(import_id)
     if record is None:
         # Legacy Phase 3 report files stay readable.
-        legacy = ext.load_external_import_report(platform_dir, import_id)
+        legacy = ext.load_external_import_report(Path(settings.platform_dir), import_id)
         if legacy is None:
             return None
         return import_jobs.job_view(legacy)

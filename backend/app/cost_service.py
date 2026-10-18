@@ -128,3 +128,103 @@ def import_costs(payload: Dict[str, Any], settings: Settings) -> Dict[str, Any]:
 
 def get_import_report(import_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
     return cost_mod.load_import_report(Path(settings.platform_dir), import_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: cost imports run through the unified ImportJob state machine
+# ---------------------------------------------------------------------------
+
+
+def create_cost_import_job(
+    payload: Dict[str, Any],
+    settings: Settings,
+    *,
+    actor: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate and persist a cost ImportJob (``kind="cost_records"``).
+
+    Same state machine as Langfuse/promptfoo imports: checkpointed, paused/
+    resumed/cancelled/retried identically. The per-record ``source_system``
+    (e.g. ``litellm``) is preserved for provenance; dispatch keys on
+    ``kind``. Small/dry-run imports stay synchronous, large files go async.
+    """
+    from auditrail.integrations import import_jobs
+
+    from backend.app import integration_service, job_store as job_store_mod
+
+    source_system = str(payload.get("source_system") or "").strip()
+    if not source_system:
+        raise ValueError("source_system is required")
+    if len(source_system) > 64:
+        raise ValueError("source_system must be at most 64 characters")
+    source_file = payload.get("source_file")
+    if source_file is None:
+        raise ValueError("source_file is required")
+    path = integration_service.resolve_import_source(source_file, settings)  # path safety now
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError("source_file is not readable: %s" % type(exc).__name__) from exc
+    if size > cost_mod.MAX_IMPORT_BYTES:
+        # Synchronous validation parity with the Phase 2 API contract (400).
+        raise ValueError("source_file exceeds the %d byte limit" % cost_mod.MAX_IMPORT_BYTES)
+
+    dry_run = bool(payload.get("dry_run"))
+    explicit_async = payload.get("async") is True or str(payload.get("mode") or "") == "async"
+    large = False
+    try:
+        large = path.stat().st_size > integration_service.ASYNC_FILE_THRESHOLD_BYTES
+    except OSError:
+        large = False
+    mode = "sync" if dry_run else ("async" if (explicit_async or large) else "sync")
+
+    fingerprint = integration_service.job_fingerprint("costs", payload)
+    job = import_jobs.new_import_job(
+        source_system=source_system,
+        source_type="file",
+        kind="cost_records",
+        source_fingerprint=fingerprint,
+        mode=mode,
+        dry_run=dry_run,
+        actor=actor,
+    )
+    job["request_fingerprint"] = fingerprint
+    if idempotency_key:
+        job["idempotency_key"] = str(idempotency_key)[:128]
+    default_run_id = payload.get("run_id")
+    default_agent_id = payload.get("agent_id")
+    job_store_mod.job_store(settings).save(job)
+    integration_service.save_import_payload(
+        str(job["import_id"]),
+        {
+            "source_file": source_file,
+            "kind": "cost_records",
+            "dry_run": dry_run,
+            "run_id": str(default_run_id).strip() if default_run_id else None,
+            "agent_id": str(default_agent_id).strip() if default_agent_id else None,
+        },
+        settings,
+    )
+    return job
+
+
+def get_cost_import(import_id: str, settings: Settings) -> Optional[Dict[str, Any]]:
+    """Job-aware read with legacy Phase 2 report fallback."""
+    from auditrail.integrations import import_jobs
+
+    from backend.app import job_store as job_store_mod
+
+    store = job_store_mod.job_store(settings)
+    store.refresh_stale()
+    record = store.load(import_id)
+    if record is not None and str(record.get("kind") or "") == "cost_records":
+        return import_jobs.job_view(record)
+    legacy = get_import_report(import_id, settings)
+    if legacy is not None:
+        legacy = dict(legacy)
+        legacy.setdefault("legacy_report", True)
+        return legacy
+    if record is not None:
+        return import_jobs.job_view(record)
+    return None

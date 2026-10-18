@@ -998,3 +998,272 @@ def test_phase4_sidebar_entries_exist():
     assert "草稿审核" in source
     assert 'to="/admin/audit-events"' in source
     assert "审计日志" in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 5：前端生产化 —— 登录/无权限页、readiness 横幅、平台管理页、导入暂停
+# ---------------------------------------------------------------------------
+
+LOGIN_VIEW = Path("frontend/src/views/LoginView.vue")
+FORBIDDEN_VIEW = Path("frontend/src/views/ForbiddenView.vue")
+ADMIN_HEALTH_VIEW = Path("frontend/src/views/AdminHealthView.vue")
+ADMIN_WORKERS_VIEW = Path("frontend/src/views/AdminWorkersView.vue")
+ADMIN_MIGRATIONS_VIEW = Path("frontend/src/views/AdminMigrationsView.vue")
+ADMIN_BACKUPS_VIEW = Path("frontend/src/views/AdminBackupsView.vue")
+ADMIN_USERS_VIEW = Path("frontend/src/views/AdminUsersView.vue")
+
+
+def test_phase5_routes_exist_with_name_and_title():
+    source = ROUTER.read_text(encoding="utf-8")
+    assert 'path: "/login"' in source
+    assert 'name: "login"' in source
+    assert 'meta: { title: "登录" }' in source
+    assert 'path: "/login/callback"' in source
+    assert 'name: "login-callback"' in source
+    assert "LoginView" in source
+    assert 'path: "/403"' in source
+    assert 'name: "forbidden"' in source
+    assert 'meta: { title: "无权限" }' in source
+    assert 'path: "/admin/health"' in source
+    assert 'name: "admin-health"' in source
+    assert 'meta: { title: "平台健康" }' in source
+    assert 'path: "/admin/workers"' in source
+    assert 'name: "admin-workers"' in source
+    assert 'meta: { title: "Worker 状态" }' in source
+    assert 'path: "/admin/migrations"' in source
+    assert 'name: "admin-migrations"' in source
+    assert 'meta: { title: "数据库迁移" }' in source
+    assert 'path: "/admin/backups"' in source
+    assert 'name: "admin-backups"' in source
+    assert 'meta: { title: "备份" }' in source
+    assert 'path: "/admin/users"' in source
+    assert 'name: "admin-users"' in source
+    assert 'meta: { title: "用户管理" }' in source
+    # catch-all 重定向与既有路由保持不变
+    assert 'path: "/:pathMatch(.*)*"' in source
+    assert 'redirect: "/"' in source
+    assert 'path: "/admin/audit-events"' in source
+
+
+def test_phase5_auth_token_and_response_handling_in_api():
+    source = API_TS.read_text(encoding="utf-8")
+    # token 只存 sessionStorage，key 固定
+    assert '"auditrail.auth_token"' in source
+    assert "sessionStorage" in source
+    assert "getAuthToken" in source
+    assert "setAuthToken" in source
+    assert "clearAuthToken" in source
+    assert "export function getAuthToken" in source
+    # 请求注入 Authorization: Bearer
+    assert "Authorization: `Bearer ${token}`" in source
+    # 统一 401 / 403 处理：清 token 跳登录（带 next），403 跳无权限页
+    assert "handleAuthRedirect" in source
+    assert "/login?next=" in source
+    assert '"/403"' in source
+    # AuthContext 扩展为 Phase 5 完整形状
+    for field in ("capabilities", "authenticated", "login_url", "logout_url", "production_ready"):
+        assert field in source, field
+    # readiness 与平台管理契约
+    for name in (
+        "ReadinessReport",
+        "ReadinessCheck",
+        "ReadinessOperational",
+        "AdminWorkersPayload",
+        "AdminMigrationsState",
+        "AdminBackupsPayload",
+        "AdminUsersPayload",
+        "AdminUser",
+    ):
+        assert name in source, name
+    for fn in (
+        "fetchAuthContext",
+        "logout",
+        "fetchReadiness",
+        "fetchAdminHealth",
+        "fetchAdminWorkers",
+        "fetchAdminMigrations",
+        "applyMigrations",
+        "fetchAdminBackups",
+        "createAdminBackup",
+        "fetchAdminUsers",
+        "updateUserRoles",
+        "pauseImport",
+        "pauseCostImport",
+        "resumeCostImport",
+        "retryCostImport",
+        "cancelCostImport",
+        "fetchCostImport",
+    ):
+        assert fn in source, fn
+    for path in (
+        "/api/auth/context",
+        "/api/auth/logout",
+        "/api/health/ready",
+        "/api/admin/health",
+        "/api/admin/workers",
+        "/api/admin/migrations",
+        "/api/admin/backups",
+        "/api/admin/users",
+        "/pause",
+        "/api/costs/imports/",
+    ):
+        assert path in source, path
+    # not_ready 时 503 的 body 也照常解析
+    assert "response.status === 503" in source
+    # ImportJob 状态机新增字段
+    for field in ("lease_version", "attempt_count", "max_attempts", "next_retry_at", "pause_requested", "queue_degraded"):
+        assert field in source, field
+
+
+def test_phase5_login_and_forbidden_views():
+    login_source = LOGIN_VIEW.read_text(encoding="utf-8")
+    forbidden_source = FORBIDDEN_VIEW.read_text(encoding="utf-8")
+
+    assert "登录" in login_source
+    assert "fetchAuthContext" in login_source
+    assert "setAuthToken" in login_source
+    assert "SSO 登录" in login_source
+    assert "login_url" in login_source
+    assert "进入看板" in login_source
+    assert "本地模式无需登录" in login_source
+    assert "仅开发调试" in login_source
+    # OIDC 回调 token 在 URL fragment 中解析
+    assert "window.location.hash" in login_source
+    assert "token" in login_source
+    # next 回跳目标页
+    assert "next" in login_source
+    assert "fetch(" not in login_source
+
+    assert "无权限" in forbidden_source
+    assert "当前角色" in forbidden_source
+    assert "返回首页" in forbidden_source
+    assert 'name: \'batch\'' in forbidden_source or 'name: "batch"' in forbidden_source
+    assert "fetch(" not in forbidden_source
+
+
+def test_phase5_admin_views_render_key_copy_without_direct_fetch():
+    views = (ADMIN_HEALTH_VIEW, ADMIN_WORKERS_VIEW, ADMIN_MIGRATIONS_VIEW, ADMIN_BACKUPS_VIEW, ADMIN_USERS_VIEW)
+    for view in views:
+        source = view.read_text(encoding="utf-8")
+        assert "fetch(" not in source, view  # 组件不直接 fetch
+
+    health_source = ADMIN_HEALTH_VIEW.read_text(encoding="utf-8")
+    assert "平台健康" in health_source
+    # not_ready（503）整页红色横幅，而不是空数据
+    assert "平台不可用" in health_source
+    assert "not_ready" in health_source
+    assert "degraded" in health_source
+    assert "依赖检查" in health_source
+    assert "deployment_mode" in health_source
+    assert "storage_mode" in health_source
+    assert "queue_mode" in health_source
+    assert "auth_mode" in health_source
+    assert "stale_import_jobs" in health_source
+    assert "queue_degraded_jobs" in health_source
+    assert "index_watcher" in health_source
+    assert "run_index" in health_source
+    assert "recent_import_failures" in health_source
+    assert "fetchReadiness" in health_source
+
+    workers_source = ADMIN_WORKERS_VIEW.read_text(encoding="utf-8")
+    assert "Worker 状态" in workers_source
+    assert "queue_mode" in workers_source
+    assert "queue_reachable" in workers_source
+    assert "embedded_worker" in workers_source
+    assert "registry_available" in workers_source
+    assert "当前为 file 存储模式，无跨进程 worker 注册表" in workers_source
+    assert "seconds_since_heartbeat" in workers_source
+    assert "fetchAdminWorkers" in workers_source
+
+    migrations_source = ADMIN_MIGRATIONS_VIEW.read_text(encoding="utf-8")
+    assert "数据库迁移" in migrations_source
+    assert "current_version" in migrations_source
+    assert "schema_version_target" in migrations_source
+    assert "pending" in migrations_source
+    assert "applied_now" in migrations_source
+    assert "执行迁移" in migrations_source
+    assert "window.confirm" in migrations_source
+    assert "applyMigrations" in migrations_source
+    assert "fetchAdminMigrations" in migrations_source
+
+    backups_source = ADMIN_BACKUPS_VIEW.read_text(encoding="utf-8")
+    assert "备份" in backups_source
+    assert "立即备份" in backups_source
+    assert "backup_root_configured" in backups_source
+    assert "contains_secrets" in backups_source
+    assert "runs/ 证据" in backups_source
+    assert "createAdminBackup" in backups_source
+    assert "fetchAdminBackups" in backups_source
+
+    users_source = ADMIN_USERS_VIEW.read_text(encoding="utf-8")
+    assert "用户管理" in users_source
+    assert "users:admin" in users_source
+    assert "owner" in users_source
+    assert "updateUserRoles" in users_source
+    assert "fetchAdminUsers" in users_source
+    assert "last_seen_at" in users_source
+
+
+def test_phase5_app_shell_shows_identity_banners_and_admin_nav():
+    source = APP_VUE.read_text(encoding="utf-8")
+    # 侧栏顶部当前用户 + 角色徽标
+    assert "fetchAuthContext" in source
+    assert "currentUserLabel" in source
+    assert "currentRole" in source
+    assert "display_name" in source
+    # disabled 模式横幅
+    assert "本地开发：认证已禁用" in source
+    # readiness 降级 / 不可用横幅
+    assert "fetchReadiness" in source
+    assert "degraded_reasons" in source
+    assert "降级" in source
+    assert "平台不可用" in source
+    # oidc 登出
+    assert "logout" in source
+    assert "clearAuthToken" in source
+    assert "登出" in source
+    # 平台管理导航入口
+    assert 'to="/admin/health"' in source
+    assert "平台健康" in source
+    assert 'to="/admin/workers"' in source
+    assert 'to="/admin/migrations"' in source
+    assert "迁移" in source
+    assert 'to="/admin/backups"' in source
+    assert "备份" in source
+    assert 'to="/admin/users"' in source
+    assert "用户" in source
+
+
+def test_phase5_import_views_pause_and_backoff_polling():
+    list_source = IMPORT_LIST_VIEW.read_text(encoding="utf-8")
+    detail_source = IMPORT_DETAIL_VIEW.read_text(encoding="utf-8")
+
+    # 列表：paused 徽标（进行中说明）与逐行「暂停」按钮（operator+）
+    assert "已暂停" in list_source
+    assert "pauseImport" in list_source
+    assert "暂停" in list_source
+    assert "canPauseJob" in list_source
+    assert "permissions" in list_source
+
+    # 详情：暂停按钮、成本导入端点选择、新增状态字段展示
+    assert "暂停导入" in detail_source
+    assert "pauseImport" in detail_source
+    assert "pauseCostImport" in detail_source
+    assert "resumeCostImport" in detail_source
+    assert "retryCostImport" in detail_source
+    assert "cancelCostImport" in detail_source
+    assert "fetchCostImport" in detail_source
+    assert "cost_records" in detail_source
+    assert "attempt_count" in detail_source
+    assert "max_attempts" in detail_source
+    assert "lease_version" in detail_source
+    assert "next_retry_at" in detail_source
+    assert "queue_degraded" in detail_source
+    assert "pause_requested" in detail_source
+
+    # 轮询降频：页面不可见暂停、连续失败 3 次指数退避、最长 30s
+    assert "document.hidden" in detail_source
+    assert "visibilitychange" in detail_source
+    assert "pollFailures" in detail_source
+    assert "30000" in detail_source
+    assert "fetch(" not in detail_source

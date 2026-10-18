@@ -670,3 +670,96 @@ SSO — everything stays file-based under `platform/`.
 ## Auth
 
 For black-box testing, `X-User-Id` is enough to satisfy the current API login check. Use `--token` only when testing JWT-backed user gateway/model authorization.
+
+## Agent Test Platform (Phase 5): Production Deployment, Auth and Reliable Imports
+
+Phase 5 turns the platform slice into a deployable architecture. The
+architecture decision record is `docs/phase5-production-architecture.md`;
+operational docs: `docs/deployment.md`, `docs/operations.md`,
+`docs/backup-restore.md`, `docs/security.md`.
+
+- **Deployment modes** — `AUDITRAIL_DEPLOYMENT_MODE=local|single_process|production`,
+  `AUDITRAIL_STORAGE_MODE=file|database|dual`,
+  `AUDITRAIL_QUEUE_MODE=inline|local_worker|redis`,
+  `AUDITRAIL_AUTH_MODE=disabled|local|oidc|jwt`. Impossible combinations
+  (e.g. `production` + `disabled` auth, `production` + file storage,
+  `local_worker`/`redis` queue without database storage) fail startup.
+- **Database** — ImportJob state, the user registry, OIDC login state and
+  the worker registry can live in SQLite (embedded default, real
+  cross-process transactions on one host) or PostgreSQL (optional
+  `psycopg` dependency, `AUDITRAIL_DATABASE_URL=postgresql://...`). The
+  database holds metadata and indexes only; `runs/<run_id>/` files remain
+  the authoritative run-evidence contract, and trajectories/prompts never
+  enter the database. Agents/suites/cost-records/external-evidence runtime
+  reads stay file-based this phase — they migrate into the database for
+  unified query and backup (schema and tooling are in place for a later
+  switch).
+- **Migrations** — explicit and versioned: `auditrail migrate-db`
+  (idempotent, never implicit at API startup), status via
+  `--status` or `GET /api/admin/migrations`. File→database data migration:
+  `auditrail migrate-platform` (dry-run by default, idempotent, bad records
+  never block), `verify-platform-migration`, `rollback-platform-migration`
+  (deletes only rows marked with the migration id; files and runs are never
+  touched).
+- **Cross-process ImportJobs** — in database modes, jobs are claimed with
+  transactions and fenced by `lease_version`: one job has exactly one lease
+  owner, stale workers cannot overwrite state, heartbeats are fenced, and a
+  crashed worker's job becomes `stale` (never `completed`) until explicitly
+  resumed. New controls: `pause` (boundary stop) / `resume` / `retry` /
+  `cancel` on both `/api/integrations/imports/{id}` and
+  `/api/costs/imports/{id}`. Retryable failures requeue with
+  `next_retry_at` backoff instead of sleeping while holding the lease.
+  Standalone worker: `python -m backend.app.worker_main`; `queue_mode=redis`
+  adds a Redis delivery hint (the database stays the source of truth; a
+  Redis outage yields `503 queue_unavailable` + `queue_degraded`, never a
+  fake enqueue).
+- **Cost imports** — `POST /api/costs/import` now runs through the same
+  ImportJob state machine (checkpointed, pausable, cancellable, async for
+  large files) while preserving observed-priority, `source_id` idempotency
+  and price-versioned estimation. Legacy cost reports stay readable.
+- **Auth** — `oidc`/`jwt` modes verify Bearer tokens server-side (issuer,
+  audience, exp/nbf, signature; JWKS cache + key rotation + bounded stale
+  window). Browser SSO: `GET /api/auth/oidc/login` → provider →
+  `/api/auth/oidc/callback` → SPA `/login/callback#token=...`. Tokens never
+  enter logs/audit/metrics. Roles `viewer < operator < admin < owner` with
+  a centralized permission map; user registry (JIT-provisioned, database
+  mode) managed via `GET/PUT /api/admin/users` (owner). Single-tenant:
+  `tenant_id` is server-owned; client-supplied tenant fields are dropped.
+- **Health & metrics** — `GET /api/health` (liveness), `/api/health/live`,
+  `/api/health/ready` (200 ready/degraded, 503 not_ready; checks database,
+  queue, storage, runs root, audit log, workers), `GET /api/metrics`
+  (Prometheus text; no high-cardinality labels, no secrets). Admin pages:
+  `/admin/health`, `/admin/workers`, `/admin/migrations`, `/admin/backups`.
+- **Backup/restore** — `auditrail backup-platform [--include-database]`,
+  `verify-platform-backup`, `restore-platform` (dry-run default, idempotent,
+  never overwrites without `--force`). Backups exclude secrets and `runs/`
+  evidence (see `docs/backup-restore.md` for RPO/RTO honesty).
+- **Docker** — `Dockerfile` + `docker-compose.yml` for local/staging
+  (postgres + redis + migrate + api + worker). Compose is not a HA
+  production setup.
+
+### Phase 5 environment variables
+
+```bash
+# AUDITRAIL_DEPLOYMENT_MODE=local
+# AUDITRAIL_STORAGE_MODE=file
+# AUDITRAIL_QUEUE_MODE=inline
+# AUDITRAIL_DATABASE_URL=sqlite:////abs/path/platform/auditrail.db  # or postgresql://...?sslmode=require
+# AUDITRAIL_REDIS_URL=rediss://...
+# AUDITRAIL_AUTH_MODE=local          # local|disabled|oidc|jwt
+# AUDITRAIL_AUTH_REQUIRED=true
+# AUDITRAIL_OIDC_ISSUER_URL=https://idp.example.com
+# AUDITRAIL_OIDC_CLIENT_ID=auditrail
+# AUDITRAIL_OIDC_CLIENT_SECRET=      # env only, never logged
+# AUDITRAIL_OIDC_AUDIENCE=auditrail
+# AUDITRAIL_OIDC_SCOPES=openid,profile,email
+# AUDITRAIL_OIDC_JWKS_CACHE_SECONDS=3600
+# AUDITRAIL_OIDC_JWKS_MAX_STALE_SECONDS=86400
+# AUDITRAIL_OIDC_CLOCK_SKEW_SECONDS=60
+# AUDITRAIL_OIDC_ROLES_CLAIM=roles
+# AUDITRAIL_JWT_SECRET=              # HS256 for auth_mode=jwt
+# AUDITRAIL_TENANT_ID=default        # single-tenant; server-owned
+# AUDITRAIL_WORKER_POLL_INTERVAL_MS=1000
+# AUDITRAIL_WORKER_HEARTBEAT_SECONDS=15
+# AUDITRAIL_BACKUP_DIR=              # default <platform>/backups
+```

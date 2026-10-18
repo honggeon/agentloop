@@ -465,3 +465,32 @@ def test_api_import_list_pagination(monkeypatch, tmp_path):
     # limit is capped server-side
     huge = client.get("/api/integrations/imports?limit=100000")
     assert huge.json()["limit"] == 200
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: pause endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_api_pause_resume_queued_job(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    client = _client(monkeypatch, settings)
+    _traces_file(settings, count=1)
+    job = integration_service.create_import_job(
+        "langfuse", {"source_file": "imports/traces.jsonl"}, settings
+    )
+    import_id = str(job["import_id"])
+    paused = client.post("/api/integrations/imports/%s/pause" % import_id)
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["status"] == "paused"
+    # pause is audited
+    events = client.get("/api/audit-events", params={"action": "import_pause"})
+    assert events.json()["total"] == 1
+    # resume re-queues and the worker completes it from the checkpoint
+    resumed = client.post("/api/integrations/imports/%s/resume" % import_id)
+    assert resumed.status_code == 202
+    assert _wait(lambda: (import_jobs.load_import_job(settings.platform_dir, import_id) or {}).get("status") == "completed")
+    # terminal jobs reject pause with a structured 409
+    again = client.post("/api/integrations/imports/%s/pause" % import_id)
+    assert again.status_code == 409
+    assert again.json()["detail"]["code"] == "import_invalid_state"

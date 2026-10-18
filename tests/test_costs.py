@@ -202,8 +202,14 @@ def test_import_dry_run_does_not_persist(monkeypatch, tmp_path):
     assert report["status"] == "dry_run"
     assert report["imported_records"] == 2
     assert cost_mod.load_cost_records(settings.platform_dir) == []
-    # dry-run reports are not part of the formal store
-    assert client.get("/api/costs/imports/%s" % report["import_id"]).status_code == 404
+    # Phase 5: cost imports run through the unified ImportJob state machine,
+    # so the dry-run *job* is visible like any other import job (consistent
+    # with the integrations API); the formal cost store stays untouched and
+    # no legacy report file is written.
+    fetched = client.get("/api/costs/imports/%s" % report["import_id"])
+    assert fetched.status_code == 200
+    assert fetched.json()["dry_run"] is True
+    assert cost_mod.load_import_report(settings.platform_dir, report["import_id"]) is None
 
 
 def test_import_path_traversal_rejected(monkeypatch, tmp_path):

@@ -1,0 +1,101 @@
+# auditrail 本地/预发布编排（Phase 5）。
+#
+# 这不是高可用生产方案：单机 compose 用于体验 database + redis + oidc 形态。
+# 生产部署请用编排器 + 托管 PostgreSQL/Redis，见 docs/deployment.md。
+#
+# secrets 不进本文件：OIDC client secret、JWT 密钥等经环境变量注入
+# （docker compose --env-file 或 shell 环境）。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: auditrail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment}
+      POSTGRES_DB: auditrail
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auditrail"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AUDITRAIL_DATABASE_URL: postgresql://auditrail:${POSTGRES_PASSWORD}@postgres:5432/auditrail
+      AUDITRAIL_PLATFORM_DIR: /data/platform
+    volumes:
+      - platform_data:/data/platform
+    command: ["python", "-m", "auditrail.cli", "migrate-db"]
+
+  api:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      AUDITRAIL_DEPLOYMENT_MODE: ${AUDITRAIL_DEPLOYMENT_MODE:-single_process}
+      AUDITRAIL_STORAGE_MODE: database
+      AUDITRAIL_QUEUE_MODE: ${AUDITRAIL_QUEUE_MODE:-local_worker}
+      AUDITRAIL_DATABASE_URL: postgresql://auditrail:${POSTGRES_PASSWORD}@postgres:5432/auditrail
+      AUDITRAIL_REDIS_URL: redis://redis:6379/0
+      AUDITRAIL_AUTH_MODE: ${AUDITRAIL_AUTH_MODE:-local}
+      AUDITRAIL_AUTH_ROLE: ${AUDITRAIL_AUTH_ROLE:-admin}
+      AUDITRAIL_OIDC_ISSUER_URL: ${AUDITRAIL_OIDC_ISSUER_URL:-}
+      AUDITRAIL_OIDC_CLIENT_ID: ${AUDITRAIL_OIDC_CLIENT_ID:-}
+      AUDITRAIL_OIDC_AUDIENCE: ${AUDITRAIL_OIDC_AUDIENCE:-}
+      AUDITRAIL_OIDC_CLIENT_SECRET: ${AUDITRAIL_OIDC_CLIENT_SECRET:-}
+      AUDITRAIL_JWT_SECRET: ${AUDITRAIL_JWT_SECRET:-}
+      AUDITRAIL_RUNS_DIR: /data/runs
+      AUDITRAIL_PLATFORM_DIR: /data/platform
+    ports:
+      - "18080:18080"
+    volumes:
+      - runs_data:/data/runs
+      - platform_data:/data/platform
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:18080/api/health/live', timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  worker:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      AUDITRAIL_DEPLOYMENT_MODE: ${AUDITRAIL_DEPLOYMENT_MODE:-single_process}
+      AUDITRAIL_STORAGE_MODE: database
+      AUDITRAIL_QUEUE_MODE: ${AUDITRAIL_QUEUE_MODE:-local_worker}
+      AUDITRAIL_DATABASE_URL: postgresql://auditrail:${POSTGRES_PASSWORD}@postgres:5432/auditrail
+      AUDITRAIL_REDIS_URL: redis://redis:6379/0
+      AUDITRAIL_RUNS_DIR: /data/runs
+      AUDITRAIL_PLATFORM_DIR: /data/platform
+      AUDITRAIL_IMPORT_WORKER: "true"
+    volumes:
+      - runs_data:/data/runs
+      - platform_data:/data/platform
+    command: ["python", "-m", "backend.app.worker_main"]
+
+volumes:
+  pgdata:
+  runs_data:
+  platform_data:
