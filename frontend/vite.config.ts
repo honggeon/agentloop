@@ -43,6 +43,31 @@ function dashboardRegister(apiTarget: string): Plugin {
 }
 
 /**
+ * 启动子进程前清洗继承的环境。
+ * 一键启动的子进程继承 dev server 的完整环境：如果 dev server 是被某个
+ * agent harness 或其他宿主拉起的，会把宿主的会话标记（DSH_*）和畸形代理
+ * 变量（如 NO_PROXY 里 bracketed IPv6 "[::1]"，会让 httpx 系客户端解析
+ * 崩溃）原样传给后端，且后端重启时会继续向下世袭。这里显式剔除/规范化。
+ * 注意：这不能解除继承来的文件沙箱；dev server 本身若在沙箱中，服务仍需
+ * 从真实终端启动。
+ */
+function sanitizedServiceEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^DSH_(SESSION_ID|PROFILE|PROFILE_DIR|SHELL|WEB_URL)$/.test(key)) {
+      delete env[key];
+    }
+  }
+  for (const key of ["NO_PROXY", "no_proxy"]) {
+    const value = env[key];
+    if (value && value.includes("[")) {
+      env[key] = value.replace(/\[([^\]]*)\]/g, "$1");
+    }
+  }
+  return env;
+}
+
+/**
  * dev server 内置的一键启动接口：前端检测到后端 /api/health 不可达时，
  * 提示用户点击按钮，由这里执行仓库根目录的 ./start.sh 拉起后端服务。
  * 仅存在于 Vite dev server，生产构建不包含此能力。
@@ -58,7 +83,11 @@ function dashboardLauncher(): Plugin {
           res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
           return;
         }
-        execFile("./start.sh", ["start"], { cwd: repoRoot, timeout: 180000 }, (error, stdout, stderr) => {
+        execFile(
+          "./start.sh",
+          ["start"],
+          { cwd: repoRoot, timeout: 180000, env: sanitizedServiceEnv() },
+          (error, stdout, stderr) => {
           const output = `${stdout || ""}${stderr || ""}`.trim().slice(-2000);
           if (error) {
             res.end(JSON.stringify({ ok: false, output, error: error.message }));

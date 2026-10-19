@@ -365,6 +365,11 @@ def test_backend_down_shows_launcher_prompt():
     assert "/__launcher/start" in api_source
     assert "/__launcher/start" in vite_source
     assert "./start.sh" in vite_source
+    # The launcher must sanitize the inherited environment: harness session
+    # markers (DSH_*) and bracketed IPv6 in NO_PROXY ("[::1]" crashes
+    # httpx-style clients) must not propagate into the spawned backend.
+    assert "sanitizedServiceEnv" in vite_source
+    assert "NO_PROXY" in vite_source
 
 
 def test_platform_view_route_and_sidebar_entry_exist():
