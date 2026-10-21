@@ -30,6 +30,38 @@ def test_usage_from_response_normalizes_openai_usage():
     assert usage == {"inputTokens": 120, "outputTokens": 30, "totalTokens": 150}
 
 
+def test_usage_from_response_tries_alias_keys():
+    # Regression: _int_value returned on the first alias unconditionally, so
+    # usages reported only under a later alias were zero-filled.
+    usage = usage_from_response(
+        {
+            "usage": {
+                "input_tokens": 88,
+                "outputTokens": 12,
+                "totalTokens": 100,
+            }
+        }
+    )
+
+    assert usage == {"inputTokens": 88, "outputTokens": 12, "totalTokens": 100}
+
+
+def test_usage_from_response_alias_fallback_after_unparseable():
+    usage = usage_from_response(
+        {
+            "usage": {
+                "prompt_tokens": "not-a-number",
+                "input_tokens": 42,
+                "completion_tokens": 7,
+                "total_tokens": 49,
+            }
+        }
+    )
+
+    assert usage == {"inputTokens": 42, "outputTokens": 7, "totalTokens": 49}
+
+
+
 def test_build_llm_call_record_omits_api_key_and_keeps_usage():
     record = build_llm_call_record(
         request_body={"model": "xuanjian-lite", "messages": [{"role": "user", "content": "hi"}]},

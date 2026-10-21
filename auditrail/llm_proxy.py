@@ -425,11 +425,20 @@ def _payload_from_sse(raw: bytes) -> dict[str, Any]:
 
 
 def _int_value(payload: dict[str, Any], *keys: str) -> int:
+    """Return the first present, parseable alias value; 0 when none exists.
+
+    Each alias key must actually be tried: returning inside the loop on the
+    first key would make the fallback aliases dead code and zero-fill usages
+    that only report a non-first alias.
+    """
     for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
         try:
-            return int(payload.get(key) or 0)
+            return int(value)
         except (TypeError, ValueError):
-            return 0
+            continue
     return 0
 
 
