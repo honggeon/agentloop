@@ -236,3 +236,20 @@ def test_judge_run_includes_acceptance_criteria(tmp_path, monkeypatch):
 
     monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
     assert cli.main(["judge-run", "--run", str(run)]) == 0
+
+
+def test_load_dotenv_respects_guard(monkeypatch, tmp_path):
+    # conftest sets AUDITRAIL_LOAD_DOTENV=0 for the whole suite; the guard must
+    # keep working when invoked through the CLI entry as well.
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "0")
+    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    cli._load_dotenv()
+    assert "MODEL_PROVIDER" not in __import__("os").environ
+
+
+def test_load_dotenv_does_not_override_real_env(monkeypatch):
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "1")
+    monkeypatch.setenv("MODEL_PROVIDER", "from-real-env")
+    cli._load_dotenv()
+    # python-dotenv never overrides variables that already exist
+    assert __import__("os").environ["MODEL_PROVIDER"] == "from-real-env"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,26 @@ from .trajectory import (
 from .runtime import build_agent_judge_prompt
 
 
+def _load_dotenv() -> None:
+    """Load the project-root ``.env`` for CLI commands, at most once per process.
+
+    Mirrors ``backend.app.config.load_env_file`` (the core package must not
+    import the backend): real environment variables keep precedence, and the
+    ``AUDITRAIL_LOAD_DOTENV`` guard disables loading (the test suite relies on
+    this so a developer's local .env cannot steer tests). ``judge-run`` reads
+    ``MODEL_PROVIDER``/``MODEL_NAME`` at engine import time, so the load must
+    happen before any engine import.
+    """
+    falsey = {"0", "false", "no", "off", ""}
+    if str(os.environ.get("AUDITRAIL_LOAD_DOTENV", "true")).strip().lower() in falsey:
+        return
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+
 def main(argv=None) -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(
         prog="auditrail",
         description="auditrail：黑盒轨迹采集、确定性审计与评测工具。",
