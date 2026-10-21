@@ -125,3 +125,11 @@ dimensions 缺少任何一个维度 key 都是结构不完整，系统会拒绝�
 findings 中每项必须包含 severity、category、title、type、evidence、recommendation。
 最终回答也必须返回同一个 JSON 对象。
 """ + EVIDENCE_FORMAT_REQUIREMENT
+
+#: report_writer 的 write_judge_report 工具被发布门禁拒绝时返回的修正指引。
+#: 拒绝只是工具级反馈，子智能体应补全报告后在同一轮内重新调用工具。
+REPORT_REJECTED_FEEDBACK = (
+    "报告未写入：发布门禁拒绝了该提案。修正后重新调用 write_judge_report："
+    "dimensions 必须包含全部 13 个维度 key；无证据的维度用 status=unknown、score=null、source=judge 占位，不得省略；"
+    "其余字段按 schema 补齐。"
+)

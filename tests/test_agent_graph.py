@@ -105,3 +105,63 @@ def test_sanitize_no_proxy_leaves_values_without_brackets_untouched(monkeypatch)
 
     assert os.environ["NO_PROXY"] == "127.0.0.1,localhost,::1"
     assert "no_proxy" not in os.environ
+
+
+def _report_writer_write_tool():
+    module = importlib.import_module("auditrail.agents.subagents")
+    subagents = {item["name"]: item for item in module.build_subagents("openai:gpt-test")}
+    tools = {tool.__name__: tool for tool in subagents["report_writer"]["tools"]}
+    return tools["write_judge_report"]
+
+
+def test_report_writer_write_tool_returns_rejection_instead_of_raising(tmp_path):
+    """Regression: a proposal missing dimensions made the write_judge_report tool
+    raise JudgeProposalError through the whole judge graph, killing the turn
+    before the engine's repair attempt. The writer-facing tool must return the
+    rejection as corrective feedback so the writer can resubmit in-turn."""
+    import json
+
+    run = tmp_path / "20261021-dsh-hello"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1"}), encoding="utf-8")
+
+    result = _report_writer_write_tool()(str(run), {"overall_status": "success", "summary": "空 dimensions"})
+
+    assert result["status"] == "rejected"
+    assert "13" in result["error"]
+    assert "intent_recognition" in result["error"]
+    assert result["instruction"]
+    assert not (run / "agent_judge.json").exists()
+    assert not (run / "judges").exists()
+
+
+def test_report_writer_write_tool_still_writes_complete_proposals(tmp_path):
+    """The feedback wrapper must stay transparent for publishable proposals."""
+    import json
+
+    from tests.conftest import full_judge_dimensions
+
+    run = tmp_path / "20261021-dsh-hello"
+    run.mkdir()
+    (run / "summary.json").write_text(json.dumps({"session_id": "s1", "model": "m1"}), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps({"message_count": 2, "tool_call_count": 0, "tool_result_count": 0, "findings": [], "tool_calls": []}),
+        encoding="utf-8",
+    )
+    (run / "trajectory.jsonl").write_text(
+        json.dumps({"index": 0, "role": "user", "content": "你好"}) + "\n", encoding="utf-8"
+    )
+
+    proposal = {
+        "overall_status": "success",
+        "completion_score": 80,
+        "confidence": "medium",
+        "summary": "完整提案",
+        "findings": [],
+        "dimensions": full_judge_dimensions(),
+    }
+    result = _report_writer_write_tool()(str(run), proposal)
+
+    assert isinstance(result, dict)
+    assert "json_path" in result
+    assert (run / "agent_judge.json").exists()
