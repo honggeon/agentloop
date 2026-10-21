@@ -22,110 +22,135 @@ from .runtime import build_agent_judge_prompt
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="auditrail")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="auditrail",
+        description="auditrail：黑盒轨迹采集、确定性审计与评测工具。",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="命令")
 
-    fetch = subparsers.add_parser("fetch-session", help="Fetch an existing session and export trajectory files.")
+    fetch = subparsers.add_parser("fetch-session", help="拉取一个已有会话，并导出轨迹文件。")
     _add_common(fetch)
-    fetch.add_argument("--session-id", required=True)
-    fetch.add_argument("--out", default="runs")
+    fetch.add_argument("--session-id", required=True, help="目标会话 ID。")
+    fetch.add_argument("--out", default="runs", help="运行产物输出根目录。")
 
-    smoke = subparsers.add_parser("smoke-chat", help="Create a session, send a message, consume SSE, and export results.")
+    smoke = subparsers.add_parser("smoke-chat", help="创建会话、发送消息、消费 SSE 流并导出结果。")
     _add_common(smoke)
-    smoke.add_argument("--message", required=True)
-    smoke.add_argument("--model", default="")
-    smoke.add_argument("--max-turns", type=int, default=20)
-    smoke.add_argument("--out", default="runs")
+    smoke.add_argument("--message", required=True, help="要发送的用户消息。")
+    smoke.add_argument("--model", default="", help="模型名称（可选）。")
+    smoke.add_argument("--max-turns", type=int, default=20, help="最大对话轮数。")
+    smoke.add_argument("--out", default="runs", help="运行产物输出根目录。")
 
-    render = subparsers.add_parser("render-run", help="Rebuild trajectory and audit files from an existing run/session.json.")
-    render.add_argument("--run", required=True)
+    render = subparsers.add_parser("render-run", help="基于已有运行目录的 session.json 重建轨迹与审计文件。")
+    render.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
 
-    judge = subparsers.add_parser("judge-run", help="Run DeepAgent analysis for an exported run directory.")
-    judge.add_argument("--run", required=True)
-    judge.add_argument("--thread-id", default=None)
-    judge.add_argument("--output-format", choices=["json", "markdown", "both"], default="both")
+    judge = subparsers.add_parser("judge-run", help="对已导出的运行目录执行 DeepAgent 裁判分析。")
+    judge.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
+    judge.add_argument("--thread-id", default=None, help="裁判会话 thread id（可选）。")
+    judge.add_argument(
+        "--output-format", choices=["json", "markdown", "both"], default="both",
+        help="报告输出格式。",
+    )
 
-    proxy = subparsers.add_parser("metrics-proxy", help="Run an OpenAI-compatible LLM metrics proxy.")
-    proxy.add_argument("--upstream-base-url", required=True)
-    proxy.add_argument("--host", default="127.0.0.1")
-    proxy.add_argument("--port", type=int, default=7600)
-    proxy.add_argument("--log", default="runs/proxy-llm-calls.jsonl")
-    proxy.add_argument("--timeout", type=float, default=300.0)
+    proxy = subparsers.add_parser("metrics-proxy", help="启动一个 OpenAI 兼容的 LLM 指标代理。")
+    proxy.add_argument("--upstream-base-url", required=True, help="上游 LLM 服务的 base URL。")
+    proxy.add_argument("--host", default="127.0.0.1", help="代理监听地址。")
+    proxy.add_argument("--port", type=int, default=7600, help="代理监听端口。")
+    proxy.add_argument("--log", default="runs/proxy-llm-calls.jsonl", help="LLM 调用日志（JSONL）输出路径。")
+    proxy.add_argument("--timeout", type=float, default=300.0, help="上游请求超时时间（秒）。")
 
-    import_calls = subparsers.add_parser("import-llm-calls", help="Import proxy JSONL records into a run directory.")
-    import_calls.add_argument("--run", required=True)
-    import_calls.add_argument("--log", required=True)
+    import_calls = subparsers.add_parser("import-llm-calls", help="将代理 JSONL 记录导入运行目录。")
+    import_calls.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
+    import_calls.add_argument("--log", required=True, help="代理 LLM 调用日志（JSONL）路径。")
 
-    list_dsh = subparsers.add_parser("list-dsh-sessions", help="List locally recorded DeepSeek Harness sessions.")
-    list_dsh.add_argument("--dsh-home", default=None)
-    list_dsh.add_argument("--limit", type=int, default=20)
-    list_dsh.add_argument("--json", action="store_true", help="Print JSON instead of a table.")
+    export_mlflow = subparsers.add_parser(
+        "export-mlflow",
+        help="将运行目录导出为 OTLP trace 并推送到 MLflow（otel-map-1，单向有损视图）。",
+    )
+    export_mlflow.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
+    export_mlflow.add_argument(
+        "--endpoint", default=None,
+        help="MLflow tracking server 地址；默认读环境变量 AUDITRAIL_MLFLOW_ENDPOINT。",
+    )
+    export_mlflow.add_argument(
+        "--experiment-id", default=None,
+        help="目标 experiment id；默认读环境变量 AUDITRAIL_MLFLOW_EXPERIMENT_ID。",
+    )
+    export_mlflow.add_argument(
+        "--platform-dir", default=None,
+        help="平台目录（用于关联费用记录，可选；默认不挂载费用属性）。",
+    )
+    export_mlflow.add_argument("--dry-run", action="store_true", help="只打印 OTLP payload，不发送。")
 
-    import_dsh = subparsers.add_parser("import-dsh-session", help="Convert a recorded DSH session into a run directory.")
-    import_dsh.add_argument("--session-id", default=None, help="DSH session id (session-<uuid>).")
-    import_dsh.add_argument("--workspace", default=None, help="DSH workspace dir name, to disambiguate duplicate ids.")
-    import_dsh.add_argument("--path", default=None, help="Direct path to a session.jsonl.zstd file.")
-    import_dsh.add_argument("--dsh-home", default=None)
-    import_dsh.add_argument("--out", default="runs")
+    list_dsh = subparsers.add_parser("list-dsh-sessions", help="列出本地录制的 DeepSeek Harness 会话。")
+    list_dsh.add_argument("--dsh-home", default=None, help="DSH 数据目录（默认自动探测）。")
+    list_dsh.add_argument("--limit", type=int, default=20, help="最多列出的会话条数。")
+    list_dsh.add_argument("--json", action="store_true", help="以 JSON 格式输出（默认为表格）。")
 
-    run_cases = subparsers.add_parser("run-cases", help="Run a deterministic acceptance-case suite against a target binary.")
-    run_cases.add_argument("--suite", required=True, help="Path to a suite JSON file, e.g. cases/dsh-cli.json.")
-    run_cases.add_argument("--bin", default=None, help="Target binary; defaults to the suite's binary field.")
-    run_cases.add_argument("--only", action="append", default=None, help="Run only cases matching this id or module (repeatable).")
-    run_cases.add_argument("--out", default="cases/results", help="Directory for the JSON and Markdown reports.")
-    run_cases.add_argument("--no-write", action="store_true", help="Print results without writing report files.")
-    run_cases.add_argument("--json", action="store_true", help="Print the full JSON report instead of the summary.")
+    import_dsh = subparsers.add_parser("import-dsh-session", help="将一条录制的 DSH 会话转换为运行目录。")
+    import_dsh.add_argument("--session-id", default=None, help="DSH 会话 id（session-<uuid>）。")
+    import_dsh.add_argument("--workspace", default=None, help="DSH 工作区目录名，用于区分重复的会话 id。")
+    import_dsh.add_argument("--path", default=None, help="直接指定 session.jsonl.zstd 文件路径。")
+    import_dsh.add_argument("--dsh-home", default=None, help="DSH 数据目录（默认自动探测）。")
+    import_dsh.add_argument("--out", default="runs", help="运行产物输出根目录。")
+
+    run_cases = subparsers.add_parser("run-cases", help="针对目标二进制运行确定性验收用例套件。")
+    run_cases.add_argument("--suite", required=True, help="套件 JSON 文件路径，例如 cases/dsh-cli.json。")
+    run_cases.add_argument("--bin", default=None, help="目标二进制；默认使用套件中的 binary 字段。")
+    run_cases.add_argument("--only", action="append", default=None, help="只运行匹配该 id 或模块的用例（可重复）。")
+    run_cases.add_argument("--out", default="cases/results", help="JSON 与 Markdown 报告的输出目录。")
+    run_cases.add_argument("--no-write", action="store_true", help="只打印结果，不写报告文件。")
+    run_cases.add_argument("--json", action="store_true", help="打印完整 JSON 报告（默认打印摘要）。")
 
     # ------------------------------------------------------------------
     # Phase 5: database schema + platform data migration + backup/restore
     # ------------------------------------------------------------------
 
     migrate_db = subparsers.add_parser(
-        "migrate-db", help="Apply pending schema migrations (idempotent; never runs implicitly at API startup)."
+        "migrate-db", help="应用待执行的 schema 迁移（幂等；API 启动时不会隐式执行）。"
     )
     _add_db_args(migrate_db)
-    migrate_db.add_argument("--status", action="store_true", help="Only print migration status.")
+    migrate_db.add_argument("--status", action="store_true", help="仅打印迁移状态，不执行迁移。")
 
     migrate_platform = subparsers.add_parser(
-        "migrate-platform", help="Migrate platform metadata from files into the database (dry-run by default)."
+        "migrate-platform", help="将平台元数据从文件迁移到数据库（默认 dry-run）。"
     )
     _add_db_args(migrate_platform)
-    migrate_platform.add_argument("--source", default="file", choices=["file"])
-    migrate_platform.add_argument("--target", default="database", choices=["database"])
-    migrate_platform.add_argument("--dry-run", action="store_true", default=None, help="Preview only (default).")
-    migrate_platform.add_argument("--yes", action="store_true", help="Actually write (disables dry-run).")
+    migrate_platform.add_argument("--source", default="file", choices=["file"], help="迁移来源。")
+    migrate_platform.add_argument("--target", default="database", choices=["database"], help="迁移目标。")
+    migrate_platform.add_argument("--dry-run", action="store_true", default=None, help="仅预览（默认行为）。")
+    migrate_platform.add_argument("--yes", action="store_true", help="实际写入（关闭 dry-run）。")
 
     verify_migration = subparsers.add_parser(
-        "verify-platform-migration", help="Compare file-side and database-side entity counts."
+        "verify-platform-migration", help="对比文件侧与数据库侧的实体数量。"
     )
     _add_db_args(verify_migration)
 
     rollback = subparsers.add_parser(
         "rollback-platform-migration",
-        help="Delete only the rows one migration imported (dry-run by default; never touches files or runs).",
+        help="只删除某次迁移导入的数据行（默认 dry-run；不会触碰文件或运行产物）。",
     )
     _add_db_args(rollback)
-    rollback.add_argument("--migration-id", default=None, help="Defaults to the latest completed migration.")
-    rollback.add_argument("--dry-run", action="store_true", default=None)
-    rollback.add_argument("--yes", action="store_true", help="Actually delete (disables dry-run).")
+    rollback.add_argument("--migration-id", default=None, help="默认回滚最近一次已完成的迁移。")
+    rollback.add_argument("--dry-run", action="store_true", default=None, help="仅预览（默认行为）。")
+    rollback.add_argument("--yes", action="store_true", help="实际删除（关闭 dry-run）。")
 
-    backup = subparsers.add_parser("backup-platform", help="Backup platform files + database (no secrets, no run evidence).")
+    backup = subparsers.add_parser("backup-platform", help="备份平台文件与数据库（不含密钥，不含运行证据）。")
     _add_db_args(backup, db_required=False)
-    backup.add_argument("--output", required=True, help="Backup output directory.")
-    backup.add_argument("--include-database", action="store_true", help="Also export database tables as JSONL.")
+    backup.add_argument("--output", required=True, help="备份输出目录。")
+    backup.add_argument("--include-database", action="store_true", help="同时将数据库表导出为 JSONL。")
 
-    verify_backup = subparsers.add_parser("verify-platform-backup", help="Verify a backup manifest and checksums.")
-    verify_backup.add_argument("--backup", required=True, help="Backup directory (contains manifest.json).")
+    verify_backup = subparsers.add_parser("verify-platform-backup", help="校验备份的 manifest 与校验和。")
+    verify_backup.add_argument("--backup", required=True, help="备份目录（包含 manifest.json）。")
 
     restore = subparsers.add_parser(
-        "restore-platform", help="Restore a backup (dry-run by default; never overwrites without --force)."
+        "restore-platform", help="恢复备份（默认 dry-run；不带 --force 时不会覆盖已有数据）。"
     )
     _add_db_args(restore, db_required=False)
-    restore.add_argument("--backup", required=True)
-    restore.add_argument("--restore-database", action="store_true", help="Also restore database tables.")
-    restore.add_argument("--force", action="store_true", help="Allow overlaying a non-empty platform directory.")
-    restore.add_argument("--dry-run", action="store_true", default=None)
-    restore.add_argument("--yes", action="store_true", help="Actually restore (disables dry-run).")
+    restore.add_argument("--backup", required=True, help="备份目录（包含 manifest.json）。")
+    restore.add_argument("--restore-database", action="store_true", help="同时恢复数据库表。")
+    restore.add_argument("--force", action="store_true", help="允许覆盖非空的平台目录。")
+    restore.add_argument("--dry-run", action="store_true", default=None, help="仅预览（默认行为）。")
+    restore.add_argument("--yes", action="store_true", help="实际恢复（关闭 dry-run）。")
 
     args = parser.parse_args(argv)
     if args.command == "fetch-session":
@@ -140,6 +165,8 @@ def main(argv=None) -> int:
         return _metrics_proxy(args)
     if args.command == "import-llm-calls":
         return _import_llm_calls(args)
+    if args.command == "export-mlflow":
+        return _export_mlflow(args)
     if args.command == "list-dsh-sessions":
         return _list_dsh_sessions(args)
     if args.command == "import-dsh-session":
@@ -173,12 +200,12 @@ def _add_db_args(parser: argparse.ArgumentParser, *, db_required: bool = True) -
     parser.add_argument(
         "--platform-dir",
         default=None,
-        help="Platform data directory (default: AUDITRAIL_PLATFORM_DIR or ./platform).",
+        help="平台数据目录（默认：AUDITRAIL_PLATFORM_DIR 或 ./platform）。",
     )
     parser.add_argument(
         "--database-url",
         default=None,
-        help="sqlite:///path or postgresql://... (default: AUDITRAIL_DATABASE_URL or sqlite under --platform-dir).",
+        help="sqlite:///path 或 postgresql://...（默认：AUDITRAIL_DATABASE_URL，或 --platform-dir 下的 sqlite）。",
     )
 
 
@@ -317,10 +344,10 @@ def _restore_platform(args) -> int:
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--base-url", required=True)
-    parser.add_argument("--user-id", required=True)
-    parser.add_argument("--token", default=None)
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--base-url", required=True, help="目标 agent 服务的 base URL。")
+    parser.add_argument("--user-id", required=True, help="目标服务的用户 ID。")
+    parser.add_argument("--token", default=None, help="访问令牌（可选）。")
+    parser.add_argument("--timeout", type=float, default=60.0, help="HTTP 请求超时时间（秒）。")
 
 
 def _fetch_session(args) -> int:
@@ -488,6 +515,50 @@ def _import_llm_calls(args) -> int:
 
     payload = import_proxy_log(Path(args.log), Path(args.run))
     print("Imported %s LLM calls to %s" % (len(payload["llm_calls"]), Path(args.run) / "llm_calls.json"))
+    return 0
+
+
+def _export_mlflow(args) -> int:
+    import os
+
+    from .integrations.mlflow import MlflowExportError, build_trace_payload, export_run
+
+    run_dir = Path(args.run)
+    if not run_dir.is_dir():
+        print("Missing run directory %s" % run_dir, file=sys.stderr)
+        return 1
+    platform_dir = Path(args.platform_dir) if args.platform_dir else None
+    if args.dry_run:
+        payload = build_trace_payload(run_dir, platform_dir=platform_dir)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    endpoint = args.endpoint or os.environ.get("AUDITRAIL_MLFLOW_ENDPOINT")
+    experiment_id = args.experiment_id or os.environ.get("AUDITRAIL_MLFLOW_EXPERIMENT_ID")
+    if not endpoint or not experiment_id:
+        print(
+            "export-mlflow requires --endpoint/--experiment-id "
+            "(or AUDITRAIL_MLFLOW_ENDPOINT/AUDITRAIL_MLFLOW_EXPERIMENT_ID).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        result = export_run(
+            run_dir,
+            endpoint=endpoint,
+            experiment_id=experiment_id,
+            platform_dir=platform_dir,
+        )
+    except MlflowExportError as exc:
+        print(
+            "export-mlflow failed [%s] %s (retryable=%s)"
+            % (exc.code, exc, exc.retryable),
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "Exported %s to %s (experiment %s, %d bytes, mapping %s)"
+        % (run_dir, endpoint, experiment_id, result["bytes"], result["mapping_version"])
+    )
     return 0
 
 

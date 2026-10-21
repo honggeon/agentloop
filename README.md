@@ -598,6 +598,37 @@ they never overwrite `audit.json`, deterministic checks, judge
   `GET /api/suite-jobs/{job_id}/detail`. The legacy `/platform?job=:jobId`
   entry keeps working and links to the new page.
 
+## Export a Run to MLflow (OTLP)
+
+`auditrail/integrations/mlflow.py` exports one run directory as an OTLP/HTTP
+trace to an MLflow tracking server (mapping version `otel-map-1`). The export
+is a **one-way, lossy, versioned view**: `runs/<run_id>/` stays the only
+factual contract, and every exported field carries an explicit provenance
+marker (`auditrail.provenance.*`, `auditrail.time_basis`, `auditrail.id_anchor`
+…). Missing evidence is omitted, never zero-filled; exporter-generated IDs and
+the root span are organizational structure, not agent execution evidence. The
+full mapping table and evidence discipline live in
+`docs/superpowers/specs/2026-10-21-mlflow-otlp-export-mapping-design.md`.
+
+MLflow side prerequisites: MLflow 3.6.0+ with a SQL backend store; ingestion
+is OTLP/HTTP only at `/v1/traces` and requires the `x-mlflow-experiment-id`
+header.
+
+```bash
+# Preview the payload without sending
+python3 -m auditrail.cli export-mlflow --run runs/<run-dir> --dry-run
+
+# Export (endpoint/experiment id may also come from
+# AUDITRAIL_MLFLOW_ENDPOINT / AUDITRAIL_MLFLOW_EXPERIMENT_ID)
+python3 -m auditrail.cli export-mlflow \
+  --run runs/<run-dir> \
+  --endpoint http://localhost:5000 \
+  --experiment-id 1
+```
+
+The adapter is stdlib-only (urllib) and never becomes a core dependency;
+network failures surface explicitly as `MlflowExportError`.
+
 ## Agent Test Platform (Phase 4): Production Hardening and Governance
 
 Phase 4 upgrades external imports to resumable asynchronous jobs and adds a
