@@ -1,6 +1,6 @@
-# auditrail → OTLP/MLflow 导出契约映射表（v1 待实现）
+# auditrail → OTLP/MLflow 导出契约映射表（v1）
 
-> 状态：v1 待实现（双评审三轮迭代后通过：事实核对 + 设计纪律均 PASS）。本文只定义映射规则与证据纪律，不引入任何新依赖。
+> 状态：v1 已实现（`auditrail/integrations/mlflow.py` + CLI `export-mlflow`，测试见 `tests/test_integration_mlflow.py`）。本文只定义映射规则与证据纪律。
 > 基准：`/Users/chen/agentloop`，Run Contract v1（`auditrail/run_contract.py`）。
 > v0.1：合并评审 A（事实核对）与评审 B（设计纪律）的首轮意见。
 > v0.2：修复评审 A 复审发现的 llm_calls.json 双 schema（§5 重写为双形态对照 + 单位红线）、评审 B 的 2 个 minor（§3 工具 span 锚点退化、§6 turn_index 语义）。
@@ -127,3 +127,13 @@
 - **状态优先级**：`is_error=false` + 内容含 error 字样的夹具，断言导出 status 不为 failed（启发式未覆盖 observed 阴性信号）。
 - **回读对照**：导出后从 MLflow 读回，**仅对照 provenance=observed 字段**；预先定义 MLflow 摄取侧归一化（如属性名大小写、时间精度截断）的容差白名单，容差外差异才判失败。
 - **确定性测试不联网**：OTLP 发送层用 fake exporter 断言 payload，不打真实端点（沿用 `auditrail/AGENTS.md` 测试约束）。
+
+## 10. E2E 验证记录（2026-10-21）
+
+环境：MLflow 3.17.2（sqlite backend，`mlflow server --backend-store-uri sqlite:///...`），run `20261019-003406-dsh-9465a5d7`（38 次工具调用、38 条 tool result、28 条 llm_calls）。
+
+- **摄取**：OTLP/HTTP POST `/v1/traces` + `x-mlflow-experiment-id`，214,329 字节 payload 一次接受，trace status OK；
+- **回读对照**（仅 observed 字段）：run_id 精确一致；28/28 个 chat span 的 model + input/output/cache_read token 与源 `llm_calls.json` 逐条对上；工具名集合 5/5 无缺失；28 个 observed span 的毫秒时间戳经 ns 转换与 MLflow 存取后全部回指源消息 timestamp（容差外差异 = 0）；
+- **幂等**：重复导出同一 run 产生相同 trace_id（MLflow 去重，experiment 内仍 1 条 trace）、67 个唯一 span_id、字节数不变；
+- **状态纪律抽查**：38 个配对工具 span 中 37 个无信号 → UNSET（basis="none"），1 个经 `[exit code: N]` 标记判 ERROR——未出现"猜 OK"；
+- **待办**：xuanjian HTTP 来源 run 的 `id_anchor_stats` 实测（2026-10-21 时服务 192.168.1.238:8788 不可达）；首次接入真实 xuanjian run 时人工核对该分布（§3 既有要求）。
