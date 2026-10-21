@@ -34,6 +34,7 @@ async def get_agent() -> Any:
     first failed with "Event loop is closed". Construction is cheap compared
     with the model calls, so each call builds its own graph.
     """
+    _sanitize_no_proxy_env()
     create_deep_agent, init_chat_model, memory_saver = _load_deepagent_runtime()
     _validate_model_spec(init_chat_model, MODEL_SPEC)
     return create_deep_agent(
@@ -80,6 +81,27 @@ def _load_deepagent_runtime() -> tuple[Any, Any, Any]:
             "pip install -e '.[agent]'"
         ) from exc
     return create_deep_agent, init_chat_model, MemorySaver
+
+
+def _sanitize_no_proxy_env() -> None:
+    """Unbracket bracketed IPv6 entries in NO_PROXY/no_proxy.
+
+    Some shells export ``NO_PROXY=127.0.0.1,localhost,::1,[::1]``. The httpx2
+    client used by the OpenAI SDK (and therefore by langchain-deepseek) builds
+    proxy-mount patterns from NO_PROXY and misparses an already-bracketed
+    ``[::1]`` entry, failing model initialisation with
+    ``InvalidURL: Invalid port: ':1]'``. The unbracketed form ``::1`` is
+    handled correctly, so rewrite bracketed entries in place.
+    """
+    for name in ("no_proxy", "NO_PROXY"):
+        value = os.environ.get(name)
+        if not value or "[" not in value:
+            continue
+        entries = [
+            entry[1:-1] if entry.startswith("[") and entry.endswith("]") else entry
+            for entry in (part.strip() for part in value.split(","))
+        ]
+        os.environ[name] = ",".join(entries)
 
 
 def _validate_model_spec(init_chat_model: Any, model_spec: str) -> None:

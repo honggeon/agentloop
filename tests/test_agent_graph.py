@@ -74,3 +74,34 @@ def test_get_agent_builds_fresh_graph_per_event_loop(monkeypatch):
 
     assert first is not second
     assert len(builds) == 2
+
+
+def test_sanitize_no_proxy_unbrackets_ipv6_entries(monkeypatch):
+    """Regression: shells exporting NO_PROXY=...,[::1] made the OpenAI SDK's
+    httpx2 client fail model init with "InvalidURL: Invalid port: ':1]'".
+    Bracketed IPv6 entries must be rewritten to the handled unbracketed form."""
+    import os
+
+    from auditrail.agents import agent as agent_module
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,::1,[::1]")
+    monkeypatch.setenv("no_proxy", "example.com, [fe80::1]")
+
+    agent_module._sanitize_no_proxy_env()
+
+    assert os.environ["NO_PROXY"] == "127.0.0.1,localhost,::1,::1"
+    assert os.environ["no_proxy"] == "example.com,fe80::1"
+
+
+def test_sanitize_no_proxy_leaves_values_without_brackets_untouched(monkeypatch):
+    import os
+
+    from auditrail.agents import agent as agent_module
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    agent_module._sanitize_no_proxy_env()
+
+    assert os.environ["NO_PROXY"] == "127.0.0.1,localhost,::1"
+    assert "no_proxy" not in os.environ
