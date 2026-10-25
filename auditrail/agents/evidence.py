@@ -188,12 +188,31 @@ def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) 
         row = _find_trajectory_row(artifact, int(evidence["message_index"]))
         if row is None:
             return "message_index_not_found"
-        haystack = json.dumps(row, ensure_ascii=False, default=str)
+        target: Any = row
     else:
-        haystack = json.dumps(artifact, ensure_ascii=False, default=str)
-    if quote not in haystack:
-        return "quote_not_found"
-    return None
+        target = artifact
+    haystack = json.dumps(target, ensure_ascii=False, default=str)
+    if quote in haystack:
+        return None
+    # json.dumps 会转义字符串值内部的 '"' 等字符；逐字摘自这类值内部的
+    # quote（如包含 '"danger-full-access"' 的错误消息）永远匹配不上序列化
+    # 文本，会被误伤为 quote_not_found。回退到原始字符串值匹配，只对真正
+    # 非逐字的引用保持判负。
+    if any(quote in text for text in _iter_strings(target)):
+        return None
+    return "quote_not_found"
+
+
+def _iter_strings(value: Any):
+    """Yield every string value contained in a JSON-like structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_strings(item)
 
 
 def _find_trajectory_row(rows: Any, message_index: int) -> dict[str, Any] | None:
