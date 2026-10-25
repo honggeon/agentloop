@@ -238,6 +238,61 @@ def test_judge_run_includes_acceptance_criteria(tmp_path, monkeypatch):
     assert cli.main(["judge-run", "--run", str(run)]) == 0
 
 
+def test_judge_run_model_profile_is_forwarded(tmp_path, monkeypatch):
+    # --model-profile 透传给裁判调用，并作为 provenance 写进报告的 judge 字段。
+    run = _write_minimal_run(tmp_path)
+    seen = []
+    config_path = tmp_path / "judge_models.yaml"
+    config_path.write_text(
+        "profiles:\n"
+        "  kimi-for-coding:\n"
+        "    provider: openai\n"
+        "    model: kimi-for-coding\n"
+        "    api_key_env: OPENAI_API_KEY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "1")
+    monkeypatch.setenv("AUDITRAIL_JUDGE_MODEL_CONFIG", str(config_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    async def fake_invoke(messages, config=None, model_profile=None):
+        seen.append(model_profile)
+        return {
+            "overall_status": "success",
+            "completion_score": 95,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    code = cli.main(["judge-run", "--run", str(run), "--model-profile", "kimi-for-coding"])
+    assert code == 0
+    assert seen == ["kimi-for-coding"]
+    provenance = json.loads((run / "agent_judge.json").read_text(encoding="utf-8")).get("judge") or {}
+    assert provenance.get("model_profile") == "kimi-for-coding"
+    assert provenance.get("model") == "kimi-for-coding"
+    assert provenance.get("engine") == "deepagent"
+
+
+def test_judge_run_without_model_profile_keeps_legacy_signature(tmp_path, monkeypatch):
+    # 未指定 profile 时不得传 model_profile kwarg：旧的 (messages, config)
+    # 签名调用方（包括测试替身和 invoke_agent 默认值）完全不受影响。
+    run = _write_minimal_run(tmp_path)
+
+    async def fake_invoke(messages, config=None):
+        return {
+            "overall_status": "success",
+            "completion_score": 95,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    assert cli.main(["judge-run", "--run", str(run)]) == 0
+
+
 def test_load_dotenv_respects_guard(monkeypatch, tmp_path):
     # conftest sets AUDITRAIL_LOAD_DOTENV=0 for the whole suite; the guard must
     # keep working when invoked through the CLI entry as well.

@@ -21,10 +21,12 @@ logger = logging.getLogger(__name__)
 
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "openai")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1")
+#: env 兜底默认模型。实际生效模型在 ``get_agent()`` 运行时解析（配置文件
+#: profile / JUDGE_MODEL_PROFILE / 本默认值，见 agents/model_config.py）。
 MODEL_SPEC = f"{MODEL_PROVIDER}:{MODEL_NAME}"
 
 
-async def get_agent() -> Any:
+async def get_agent(model_profile: str | None = None) -> Any:
     """Build a fresh DeepAgent graph bound to the current event loop.
 
     The compiled graph and its async model client bind to the running loop.
@@ -33,12 +35,15 @@ async def get_agent() -> Any:
     graph would then be reused on a closed loop and every judge after the
     first failed with "Event loop is closed". Construction is cheap compared
     with the model calls, so each call builds its own graph.
+
+    ``model_profile`` 指定 config/judge_models.yaml 中的 profile 名；
+    为空时按 JUDGE_MODEL_PROFILE → 配置文件 default → env 兜底解析。
     """
     _sanitize_no_proxy_env()
     create_deep_agent, init_chat_model, memory_saver = _load_deepagent_runtime()
-    _validate_model_spec(init_chat_model, MODEL_SPEC)
+    model = _build_chat_model(init_chat_model, model_profile)
     return create_deep_agent(
-        model=MODEL_SPEC,
+        model=model,
         tools=[
             list_runs,
             load_run_summary,
@@ -49,7 +54,7 @@ async def get_agent() -> Any:
             build_chart_data,
         ],
         system_prompt=MAIN_SYSTEM_PROMPT,
-        subagents=build_subagents(MODEL_SPEC),
+        subagents=build_subagents(model),
         checkpointer=memory_saver(),
         name="Auditrail Analyst",
     )
@@ -59,13 +64,13 @@ async def graph() -> Any:
     return await get_agent()
 
 
-async def invoke_agent(messages: list[dict], config: dict | None = None) -> dict:
-    agent = await get_agent()
+async def invoke_agent(messages: list[dict], config: dict | None = None, model_profile: str | None = None) -> dict:
+    agent = await get_agent(model_profile)
     return await agent.ainvoke({"messages": messages}, config=config or {})
 
 
-async def stream_agent(messages: list[dict], config: dict | None = None) -> AsyncIterator[dict]:
-    agent = await get_agent()
+async def stream_agent(messages: list[dict], config: dict | None = None, model_profile: str | None = None) -> AsyncIterator[dict]:
+    agent = await get_agent(model_profile)
     async for chunk in agent.astream({"messages": messages}, config=config or {}):
         yield chunk
 
@@ -104,12 +109,16 @@ def _sanitize_no_proxy_env() -> None:
         os.environ[name] = ",".join(entries)
 
 
-def _validate_model_spec(init_chat_model: Any, model_spec: str) -> None:
+def _build_chat_model(init_chat_model: Any, model_profile: str | None = None) -> Any:
+    """按 profile 配置构建 chat model；解析或初始化失败给出明确错误。"""
+    from .model_config import chat_model_kwargs, resolve_judge_model
+
+    spec = resolve_judge_model(model_profile)
     try:
-        init_chat_model(model_spec)
+        return init_chat_model(spec.chat_model_spec, **chat_model_kwargs(spec))
     except Exception as exc:
         raise RuntimeError(
-            "MODEL_SPEC %r could not be initialised. Cause: %s: %s"
-            % (model_spec, type(exc).__name__, exc)
+            "judge model %r (profile %r) could not be initialised. Cause: %s: %s"
+            % (spec.chat_model_spec, spec.name or "env", type(exc).__name__, exc)
         ) from exc
 

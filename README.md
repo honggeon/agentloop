@@ -326,10 +326,26 @@ export MODEL_NAME=gpt-4.1
 export OPENAI_API_KEY=...
 ```
 
+也可以在 `config/judge_models.yaml` 里声明多个模型 profile（样例见
+`config/judge_models.yaml.example`）。凭据不落盘：profile 里的
+`api_key_env` 只放环境变量名。选择优先级：`judge-run --model-profile` >
+`JUDGE_MODEL_PROFILE` 环境变量 > 配置文件 `default` > 上面的 env 兜底。
+
+```yaml
+default: kimi-for-coding
+profiles:
+  kimi-for-coding:
+    provider: openai
+    model: kimi-for-coding
+    base_url: https://api.kimi.com/coding/v1
+    api_key_env: OPENAI_API_KEY
+```
+
 Judge an exported run:
 
 ```bash
 python3 -m auditrail.cli judge-run --run runs/<run-dir>
+python3 -m auditrail.cli judge-run --run runs/<run-dir> --model-profile deepseek
 ```
 
 The command writes:

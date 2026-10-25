@@ -67,6 +67,10 @@ def main(argv=None) -> int:
     judge.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
     judge.add_argument("--thread-id", default=None, help="裁判会话 thread id（可选）。")
     judge.add_argument(
+        "--model-profile", default=None,
+        help="裁判模型 profile 名（config/judge_models.yaml）；缺省按 JUDGE_MODEL_PROFILE → 配置 default → env 兜底。",
+    )
+    judge.add_argument(
         "--output-format", choices=["json", "markdown", "both"], default="both",
         help="报告输出格式。",
     )
@@ -486,12 +490,13 @@ def _judge_run(args) -> int:
     # 统一裁判执行边界：引擎负责候选优选与一次有界修复；write_judge_report
     # 是发布前最后一道完整性门禁。proposal 结构不完整时明确失败（返回 2），
     # 不写出或覆盖任何报告文件。
-    engine = DeepAgentJudgeEngine()
+    engine = DeepAgentJudgeEngine(model_profile=args.model_profile)
     request = JudgeRequest(run_dir=run_dir, run_id=run_dir.name, thread_id=args.thread_id or "")
     try:
         result = engine.run(request)
         report = resolve_judge_report(result.proposal, run_dir)
-        paths = write_judge_report(str(run_dir), report)
+        report_metadata = {**dict(result.metadata), "engine": result.engine}
+        paths = write_judge_report(str(run_dir), report, judge_metadata=report_metadata)
     except JudgeEngineError as exc:
         print("Judge failed: %s" % exc, file=sys.stderr)
         return 2

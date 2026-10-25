@@ -65,9 +65,10 @@ def test_get_agent_builds_fresh_graph_per_event_loop(monkeypatch):
     monkeypatch.setattr(
         agent_module,
         "_load_deepagent_runtime",
-        lambda: (fake_create_deep_agent, lambda spec: object(), lambda: object()),
+        lambda: (fake_create_deep_agent, lambda spec, **kwargs: object(), lambda: object()),
     )
-    monkeypatch.setattr(agent_module, "_validate_model_spec", lambda init, spec: None)
+    # _build_chat_model 走真实解析路径：测试守卫下无配置文件，回退到 env
+    # 默认模型，再由上面的假 init_chat_model 接住，不需要模型凭据。
 
     first = asyncio.run(agent_module.get_agent())
     second = asyncio.run(agent_module.get_agent())

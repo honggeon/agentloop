@@ -42,7 +42,9 @@ def _write_judge_report_with_feedback(*args: Any, **kwargs: Any) -> Any:
         }
 
 
-def build_subagents(model_spec: str) -> list[dict]:
+def build_subagents(model_spec: Any) -> list[dict]:
+    """构建子智能体声明。``model_spec`` 为 "provider:model" 字符串或
+    已初始化的 chat model 实例（profile 配置路径，见 agents/model_config.py）。"""
     return [
         {
             "name": "trajectory_analyst",

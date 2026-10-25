@@ -43,9 +43,18 @@ class DeepAgentJudgeEngine:
     id = DEEPAGENT_ENGINE
     label = "DeepAgent 裁判"
 
-    def __init__(self, invoke: Any = None, *, thread_id_prefix: str = _THREAD_ID_PREFIX):
+    def __init__(
+        self,
+        invoke: Any = None,
+        *,
+        thread_id_prefix: str = _THREAD_ID_PREFIX,
+        model_profile: Optional[str] = None,
+    ):
         self._invoke = invoke
         self._thread_id_prefix = thread_id_prefix
+        #: config/judge_models.yaml 中的 profile 名；None 表示按
+        #: JUDGE_MODEL_PROFILE → 配置 default → env 兜底解析。
+        self._model_profile = model_profile
 
     def available(self) -> Optional[str]:
         # Preserved behavior: availability is decided when the graph loads, so
@@ -123,14 +132,35 @@ class DeepAgentJudgeEngine:
         else:
             from ..agents.agent import invoke_agent
 
-            result = invoke_agent(messages, config=config)
+            # 仅在显式指定 profile 时传递该参数：保持 invoke_agent 旧签名
+            # 的调用方（含测试替身）在未用 profile 时完全不受影响。
+            if self._model_profile is not None:
+                result = invoke_agent(messages, config=config, model_profile=self._model_profile)
+            else:
+                result = invoke_agent(messages, config=config)
         if inspect.isawaitable(result):
             return await result
         return result
 
     def _metadata(self) -> dict[str, Any]:
-        return {
-            "runtime": "deepagent",
-            "provider": os.getenv(_MODEL_PROVIDER_ENV, ""),
-            "model": os.getenv(_MODEL_NAME_ENV, ""),
-        }
+        from ..agents.model_config import resolve_judge_model
+
+        try:
+            spec = resolve_judge_model(self._model_profile)
+            return {
+                "runtime": "deepagent",
+                "provider": spec.provider,
+                "model": spec.model,
+                "model_profile": spec.name,
+                "model_source": spec.source,
+            }
+        except (RuntimeError, ValueError):
+            # 解析失败时保留旧行为：metadata 只记录 env 原始值；真正的错误
+            # 会在 engine.run() 的模型初始化阶段抛出。
+            return {
+                "runtime": "deepagent",
+                "provider": os.getenv(_MODEL_PROVIDER_ENV, ""),
+                "model": os.getenv(_MODEL_NAME_ENV, ""),
+                "model_profile": "",
+                "model_source": "env",
+            }

@@ -1,0 +1,27 @@
+# 裁判模型 profile 配置示例。复制为 config/judge_models.yaml 后按需修改。
+#
+# 规则：
+# - 凭据不落盘：api_key_env 只放环境变量名，真正的 key 仍由 .env / 进程环境提供。
+# - default 指向启用的 profile；也可用 JUDGE_MODEL_PROFILE 环境变量或
+#   judge-run --model-profile 覆盖（优先级：CLI 参数 > 环境变量 > default）。
+# - 无此文件时行为与旧版一致：MODEL_PROVIDER / MODEL_NAME 环境变量兜底。
+
+default: kimi-for-coding
+
+profiles:
+  kimi-for-coding:
+    provider: openai                 # langchain provider（OpenAI 兼容端点）
+    model: kimi-for-coding
+    base_url: https://api.kimi.com/coding/v1
+    api_key_env: OPENAI_API_KEY
+
+  kimi-k3:
+    provider: openai
+    model: k3
+    base_url: https://api.kimi.com/coding/v1
+    api_key_env: OPENAI_API_KEY
+
+  deepseek:
+    provider: deepseek
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
