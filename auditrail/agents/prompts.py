@@ -4,6 +4,9 @@ EVIDENCE_FORMAT_REQUIREMENT = """
 - quote 必须是源文件中逐字出现的文本（如字段名和值、消息原文片段），写入报告时系统会对源文件做子串校验；校验失败的证据会被判为无效，事实性结论会被降级为 inference，evidence_citation 维度会被确定性判 fail。
 - 引用 trajectory.jsonl 中某条消息时必须填 message_index（消息行号，从 0 开始），不得编造 message_index。
 - 禁止写 "file:field=value"、"file#N" 这类引用记号；quote 里只放文件中真实逐字存在的内容。
+- 禁止 "msg N ..."、"消息 N ..."、"第 N 条 ..." 这类描述式引用：quote 必须是可直接复制粘贴的原文片段，不得概括、翻译、缩写或改写，哪怕意思正确也会被判无效。
+- quote 里如需包含双引号、换行等字符请原样保留，系统按原始文本校验，无需转义。
+- 找不到逐字原文支撑的结论，把 type 标为 inference，不要硬凑或编造 quote。
 - 引用逐字校验通过只代表引用真实存在，不代表结论被系统证明；不要把推断标成 fact。
 """
 

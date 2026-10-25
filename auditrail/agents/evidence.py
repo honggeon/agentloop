@@ -19,18 +19,27 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
     artifacts = _load_artifacts(Path(run_path))
     evidence_rows = _collect_evidence(report)
     invalid = []
+    index_corrections: list[dict[str, Any]] = []
     valid_count = 0
     valid_by_location: dict[str, int] = {}
     dimension_support_total: dict[str, int] = {}
     dimension_support_valid: dict[str, int] = {}
 
     for location, evidence, dimension_key, is_support in evidence_rows:
-        result = _validate_one_evidence(evidence, artifacts)
+        result, corrected_index = _validate_one_evidence(evidence, artifacts)
         if result is None:
             valid_count += 1
             valid_by_location[location] = valid_by_location.get(location, 0) + 1
             if dimension_key and is_support:
                 dimension_support_valid[dimension_key] = dimension_support_valid.get(dimension_key, 0) + 1
+            if corrected_index is not None:
+                index_corrections.append(
+                    {
+                        "location": location,
+                        "message_index": evidence.get("message_index"),
+                        "corrected_message_index": corrected_index,
+                    }
+                )
         else:
             invalid.append({"location": location, **evidence, "reason": result})
         if dimension_key and is_support:
@@ -80,11 +89,15 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
         notes.append("%s scored dimensions have no evidence" % len(unsupported_dimensions))
     if mismatch_dimensions:
         notes.append("%s scored dimensions have no valid evidence" % len(mismatch_dimensions))
+    if index_corrections:
+        notes.append("%s evidence references had a drifted message_index (accepted verbatim)" % len(index_corrections))
 
     return {
         "evidence_coverage": round(valid_count / total, 4) if total else 0,
         "unsupported_claim_count": unsupported,
         "invalid_evidence_count": len(invalid),
+        "index_corrected_count": len(index_corrections),
+        "index_corrections": index_corrections,
         "fact_inference_mismatch_count": mismatch,
         "unsupported_dimension_count": len(unsupported_dimensions),
         "dimension_evidence_mismatch_count": len(mismatch_dimensions),
@@ -174,33 +187,61 @@ def _canonical_source(source: str) -> str:
     return EVIDENCE_SOURCE_ALIASES.get(str(source or "").strip().lower(), str(source or ""))
 
 
-def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) -> str | None:
+def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) -> tuple[str | None, int | None]:
+    """Validate one reference; return ``(failure_reason, corrected_index)``.
+
+    ``corrected_index`` is set when the quote missed its declared
+    ``message_index`` row but appears verbatim in another trajectory row:
+    model row-number drift must not fail a real quote.
+    """
     source = _canonical_source(str(evidence.get("source") or ""))
     quote = str(evidence.get("quote") or "").strip()
     if not source:
-        return "missing_source"
+        return "missing_source", None
     if source not in artifacts:
-        return "source_not_found"
+        return "source_not_found", None
     if not quote:
-        return "missing_quote"
+        return "missing_quote", None
     artifact = artifacts[source]
-    if source == "trajectory.jsonl" and evidence.get("message_index") is not None:
-        row = _find_trajectory_row(artifact, int(evidence["message_index"]))
+    declared_index = evidence.get("message_index")
+    if source == "trajectory.jsonl" and declared_index is not None:
+        row = _find_trajectory_row(artifact, int(declared_index))
         if row is None:
-            return "message_index_not_found"
+            return "message_index_not_found", None
         target: Any = row
     else:
         target = artifact
     haystack = json.dumps(target, ensure_ascii=False, default=str)
     if quote in haystack:
-        return None
+        return None, None
     # json.dumps 会转义字符串值内部的 '"' 等字符；逐字摘自这类值内部的
     # quote（如包含 '"danger-full-access"' 的错误消息）永远匹配不上序列化
     # 文本，会被误伤为 quote_not_found。回退到原始字符串值匹配，只对真正
     # 非逐字的引用保持判负。
     if any(quote in text for text in _iter_strings(target)):
+        return None, None
+    # message_index 漂移容错：quote 未命中声明的行，但逐字存在于轨迹其它行
+    # 时按有效计并记录校正行号（模型 off-by-one 行号漂移不应判负真实引用）。
+    if source == "trajectory.jsonl" and declared_index is not None:
+        corrected = _find_quote_row_index(artifact, quote)
+        if corrected is not None:
+            return None, corrected
+    return "quote_not_found", None
+
+
+def _find_quote_row_index(rows: Any, quote: str) -> int | None:
+    """Return the ``index`` of the trajectory row containing ``quote`` verbatim."""
+    if not isinstance(rows, list):
         return None
-    return "quote_not_found"
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if quote in json.dumps(row, ensure_ascii=False, default=str) or any(
+            quote in text for text in _iter_strings(row)
+        ):
+            index = row.get("index")
+            return int(index) if isinstance(index, int) else None
+    return None
 
 
 def _iter_strings(value: Any):

@@ -355,3 +355,53 @@ def test_verbatim_quote_containing_double_quotes_is_valid(tmp_path):
     assert reliability["invalid_evidence_count"] == 1
     assert reliability["invalid_evidence"][0]["location"] == "findings.1"
     assert reliability["invalid_evidence"][0]["reason"] == "quote_not_found"
+
+
+def test_drifted_message_index_is_corrected_not_rejected(tmp_path):
+    # 回归：quote 逐字真实存在但 message_index 指错行（模型行号漂移）时，
+    # 按有效计并记录校正行号，不误判 quote_not_found；quote 在轨迹中完全
+    # 不存在时仍判负。DeepSeek 裁判实测 3 条无效引用全是此类 off-by-one。
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = [
+        {"index": 0, "role": "user", "content": "跑测试"},
+        {"index": 1, "role": "assistant", "content": "好的"},
+        {"index": 2, "role": "tool", "tool_call_id": "c1", "content": "ERROR collecting tests/acp_adapter/test_edit_approval.py"},
+    ]
+    (run / "trajectory.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+    report = normalize_judge_report(
+        {
+            "overall_status": "failed",
+            "summary": "x",
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "收集失败",
+                    "type": "fact",
+                    # quote 在 index=2，模型错写成 1
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "ERROR collecting tests/acp_adapter/test_edit_approval.py"}],
+                    "recommendation": "x",
+                },
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "编造",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "ERROR collecting tests/nonexistent.py"}],
+                    "recommendation": "x",
+                },
+            ],
+        }
+    )
+
+    reliability = validate_judge_evidence(run, report)
+
+    assert reliability["valid_evidence_count"] == 1
+    assert reliability["invalid_evidence_count"] == 1
+    assert reliability["invalid_evidence"][0]["location"] == "findings.1"
+    assert reliability["index_corrected_count"] == 1
+    correction = reliability["index_corrections"][0]
+    assert correction["location"] == "findings.0"
+    assert correction["message_index"] == 1
+    assert correction["corrected_message_index"] == 2

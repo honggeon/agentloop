@@ -62,6 +62,8 @@ def extract_json_object(value: object) -> Dict[str, Any]:
     best: Dict[str, Any] | None = None
     best_score: tuple[int, int] | None = None
     for candidate in _iter_json_dicts(value, depth=0):
+        if not isinstance(candidate, dict):
+            continue
         score = _report_candidate_score(candidate)
         if score is None:
             continue
@@ -160,10 +162,12 @@ def _iter_json_dicts(value: object, depth: int) -> Iterable[Dict[str, Any]]:
         for key in ("output", "report", "result", "content", "text", "args", "arguments", "input"):
             if key in value and key != "messages":
                 yield from _iter_json_dicts(value.get(key), depth + 1)
-        yield from _iter_tool_call_payloads(value.get("tool_calls") or [])
+        for payload in _iter_tool_call_payloads(value.get("tool_calls") or []):
+            yield from _iter_json_dicts(payload, depth + 1)
         additional = value.get("additional_kwargs")
         if isinstance(additional, dict):
-            yield from _iter_tool_call_payloads(additional.get("tool_calls") or [])
+            for payload in _iter_tool_call_payloads(additional.get("tool_calls") or []):
+                yield from _iter_json_dicts(payload, depth + 1)
         # Models sometimes wrap the report in an envelope with unknown keys
         # ({"schema_version": ..., "judge_report": {...}}); sweep every other
         # value so a nested report is still found.
@@ -838,10 +842,15 @@ def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
     dimensions_without = item.get("dimensions_without_valid_evidence") or []
     if not isinstance(dimensions_without, list):
         dimensions_without = []
+    corrections = item.get("index_corrections") or []
+    if not isinstance(corrections, list):
+        corrections = []
     return {
         "evidence_coverage": max(0, min(1, float(coverage))),
         "unsupported_claim_count": max(0, int(item.get("unsupported_claim_count") or 0)),
         "invalid_evidence_count": max(0, int(item.get("invalid_evidence_count") or 0)),
+        "index_corrected_count": max(0, int(item.get("index_corrected_count") or 0)),
+        "index_corrections": [row for row in corrections if isinstance(row, dict)],
         "fact_inference_mismatch_count": max(0, int(item.get("fact_inference_mismatch_count") or 0)),
         "unsupported_dimension_count": max(0, int(item.get("unsupported_dimension_count") or 0)),
         "dimension_evidence_mismatch_count": max(0, int(item.get("dimension_evidence_mismatch_count") or 0)),
