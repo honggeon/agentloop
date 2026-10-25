@@ -13,6 +13,7 @@ import {
   apiPostJson,
   fetchJudgeComparison,
   fetchJudgeEngines,
+  fetchJudgeModels,
   fetchJudgeReport,
   fetchJudgeReports,
   type Finding,
@@ -20,6 +21,7 @@ import {
   type JudgeEngineInfo,
   type JudgeEvidence,
   type JudgeEvidenceChain,
+  type JudgeModelOptions,
   type JudgeReport,
   type JudgeReportList,
   type LlmCallDetail,
@@ -77,6 +79,21 @@ const EMPTY_COMPARISON: JudgeComparisonReport = {
 const judgeEngineChoices = computed(() => {
   const engines = judgeEngines.value.filter((item) => item.id === "deepagent" || item.available);
   return engines.length ? engines : [{ id: "deepagent", label: "DeepAgent 裁判", available: true, disabled_reason: null }];
+});
+// 裁判模型 profile（config/judge_models.yaml）；空字符串 = 不指定，由后端按
+// JUDGE_MODEL_PROFILE → 配置 default → env 兜底解析。仅适用于 deepagent 引擎。
+const judgeModelOptions = ref<JudgeModelOptions | null>(null);
+const judgeModelProfile = ref("");
+const judgeModelChoices = computed(() => {
+  const options = judgeModelOptions.value;
+  const profiles = (options?.profiles || []).filter((item) => item.available);
+  const defaultLabel = options?.default
+    ? `默认（配置：${options.default}）`
+    : `默认（${options?.env_fallback.provider || "env"}:${options?.env_fallback.model || "环境变量"}）`;
+  return [
+    { id: "", label: defaultLabel },
+    ...profiles.map((item) => ({ id: item.id, label: `${item.id}（${item.model}）` }))
+  ];
 });
 const judgeEngineLabel = computed(
   () => judgeEngineChoices.value.find((item) => item.id === judgeEngine.value)?.label || "裁判"
@@ -759,14 +776,27 @@ async function loadJudgeEngines() {
   }
 }
 
+async function loadJudgeModels() {
+  try {
+    judgeModelOptions.value = await fetchJudgeModels();
+    judgeModelProfile.value = judgeModelOptions.value.selected || "";
+  } catch {
+    // 接口不可用时隐藏选择器语义：仅有「默认」一项，不改变既有行为。
+    judgeModelOptions.value = null;
+    judgeModelProfile.value = "";
+  }
+}
+
 async function runJudge() {
   if (!runId.value) return;
   judging.value = true;
   error.value = "";
   try {
-    const result = await apiPostJson<{ report: JudgeReport }>(`/api/runs/${runId.value}/judge`, {
-      engine: judgeEngine.value
-    });
+    const payload: { engine: string; model_profile?: string } = { engine: judgeEngine.value };
+    if (judgeEngine.value === "deepagent" && judgeModelProfile.value) {
+      payload.model_profile = judgeModelProfile.value;
+    }
+    const result = await apiPostJson<{ report: JudgeReport }>(`/api/runs/${runId.value}/judge`, payload);
     judge.value = result.report;
     charts.value = (result.report.charts as Record<string, any>) || charts.value;
     await loadJudgeReports(runId.value);
@@ -896,6 +926,7 @@ watch(
 onMounted(() => {
   if (!runs.value.length) void reloadRuns();
   void loadJudgeEngines();
+  void loadJudgeModels();
 });
 </script>
 
@@ -945,6 +976,18 @@ onMounted(() => {
             <span class="judge-engine-label">裁判引擎</span>
             <select v-model="judgeEngine" class="judge-engine-select" :disabled="!runId || judging" aria-label="裁判引擎">
               <option v-for="item in judgeEngineChoices" :key="item.id" :value="item.id">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
+          <label
+            v-if="judgeEngine === 'deepagent'"
+            class="judge-engine-picker"
+            title="裁判模型来自 config/judge_models.yaml 的 profile"
+          >
+            <span class="judge-engine-label">裁判模型</span>
+            <select v-model="judgeModelProfile" class="judge-engine-select" :disabled="!runId || judging" aria-label="裁判模型">
+              <option v-for="item in judgeModelChoices" :key="item.id" :value="item.id">
                 {{ item.label }}
               </option>
             </select>

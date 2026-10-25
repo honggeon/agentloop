@@ -801,6 +801,100 @@ def test_backend_judge_twice_incomplete_returns_500_and_preserves_active_report(
     assert (run / "judges" / "manifest.json").read_text(encoding="utf-8") == manifest_before
 
 
+def _write_judge_model_config(tmp_path, monkeypatch):
+    """写入临时裁判模型配置并放开加载守卫（conftest 默认禁用）。"""
+    config_path = tmp_path / "judge_models.yaml"
+    config_path.write_text(
+        "default: kimi\n"
+        "profiles:\n"
+        "  kimi:\n"
+        "    provider: openai\n"
+        "    model: kimi-for-coding\n"
+        "    base_url: https://api.kimi.com/coding/v1\n"
+        "    api_key_env: OPENAI_API_KEY\n"
+        "  nokey:\n"
+        "    provider: openai\n"
+        "    model: k3\n"
+        "    api_key_env: MISSING_TEST_KEY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUDITRAIL_LOAD_DOTENV", "1")
+    monkeypatch.setenv("AUDITRAIL_JUDGE_MODEL_CONFIG", str(config_path))
+    return config_path
+
+
+def test_judge_models_endpoint_lists_profiles_without_secrets(tmp_path, monkeypatch):
+    _write_judge_model_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("MISSING_TEST_KEY", raising=False)
+    client = TestClient(app)
+
+    data = client.get("/api/judge/models").json()
+
+    assert data["default"] == "kimi"
+    by_id = {p["id"]: p for p in data["profiles"]}
+    assert by_id["kimi"]["available"] is True
+    assert by_id["kimi"]["model"] == "kimi-for-coding"
+    assert by_id["nokey"]["available"] is False
+    assert by_id["nokey"]["disabled_reason"]
+    # 凭据变量名和值都不得出现在响应里
+    body = json.dumps(data, ensure_ascii=False)
+    assert "OPENAI_API_KEY" not in body and "sk-test" not in body
+    assert data["env_fallback"]["provider"]  # env 兜底信息存在
+
+
+def test_backend_judge_accepts_model_profile(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    _write_judge_model_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    seen = []
+
+    async def fake_invoke(messages, config=None, model_profile=None):
+        seen.append(model_profile)
+        return {
+            "overall_status": "success",
+            "completion_score": 88,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    monkeypatch.setattr("auditrail.agents.agent.invoke_agent", fake_invoke)
+    client = TestClient(app)
+
+    response = client.post("/api/runs/run-1/judge", json={"engine": "deepagent", "model_profile": "kimi"})
+
+    assert response.status_code == 200
+    assert seen == ["kimi"]
+    # provenance 在 write_judge_report 内归一化后持久化到报告文件
+    persisted = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    assert persisted["judge"]["model_profile"] == "kimi"
+    assert persisted["judge"]["model"] == "kimi-for-coding"
+    assert persisted["judge"]["engine"] == "deepagent"
+
+
+def test_backend_judge_rejects_unknown_or_misscoped_model_profile(tmp_path, monkeypatch):
+    run = _write_run(tmp_path)
+    settings = Settings(runs_dir=tmp_path / "runs")
+    monkeypatch.setattr("backend.app.routes.judge.get_settings", lambda: settings)
+    _write_judge_model_config(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    unknown = client.post("/api/runs/run-1/judge", json={"model_profile": "ghost"})
+    assert unknown.status_code == 400
+    assert "available" in unknown.json()["detail"]
+
+    wrong_engine = client.post("/api/runs/run-1/judge", json={"engine": "dsh", "model_profile": "kimi"})
+    assert wrong_engine.status_code == 400
+    assert "deepagent" in wrong_engine.json()["detail"]
+
+    bad_type = client.post("/api/runs/run-1/judge", json={"model_profile": 7})
+    assert bad_type.status_code == 400
+
+
 def test_get_run_judge_reads_legacy_incomplete_report(tmp_path, monkeypatch):
     # 历史兼容：旧式不完整报告（11 个维度 source=missing、无 judge_incomplete
     # 字段）必须仍可读取展示，新门禁只约束新报告发布，不让 GET 报错。

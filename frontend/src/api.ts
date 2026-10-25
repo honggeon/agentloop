@@ -624,6 +624,23 @@ export interface JudgeEngineOptions {
   selected: string;
 }
 
+// 裁判模型 profile：来自 config/judge_models.yaml，只含展示用字段；
+// 凭据变量名和值永不下发。
+export interface JudgeModelProfile {
+  id: string;
+  provider: string;
+  model: string;
+  available: boolean;
+  disabled_reason?: string | null;
+}
+
+export interface JudgeModelOptions {
+  default: string;
+  selected: string;
+  env_fallback: { provider: string; model: string };
+  profiles: JudgeModelProfile[];
+}
+
 // GET /api/dsh/options 返回的后端授权清单：只有这里列出的 profile / workspace
 // 才会被后端接受，前端不得自行拼出其它取值。
 export interface DshOptions {
@@ -797,6 +814,10 @@ export function fetchDshOptions(): Promise<DshOptions> {
 
 export function fetchJudgeEngines(): Promise<JudgeEngineOptions> {
   return apiGet<JudgeEngineOptions>("/api/judge/engines");
+}
+
+export function fetchJudgeModels(): Promise<JudgeModelOptions> {
+  return apiGet<JudgeModelOptions>("/api/judge/models");
 }
 
 // 一个 run 的多 Judge 报告清单与对比（不自动选择「最佳 Judge」）。

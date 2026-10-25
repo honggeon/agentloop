@@ -180,3 +180,38 @@ def chat_model_kwargs(spec: JudgeModelSpec, *, environ: Optional[Mapping[str, st
             )
         kwargs["api_key"] = value
     return kwargs
+
+
+def describe_model_profiles(
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> dict[str, Any]:
+    """列出可选裁判模型 profile 及可用性，供 API/前端展示。
+
+    只暴露 profile 名、provider、model 和可用性；环境变量名与凭据值都不下发。
+    """
+    env: Mapping[str, str] = os.environ if environ is None else environ
+    cfg: Mapping[str, Any] = load_model_config() if config is None else config
+    profiles = cfg.get("profiles") or {}
+    rows = []
+    for name in sorted(profiles):
+        item = profiles[name]
+        api_key_env = str(item.get("api_key_env") or "")
+        missing_key = bool(api_key_env) and not str(env.get(api_key_env) or "").strip()
+        rows.append(
+            {
+                "id": name,
+                "provider": str(item["provider"]),
+                "model": str(item["model"]),
+                "available": not missing_key,
+                "disabled_reason": "API key 未配置" if missing_key else None,
+            }
+        )
+    fallback = resolve_judge_model(None, config={}, environ=env)
+    return {
+        "default": str(cfg.get("default") or ""),
+        "selected": str(env.get(PROFILE_ENV) or "").strip(),
+        "env_fallback": {"provider": fallback.provider, "model": fallback.model},
+        "profiles": rows,
+    }

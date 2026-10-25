@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from auditrail.agents.model_config import describe_model_profiles, load_model_config
 from auditrail.agents.schemas import resolve_judge_report
 from auditrail.agents.tools import write_judge_report
 from auditrail.judges.base import (
@@ -27,6 +28,7 @@ from auditrail.judges.base import (
     describe_engines,
     resolve_judge_engine,
 )
+from auditrail.judges.deepagent_engine import DeepAgentJudgeEngine
 from auditrail.judges.proposals import JudgeProposalError
 from auditrail.judges.reports import (
     JudgeReportLockTimeout,
@@ -48,12 +50,31 @@ def get_judge_engines() -> dict[str, Any]:
     return describe_engines(None, get_settings())
 
 
+@router.get("/judge/models")
+def get_judge_models() -> dict[str, Any]:
+    """List judge model profiles (config/judge_models.yaml) for the UI.
+
+    Never exposes credential env var names or values; availability is a
+    boolean derived from key presence.
+    """
+    try:
+        return describe_model_profiles()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/judge")
 def run_judge(run_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     path = _run_path_or_404(run_id)
     settings = get_settings()
     engine_id = _requested_engine(payload)
-    engine = _resolve_engine(engine_id, settings)
+    model_profile = _requested_model_profile(payload, engine_id)
+    if model_profile is not None:
+        # model_profile 只适用于 deepagent 引擎（dsh 引擎模型由 DSH profile
+        # 控制），绕过注册表直接构造以绑定 profile。
+        engine = DeepAgentJudgeEngine(model_profile=model_profile)
+    else:
+        engine = _resolve_engine(engine_id, settings)
     # Validate the server-owned DSH judge policy before any judge work starts so
     # a misconfigured judge maps to 503 instead of a mid-run failure.
     _engine_metadata(engine.id, settings)
@@ -135,6 +156,34 @@ def _requested_engine(payload: dict[str, Any] | None) -> str | None:
     if not isinstance(engine, str) or not engine.strip():
         raise HTTPException(status_code=400, detail="judge engine must be a non-empty string")
     return engine
+
+
+def _requested_model_profile(payload: dict[str, Any] | None, engine_id: str | None) -> str | None:
+    """Validate an optional judge model profile name against the config file."""
+    if payload is None or not isinstance(payload, dict):
+        return None
+    profile = payload.get("model_profile")
+    if profile is None:
+        return None
+    if not isinstance(profile, str) or not profile.strip():
+        raise HTTPException(status_code=400, detail="model_profile must be a non-empty string")
+    profile = profile.strip()
+    if engine_id not in (None, "deepagent"):
+        raise HTTPException(
+            status_code=400,
+            detail="model_profile 仅适用于 deepagent 引擎；dsh 引擎的模型由 DSH profile 控制",
+        )
+    try:
+        profiles = load_model_config().get("profiles") or {}
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if profile not in profiles:
+        available = ", ".join(sorted(profiles)) or "(none)"
+        raise HTTPException(
+            status_code=400,
+            detail="unknown judge model profile %r; available: %s" % (profile, available),
+        )
+    return profile
 
 
 def _resolve_engine(engine_id: str | None, settings: Any):

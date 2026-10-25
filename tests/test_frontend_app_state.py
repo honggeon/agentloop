@@ -138,6 +138,22 @@ def test_run_view_can_select_the_judge_engine():
     assert "judge?.judge?.engine" in source or "judge.judge?.engine" in source
 
 
+def test_run_view_can_select_the_judge_model_profile():
+    source = RUN_VIEW.read_text(encoding="utf-8")
+    api_source = API_TS.read_text(encoding="utf-8")
+
+    assert "export interface JudgeModelProfile" in api_source
+    assert "export interface JudgeModelOptions" in api_source
+    assert "fetchJudgeModels" in api_source
+    assert "/api/judge/models" in api_source
+    assert "裁判模型" in source
+    assert "judgeModelChoices" in source
+    assert "judgeModelProfile" in source
+    # 仅 deepagent 引擎显示模型选择器，且仅在非默认时把 profile 传给后端
+    assert "judgeEngine === 'deepagent'" in source
+    assert "payload.model_profile = judgeModelProfile.value" in source
+
+
 def test_run_view_lists_and_compares_multiple_judge_reports():
     source = RUN_VIEW.read_text(encoding="utf-8")
     api_source = API_TS.read_text(encoding="utf-8")
