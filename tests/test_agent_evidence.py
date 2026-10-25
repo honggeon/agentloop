@@ -405,3 +405,47 @@ def test_drifted_message_index_is_corrected_not_rejected(tmp_path):
     assert correction["location"] == "findings.0"
     assert correction["message_index"] == 1
     assert correction["corrected_message_index"] == 2
+
+
+def test_whitespace_collapsed_quote_is_valid(tmp_path):
+    # 回归：裁判把多行工具输出展平成单行引用（"missing []\nextra []" →
+    # "missing [] extra []"）时按有效计；词序不同的引用仍判负。Kimi 裁判
+    # 修复后实测 22 条无效引用全是此类空白折叠。
+    run = tmp_path / "run"
+    run.mkdir()
+    rows = [
+        {"index": 0, "role": "user", "content": "校验日志"},
+        {"index": 1, "role": "tool", "tool_call_id": "c1", "content": "--- missing metadata logs ---\nmissing []\nextra []\n--- headings ---"},
+    ]
+    (run / "trajectory.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+    report = normalize_judge_report(
+        {
+            "overall_status": "failed",
+            "summary": "x",
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "日志校验",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "missing [] extra []"}],
+                    "recommendation": "x",
+                },
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "词序不同",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "extra [] missing []"}],
+                    "recommendation": "x",
+                },
+            ],
+        }
+    )
+
+    reliability = validate_judge_evidence(run, report)
+
+    assert reliability["valid_evidence_count"] == 1
+    assert reliability["invalid_evidence_count"] == 1
+    assert reliability["invalid_evidence"][0]["location"] == "findings.1"
+    assert reliability["invalid_evidence"][0]["reason"] == "quote_not_found"

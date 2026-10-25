@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -211,14 +212,10 @@ def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) 
         target: Any = row
     else:
         target = artifact
-    haystack = json.dumps(target, ensure_ascii=False, default=str)
-    if quote in haystack:
-        return None, None
-    # json.dumps 会转义字符串值内部的 '"' 等字符；逐字摘自这类值内部的
-    # quote（如包含 '"danger-full-access"' 的错误消息）永远匹配不上序列化
-    # 文本，会被误伤为 quote_not_found。回退到原始字符串值匹配，只对真正
-    # 非逐字的引用保持判负。
-    if any(quote in text for text in _iter_strings(target)):
+    # 匹配阶梯见 _quote_in_target：JSON 序列化精确匹配 → 原始字符串匹配
+    # （json.dumps 转义误伤）→ 空白折叠匹配（裁判把多行原文展平成单行）。
+    # 只对真正非逐字的引用保持判负。
+    if _quote_in_target(target, quote):
         return None, None
     # message_index 漂移容错：quote 未命中声明的行，但逐字存在于轨迹其它行
     # 时按有效计并记录校正行号（模型 off-by-one 行号漂移不应判负真实引用）。
@@ -230,18 +227,32 @@ def _validate_one_evidence(evidence: dict[str, Any], artifacts: dict[str, Any]) 
 
 
 def _find_quote_row_index(rows: Any, quote: str) -> int | None:
-    """Return the ``index`` of the trajectory row containing ``quote`` verbatim."""
+    """Return the ``index`` of the trajectory row containing ``quote``."""
     if not isinstance(rows, list):
         return None
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if quote in json.dumps(row, ensure_ascii=False, default=str) or any(
-            quote in text for text in _iter_strings(row)
-        ):
+        if _quote_in_target(row, quote):
             index = row.get("index")
             return int(index) if isinstance(index, int) else None
     return None
+
+
+def _quote_in_target(target: Any, quote: str) -> bool:
+    """Match ``quote`` against ``target`` with the full tolerance ladder.
+
+    Exact JSON-dump match, then raw-string match (json.dumps escaping),
+    then whitespace-collapsed match (judge flattening multi-line output).
+    """
+    if quote in json.dumps(target, ensure_ascii=False, default=str):
+        return True
+    if any(quote in text for text in _iter_strings(target)):
+        return True
+    normalized_quote = _normalize_whitespace(quote)
+    return bool(normalized_quote) and any(
+        normalized_quote in _normalize_whitespace(text) for text in _iter_strings(target)
+    )
 
 
 def _iter_strings(value: Any):
@@ -254,6 +265,11 @@ def _iter_strings(value: Any):
     elif isinstance(value, list):
         for item in value:
             yield from _iter_strings(item)
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse every whitespace run to a single space (both ends trimmed)."""
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _find_trajectory_row(rows: Any, message_index: int) -> dict[str, Any] | None:
