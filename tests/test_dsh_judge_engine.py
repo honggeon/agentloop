@@ -824,6 +824,36 @@ def test_deepagent_engine_fails_when_repair_stays_incomplete(base):
     assert len(calls) == 2
 
 
+def test_deepagent_engine_repair_runs_in_single_event_loop(base):
+    # 回归：首次提案缺维度触发有界修复时，修复调用必须与首次调用共享同一个
+    # 事件循环。历史上每次调用单独 asyncio.run，而 langchain-openai 的异步
+    # httpx client 是进程级 lru_cache 缓存的，第二次调用会复用到绑定已关闭
+    # 循环的 client，真实模型路径报 "Event loop is closed"（Kimi 裁判实测）。
+    import asyncio
+
+    run = _write_run(base / "runs")
+    loops = []
+    calls = []
+
+    async def fake_invoke(messages, config=None):
+        loops.append(asyncio.get_running_loop())
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"overall_status": "partial", "completion_score": 60, "summary": "缺维度"}
+        return {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "完整报告",
+            "dimensions": full_judge_dimensions(),
+        }
+
+    result = DeepAgentJudgeEngine(fake_invoke).run(JudgeRequest(run_dir=run, run_id="run-1"))
+
+    assert len(calls) == 2
+    assert len(loops) == 2 and loops[0] is loops[1]
+    assert result.proposal["summary"] == "完整报告"
+
+
 def test_deepagent_engine_prefers_complete_tool_call_report(base):
     # DeepAgent 返回值里最后一条 assistant 消息是简略 JSON，但更早的
     # write_judge_report 工具调用提交了完整 13 维报告：必须选择完整候选。
