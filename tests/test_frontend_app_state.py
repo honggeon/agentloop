@@ -154,6 +154,17 @@ def test_run_view_can_select_the_judge_model_profile():
     assert "payload.model_profile = judgeModelProfile.value" in source
 
 
+def test_live_view_can_select_the_judge_model_profile():
+    source = LIVE_VIEW.read_text(encoding="utf-8")
+
+    # live 评测页的「运行 Agent Judge」与运行详情页共享同一裁判模型来源
+    assert "fetchJudgeModels" in source
+    assert "judgeModelChoices" in source
+    assert "judgeModelProfile" in source
+    assert "裁判模型" in source
+    assert "payload.model_profile = judgeModelProfile.value" in source
+
+
 def test_run_view_lists_and_compares_multiple_judge_reports():
     source = RUN_VIEW.read_text(encoding="utf-8")
     api_source = API_TS.read_text(encoding="utf-8")

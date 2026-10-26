@@ -3,7 +3,6 @@ import { computed, inject, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import {
   apiPostJson,
-  apiPost,
   cancelDshAcpOperation,
   cancelDshChat,
   closeDshAcpSession,
@@ -11,6 +10,7 @@ import {
   fetchDshAcpOptions,
   fetchDshAcpSessions,
   fetchDshOptions,
+  fetchJudgeModels,
   respondDshAcpPermission,
   resumeDshAcpSession,
   streamDshAcpPrompt,
@@ -24,6 +24,7 @@ import {
   type DshOptions,
   type DshRuntimeEvent,
   type Finding,
+  type JudgeModelOptions,
   type JudgeReport,
   type LiveEvaluatePayload,
   type LiveEvent,
@@ -969,7 +970,34 @@ function buildAcpDiagnosis() {
 onMounted(async () => {
   await loadDshOptions();
   await loadDshAcpOptions();
+  void loadJudgeModels();
 });
+
+// 裁判模型 profile（config/judge_models.yaml），与运行详情页同一来源。
+// 空字符串 = 不指定，由后端按 JUDGE_MODEL_PROFILE → 配置 default → env 兜底。
+const judgeModelOptions = ref<JudgeModelOptions | null>(null);
+const judgeModelProfile = ref("");
+const judgeModelChoices = computed(() => {
+  const options = judgeModelOptions.value;
+  const profiles = (options?.profiles || []).filter((item) => item.available);
+  const defaultLabel = options?.default
+    ? `默认（配置：${options.default}）`
+    : `默认（${options?.env_fallback.provider || "env"}:${options?.env_fallback.model || "环境变量"}）`;
+  return [
+    { id: "", label: defaultLabel },
+    ...profiles.map((item) => ({ id: item.id, label: `${item.id}（${item.model}）` }))
+  ];
+});
+
+async function loadJudgeModels() {
+  try {
+    judgeModelOptions.value = await fetchJudgeModels();
+    judgeModelProfile.value = judgeModelOptions.value.selected || "";
+  } catch {
+    judgeModelOptions.value = null;
+    judgeModelProfile.value = "";
+  }
+}
 
 function selectSpan(span: RuntimeSpan) {
   selectedSpanId.value = span.spanId;
@@ -1218,7 +1246,11 @@ async function runAgentJudge() {
   judging.value = true;
   error.value = "";
   try {
-    const result = await apiPost<{ report: JudgeReport }>(`/api/runs/${encodeURIComponent(finalRun.value.name)}/judge`);
+    const payload: { model_profile?: string } = {};
+    if (judgeModelProfile.value) {
+      payload.model_profile = judgeModelProfile.value;
+    }
+    const result = await apiPostJson<{ report: JudgeReport }>(`/api/runs/${encodeURIComponent(finalRun.value.name)}/judge`, payload);
     judge.value = result.report;
     if (provider.value === "dsh" && dshPhase.value === "imported") {
       dshPhase.value = "judged";
@@ -2288,6 +2320,14 @@ function spanMetric(span: RuntimeSpan) {
       <div class="panel">
         <div class="panel-head">
           <h3>评测结果</h3>
+          <label class="judge-engine-picker" title="裁判模型来自 config/judge_models.yaml 的 profile">
+            <span class="judge-engine-label">裁判模型</span>
+            <select v-model="judgeModelProfile" class="judge-engine-select" :disabled="!finalRun || judging" aria-label="裁判模型">
+              <option v-for="item in judgeModelChoices" :key="item.id" :value="item.id">
+                {{ item.label }}
+              </option>
+            </select>
+          </label>
           <button class="ghost small" type="button" :disabled="!finalRun || judging" @click="runAgentJudge">
             {{ judging ? "评测中" : "运行 Agent Judge" }}
           </button>
