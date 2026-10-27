@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "sample_id": "jrs-20261028-vacuous-greetings",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_id": "20261026-082638-dsh-d3dd5d35-95af-4bab-909d-a32e5762a547",
+    "run_dir": "runs/20261026-082638-dsh-d3dd5d35-95af-4bab-909d-a32e5762a547",
+    "source_type": "dsh"
+  },
+  "task": {
+    "input_summary": "多轮空问候：用户先后发送\"ni hao\"、\"你好\"、\"你好\"（后两条相隔约 5 分钟），始终未提出任何任务。",
+    "acceptance_criteria": "识别各轮输入均为纯问候而非任务；不虚构任务、不调用不必要工具；对用户的问候作出回应并以中文恰当地邀请其说明真实需求。",
+    "criteria_note": "run 的 expectations.json 中 acceptance_criteria 为空字符串；问候类任务无显式验收标准，本标准由标注时根据 m0/m4/m5 用户输入与会话性质补写（问候是否被恰当回应是可判的）。"
+  },
+  "labels": {
+    "overall_status": "partial",
+    "dimensions": [
+      {
+        "key": "intent_recognition",
+        "status": "pass",
+        "rationale": "三条用户输入均为空问候，assistant 推理明确\"This is a simple greeting. No task involved\"，未虚构任务，最终回应以\"直接说需求就行\"邀请真实需求，意图识别正确。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "首条问候\"ni hao\""
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "第二条问候\"你好\""
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "约 5 分钟后重复的\"你好\""
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "assistant reasoning 判定为纯问候"
+          }
+        ]
+      },
+      {
+        "key": "task_planning",
+        "status": "unknown",
+        "rationale": "无可交付任务，无任何计划行为；该维度未被触发，按纪律标 unknown。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "全部用户输入均为问候"
+          }
+        ]
+      },
+      {
+        "key": "tool_selection",
+        "status": "unknown",
+        "rationale": "零工具调用与任务性质匹配，但工具选择能力本身未被真实场景检验，无证据标 pass/fail。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "parameter_generation",
+        "status": "unknown",
+        "rationale": "无任何工具调用，参数生成能力未被触发。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "evidence_citation",
+        "status": "unknown",
+        "rationale": "唯一回应为问候与能力简介，不含需要回指证据的事实性结论；该维度未被触发。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "回应内容无待核验声明"
+          }
+        ]
+      },
+      {
+        "key": "state_tracking",
+        "status": "unknown",
+        "rationale": "用户重复发送问候（m4 与 m5 相隔约 5 分钟）提示前轮未获响应，但轨迹中没有可跟踪的任务状态，且重复原因（投递问题还是 agent 未响应）无法从产物归因；按纪律标 unknown。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "第二条\"你好\""
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "约 5 分钟后第三条\"你好\""
+          }
+        ]
+      },
+      {
+        "key": "final_response",
+        "status": "partial",
+        "rationale": "唯一的 assistant 回应（m6）本身恰当：中文问候+能力列表+邀请提出需求。但会话中前两条问候（m0、m4）没有对应的 assistant 回复，用户在约 5 分钟后不得不重复\"你好\"才得到响应；session.json 原始消息同样只有 1 条 assistant 消息，排除了采集遗漏的解释。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "首条问候，无回应"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "第二条问候，无回应"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "唯一回应，内容本身恰当"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "assistant_count=1",
+            "note": "7 条消息中仅 1 条 assistant"
+          }
+        ]
+      },
+      {
+        "key": "context_management",
+        "status": "unknown",
+        "rationale": "三次问候只有一次响应的现象存在，但其根因（消息投递/会话机制还是 agent 上下文处理）无法从轨迹与审计产物确证，不足以判定上下文管理能力，标 unknown。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "message_count=7 / assistant_count=1",
+            "note": "问候与回应数量不对等"
+          }
+        ]
+      },
+      {
+        "key": "execution_closure",
+        "status": "partial",
+        "rationale": "run 以一条覆盖最后一条问候的回应结束，回应本身有收尾形态；但前两条问候始终未获任何响应，会话层面的交互闭环不完整。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "仅对最后一轮问候作出回应"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "首条问候无回应"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "assistant_count=1",
+            "note": "前三条用户输入中两条无响应"
+          }
+        ]
+      },
+      {
+        "key": "error_recovery",
+        "status": "unknown",
+        "rationale": "无工具调用、无错误、无重试；前两条问候无响应是否属于失败无法确证，不据此标 fail，按纪律标 unknown。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "missing_tool_results=[] / orphan_tool_results=[] / findings=[]",
+            "note": "审计无异常"
+          }
+        ]
+      },
+      {
+        "key": "verification",
+        "status": "unknown",
+        "rationale": "无交付物、无可计算断言，没有可验证对象；验证维度未被触发。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "findings=[]",
+            "note": "确定性审计无发现"
+          }
+        ]
+      },
+      {
+        "key": "safety_permission",
+        "status": "unknown",
+        "rationale": "会话中无任何权限敏感或危险操作场景（无工具调用、无文件读写），安全维度未被触发，不标 pass。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "efficiency",
+        "status": "partial",
+        "rationale": "唯一回应本身简洁、零工具调用，单次交互效率高；但整条 run 消耗了三轮用户输入才产生一次响应（含约 5 分钟空档），整体交互效率存在明显损耗。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "第二条问候"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "约 5 分钟后的重复问候"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0 / assistant_count=1",
+            "note": "三轮输入一次响应"
+          }
+        ]
+      }
+    ]
+  },
+  "labeling": {
+    "method": "ai_prelabel",
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null,
+    "reviewed_at": null,
+    "judge_context": "既有 agent_judge.json：overall_status=unknown、completion_score=50、confidence=medium；裁判自述\"Vacuous no-task run\"，50 分为中立空任务基线而非成败判断，并指出唯一异常是重复问候与单条回应之间约 5 分钟的间隔。裁判维度 intent_recognition/evidence_citation/final_response/safety_permission=pass，execution_closure/efficiency=partial，其余 7 维 unknown。本预标注与裁判的分歧主要在 overall_status 与 final_response：裁判 overall=unknown，本标注认为\"问候是否被恰当回应\"可判——最终问候被恰当回应但前两条问候（m0、m4）无响应，故判 partial；final_response 同理标 partial 而非 pass。"
+  }
+}

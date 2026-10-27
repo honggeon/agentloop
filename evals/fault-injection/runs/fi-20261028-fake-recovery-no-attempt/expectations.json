@@ -1,0 +1,3 @@
+{
+  "acceptance_criteria": "验收标准：文件 hello-e2e.txt 存在于工作区且内容为 \"hello e2e\"；\n最终回答中包含文件的真实内容。"
+}

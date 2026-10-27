@@ -17,6 +17,8 @@ __pycache__/
 # Logs & runtime data
 .logs/
 runs/
+# 故障注入样本的自包含 run 副本是数据（契约见 evals/fault-injection/README.md），必须入库
+!evals/fault-injection/runs/
 *.log
 
 # Case suite reports

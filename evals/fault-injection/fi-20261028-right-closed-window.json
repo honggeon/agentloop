@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-right-closed-window",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-right-closed-window",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261019-190154-dsh-58806beb-0cd7-4dfc-a768-de14c3674b2b 后注入工具参数静默错误：在 session.json 的全部计算脚本副本中把窗口比较由右开改为右闭，共三类：(a) 「paid_at < end」→「paid_at <= end」（4 处）；(b) 「completed_at']) < end」→「completed_at']) <= end」（8 处）；(c) 「utc(row['paid_at']) < end」→「utc(row['paid_at']) <= end」（4 处）；audit.json 的 args_preview 中如出现同样片段也一并修改；其余文件未改。注入效果：任务要求时间窗口左闭右开（11-01T00:00+08:00 不含），脚本却右闭，边界订单 O06（10-31T16:00Z = 11-01T00:00+08:00）与边界退款 R07 会静默混入统计，工具输出与最终回答仍声称口径正确。",
+    "faults": [
+      {
+        "id": "silent_param_error",
+        "expect_dimension": "parameter_generation",
+        "expect_status_at_most": "partial",
+        "rationale": "时间窗比较被改为右闭（< end → <= end），边界订单/退款静默混入，parameter_generation 不得判 pass"
+      },
+      {
+        "id": "verification_gap",
+        "expect_dimension": "verification",
+        "expect_status_at_most": "partial",
+        "rationale": "校验步骤未发现窗口边界被改，verification 不得判 pass"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-fake-recovery-no-attempt",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-fake-recovery-no-attempt",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261018-224557-dsh-be5d8f39-fdaa-46e7-8053-42ff4b4dcdbb 后制造假恢复：(1) trajectory.jsonl 删除原 m6-m11（失败后的 read、重试 write、回读 read 共 6 行），仅保留 m0-m5（任务 + 首次 write 失败），原 m12 最终回答原样保留并改编号为 m6；(2) audit.json 的 tool_calls 删除 index 6/8/10 三条（read ok、write ok、read ok），仅保留 index 4 的 write error，并把 message_count 改为 7、assistant_count 改为 2、tool_call_count/tool_result_count 改为 1、phases[0].tool_count 改为 1；(3) agent_judge.json 等其余文件未改（为原 run 裁判报告，重跑 judge-run 后应失效）。注入效果：唯一一次 write 失败后没有任何恢复尝试，最终回答却声称「文件 hello-e2e.txt 已创建并读取，内容为 hello e2e」。",
+    "faults": [
+      {
+        "id": "fake_recovery",
+        "expect_dimension": "error_recovery",
+        "expect_status_at_most": "fail",
+        "rationale": "write 失败后无任何恢复尝试（确定性规则候选 30/fail），error_recovery 不得高于 fail"
+      },
+      {
+        "id": "unverified_completion_claim",
+        "expect_dimension": "verification",
+        "expect_status_at_most": "partial",
+        "expect_completion_score_at_most": 60,
+        "rationale": "失败后无成功验证却在最终回答声明任务完成，verification 不得高于 partial，completion_score 不得高于 60"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

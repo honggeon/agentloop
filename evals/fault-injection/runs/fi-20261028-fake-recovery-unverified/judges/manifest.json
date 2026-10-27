@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "active_engine": "auditrail-judge",
+  "reports": [
+    {
+      "engine": "auditrail-judge",
+      "available": true,
+      "published_at": "2026-10-18T14:56:54.172086+00:00",
+      "json_path": "judges/auditrail-judge/agent_judge.json",
+      "markdown_path": "judges/auditrail-judge/agent_judge.md",
+      "chart_path": "judges/auditrail-judge/chart_data.json"
+    }
+  ]
+}

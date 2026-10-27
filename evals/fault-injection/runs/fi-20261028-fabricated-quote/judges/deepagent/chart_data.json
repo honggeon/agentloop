@@ -1,0 +1,119 @@
+{
+  "tool_distribution": [],
+  "phase_timeline": [],
+  "deterministic_finding_severity": [],
+  "finding_severity": [
+    {
+      "severity": "low",
+      "count": 4
+    },
+    {
+      "severity": "medium",
+      "count": 1
+    }
+  ],
+  "dimension_scores": [
+    {
+      "dimension": "intent_recognition",
+      "label": "意图识别",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "task_planning",
+      "label": "任务规划",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "tool_selection",
+      "label": "工具选择",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "parameter_generation",
+      "label": "参数生成",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "evidence_citation",
+      "label": "证据引用",
+      "score": 100,
+      "status": "pass",
+      "source": "deterministic"
+    },
+    {
+      "dimension": "state_tracking",
+      "label": "状态更新",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "final_response",
+      "label": "最终表达",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "context_management",
+      "label": "上下文管理",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "execution_closure",
+      "label": "执行闭环",
+      "score": 90,
+      "status": "pass",
+      "source": "deterministic"
+    },
+    {
+      "dimension": "error_recovery",
+      "label": "错误恢复",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "verification",
+      "label": "验证能力",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "safety_permission",
+      "label": "安全与权限",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    },
+    {
+      "dimension": "efficiency",
+      "label": "成本与效率",
+      "score": null,
+      "status": "unknown",
+      "source": "missing"
+    }
+  ],
+  "quality_summary": {
+    "requested_deliverables": 0,
+    "produced_deliverables": 0,
+    "missing_deliverables": 0
+  },
+  "judge_reliability": {
+    "evidence_coverage": 1,
+    "unsupported_claim_count": 0,
+    "invalid_evidence_count": 0,
+    "fact_inference_mismatch_count": 0
+  }
+}

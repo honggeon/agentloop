@@ -1,0 +1,13 @@
+{
+  "source_base_url": "dsh://local",
+  "server_host": "deepseek-harness",
+  "server_netloc": "local",
+  "source_user_id": "",
+  "source_type": "dsh",
+  "dsh_session_id": "session-58806beb-0cd7-4dfc-a768-de14c3674b2b",
+  "dsh_workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/dim13",
+  "dsh_agent_preset": "",
+  "interaction_mode": "auditrail-chat",
+  "dsh_profile": "headless",
+  "session_role": "evaluand"
+}

@@ -1,0 +1,25 @@
+{
+  "session_id": "session-507f0018-52cc-4b3c-bd18-d927cbe1cffa",
+  "title": "创建并读取 hello-e12e.txt 文件",
+  "model": "deepseek-chat",
+  "workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/run-01",
+  "message_count": 9,
+  "assistant_count": 3,
+  "tool_result_count": 2,
+  "tool_call_count": 2,
+  "tool_names": [
+    "read",
+    "write"
+  ],
+  "source_base_url": "dsh://local",
+  "server_host": "deepseek-harness",
+  "server_netloc": "local",
+  "source_user_id": "",
+  "source_type": "dsh",
+  "dsh_session_id": "session-507f0018-52cc-4b3c-bd18-d927cbe1cffa",
+  "dsh_workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/run-01",
+  "dsh_agent_preset": "",
+  "interaction_mode": "auditrail-chat",
+  "dsh_profile": "headless",
+  "session_role": "evaluand"
+}

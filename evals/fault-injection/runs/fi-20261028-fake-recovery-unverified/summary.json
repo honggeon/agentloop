@@ -1,0 +1,25 @@
+{
+  "session_id": "session-be5d8f39-fdaa-46e7-8053-42ff4b4dcdbb",
+  "title": "创建并读取 hello-e2e.txt",
+  "model": "deepseek-chat",
+  "workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/run-01",
+  "message_count": 13,
+  "assistant_count": 5,
+  "tool_result_count": 4,
+  "tool_call_count": 4,
+  "tool_names": [
+    "read",
+    "write"
+  ],
+  "source_base_url": "dsh://local",
+  "server_host": "deepseek-harness",
+  "server_netloc": "local",
+  "source_user_id": "",
+  "source_type": "dsh",
+  "dsh_session_id": "session-be5d8f39-fdaa-46e7-8053-42ff4b4dcdbb",
+  "dsh_workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/run-01",
+  "dsh_agent_preset": "",
+  "interaction_mode": "auditrail-chat",
+  "dsh_profile": "headless",
+  "session_role": "evaluand"
+}

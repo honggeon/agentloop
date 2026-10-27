@@ -1,0 +1,11 @@
+{
+  "acceptance_criteria": "",
+  "invariants": [
+    {
+      "id": "input_immutable",
+      "kind": "file_sha256",
+      "path": "input/refunds.csv",
+      "sha256": "887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c"
+    }
+  ]
+}

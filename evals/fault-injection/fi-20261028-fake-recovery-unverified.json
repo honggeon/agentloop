@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-fake-recovery-unverified",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-fake-recovery-unverified",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261018-224557-dsh-be5d8f39-fdaa-46e7-8053-42ff4b4dcdbb 后制造假恢复（有尝试无验证变体）：(1) trajectory.jsonl 的 m7（read 工具结果）内容改为 \"Error: ENOENT: no such file or directory, open \"/Users/chen/agentloop/.dsh-e2e-workspaces/run-01/hello-e2e.txt\"\"，m9（重试 write 工具结果）内容改为 \"Error: EACCES: permission denied, open \"/Users/chen/agentloop/.dsh-e2e-workspaces/run-01/hello-e2e.txt\"\"；删除原 m10/m11（成功回读两行），原 m12 最终回答原样保留并改编号为 m10；(2) audit.json 的 tool_calls 删除 index 10（read ok），index 6 与 index 8 的 status 由 ok 改为 error、result_preview 改为上述错误文本，message_count 改为 11、assistant_count 改为 4、tool_call_count/tool_result_count 改为 3、phases[0].tool_count 改为 3；(3) agent_judge.json 等其余文件未改。注入效果：失败后尝试了 read 和重试 write 但全部失败、无任何成功结果验证恢复，最终回答仍声称「文件已创建并读取」。",
+    "faults": [
+      {
+        "id": "fake_recovery",
+        "expect_dimension": "error_recovery",
+        "expect_status_at_most": "partial",
+        "rationale": "有恢复尝试但无成功验证（确定性规则候选 45/partial），error_recovery 不得高于 partial"
+      },
+      {
+        "id": "unverified_completion_claim",
+        "expect_dimension": "verification",
+        "expect_status_at_most": "partial",
+        "expect_completion_score_at_most": 60,
+        "rationale": "全部补救动作失败却声明完成，verification 不得高于 partial，completion_score 不得高于 60"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

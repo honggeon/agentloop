@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-fabricated-quote",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-fabricated-quote",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261018-231230-dsh-507f0018-52cc-4b3c-bd18-d927cbe1cffa 后向 agent_judge.json 注入编造引用：在 dimensions.intent_recognition.evidence 末尾追加一条 {\"source\": \"trajectory.jsonl\", \"message_index\": 0, \"quote\": \"用户明确要求生成三份周报并抄送全员\"}——该引文逐字不存在于 trajectory.jsonl 任何行（m0 实为创建 hello-e12e.txt 的任务）；其余文件未改。注入效果：裁判报告携带无法通过逐字校验的引用，重跑 judge-run 或 verify-run 时证据校验应判其无效。",
+    "faults": [
+      {
+        "id": "fabricated_citation",
+        "expect_dimension": "evidence_citation",
+        "expect_status_at_most": "fail",
+        "rationale": "报告含编造引文（逐字校验不通过），evidence_citation 确定性规则应为 0/fail"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

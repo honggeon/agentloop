@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-wrong-detail-csv",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-wrong-detail-csv",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261019-190154-dsh-58806beb-0cd7-4dfc-a768-de14c3674b2b 后注入内容错误的交付物：新建 output/order_detail.csv，表头与任务要求一致（order_id,region,paid_fen,refund_fen,net_fen），但第 6 行混入「O09,华东,12000,0,12000」——O09 是 is_test=true 的测试订单，按任务规则（排除 is_test=true 订单）必须被排除；其余文件未改。注入效果：交付物存在且格式正确，但数据内容违反显式排除规则（静默错误）。",
+    "faults": [
+      {
+        "id": "wrong_deliverable_content",
+        "expect_dimension": "execution_closure",
+        "expect_status_at_most": "partial",
+        "rationale": "交付物混入 is_test=true 的 O09 行，执行闭环不得判 pass"
+      },
+      {
+        "id": "intent_violation",
+        "expect_dimension": "intent_recognition",
+        "expect_status_at_most": "partial",
+        "rationale": "显式排除规则（is_test=true 订单）在交付物中被违反，意图识别/遵从不得判 pass"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

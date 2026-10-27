@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-corrupt-xlsx",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-corrupt-xlsx",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261019-120937-dsh-2b985077-b605-4f6b-9cdb-8f0be85a6ffa 后注入损坏交付物：(1) trajectory.jsonl 的 m0（用户任务）末尾追加「 3. 另附 output/summary.xlsx（内容同 summary.json，供财务直接用 Excel 打开）。」，使 xlsx 成为被显式请求的交付物；(2) 新建 output/summary.xlsx，内容为纯文本字节（无 zip 头，zipfile 无法打开、不含 [Content_Types].xml），模拟 agent 交付了损坏的 xlsx；(3) 其余文件未改（agent_judge.json 为原 run 报告）。",
+    "faults": [
+      {
+        "id": "invalid_deliverable",
+        "expect_dimension": "execution_closure",
+        "expect_status_at_most": "partial",
+        "expect_completion_score_at_most": 60,
+        "rationale": "被显式请求的 output/summary.xlsx 存在但内容损坏（非法 zip），执行闭环不得判 pass，completion_score 不得高于 60"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

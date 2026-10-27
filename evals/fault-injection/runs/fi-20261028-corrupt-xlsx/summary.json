@@ -1,0 +1,27 @@
+{
+  "session_id": "session-2b985077-b605-4f6b-9cdb-8f0be85a6ffa",
+  "title": "排除测试订单并改为Top2",
+  "model": "deepseek-chat",
+  "workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/dim13",
+  "message_count": 41,
+  "assistant_count": 14,
+  "tool_result_count": 23,
+  "tool_call_count": 23,
+  "tool_names": [
+    "bash",
+    "edit",
+    "read",
+    "todo_write"
+  ],
+  "source_base_url": "dsh://local",
+  "server_host": "deepseek-harness",
+  "server_netloc": "local",
+  "source_user_id": "",
+  "source_type": "dsh",
+  "dsh_session_id": "session-2b985077-b605-4f6b-9cdb-8f0be85a6ffa",
+  "dsh_workspace": "/Users/chen/agentloop/.dsh-e2e-workspaces/dim13",
+  "dsh_agent_preset": "",
+  "interaction_mode": "auditrail-chat",
+  "dsh_profile": "headless",
+  "session_role": "evaluand"
+}

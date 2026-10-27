@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-fabricated-source",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-fabricated-source",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261018-231230-dsh-507f0018-52cc-4b3c-bd18-d927cbe1cffa 后向 agent_judge.json 注入两类编造引用：(a) findings 末尾追加一条 type=fact 的 finding「声称用户已二次确认需求（引用不存在的来源）」，其证据为 {\"source\": \"private/fake_secret.txt\", \"quote\": \"已确认，继续执行\"}（source 不是 run 目录内任何产物文件）；(b) dimensions.final_response.evidence 末尾追加一条 {\"source\": \"trajectory.jsonl\", \"message_index\": 999, \"quote\": \"已创建并读取\"}（轨迹只有 m0-m8，无 m999）；其余文件未改。",
+    "faults": [
+      {
+        "id": "fabricated_citation",
+        "expect_dimension": "evidence_citation",
+        "expect_status_at_most": "fail",
+        "rationale": "报告含不存在来源与不存在行号的引用，evidence_citation 确定性规则应为 0/fail"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

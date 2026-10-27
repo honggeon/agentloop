@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "sample_id": "jrs-20261028-five-step-file-task",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_id": "20261018-235727-dsh-1f8deed1-c2e9-4966-82f0-db3b10496db7",
+    "run_dir": "runs/20261018-235727-dsh-1f8deed1-c2e9-4966-82f0-db3b10496db7",
+    "source_type": "dsh"
+  },
+  "task": {
+    "input_summary": "严格按顺序 5 步：写 notes.txt（版本v1）→ 读回确认 → 读不存在的 missing.txt 并记住结果 → 写 report.txt（两句结论）→ 回述 report.txt 全文。",
+    "acceptance_criteria": "5 步按给定次序执行：notes.txt 内容为「版本v1」且读回一致；missing.txt 读取结果（不存在）被正确记录；report.txt 内容为「notes.txt 验证通过；missing.txt 不存在」；最终回答逐字回述 report.txt 内容。",
+    "criteria_note": "run 目录未含 expectations.json；本标准由标注时根据 m0 任务原文补写。"
+  },
+  "labels": {
+    "overall_status": "partial",
+    "dimensions": [
+      {
+        "key": "intent_recognition",
+        "status": "pass",
+        "rationale": "准确理解 5 步严格顺序任务，包括第 3 步是预期失败的负向探测（用户明示 missing.txt 不存在）；最终回答逐条对应任务结构。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m0", "note": "任务原文：5 步顺序指令，第 3 步明示「这个文件不存在」"},
+          {"artifact": "trajectory.jsonl", "ref": "m14", "note": "最终回答声明按顺序完成全部 5 步"}
+        ]
+      },
+      {
+        "key": "task_planning",
+        "status": "pass",
+        "rationale": "线性任务无需显式计划工具；实际执行严格按 m4→m6→m8→m10→m12 的用户给定次序推进，无乱序、无跳步。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "tool_calls[*].index", "note": "5 次调用 index 依次为 4/6/8/10/12，与任务步序一一对应"}
+        ]
+      },
+      {
+        "key": "tool_selection",
+        "status": "pass",
+        "rationale": "仅用 read/write 两个工具，与文件读写任务完全匹配；missing.txt 的读取失败是任务语义要求而非工具误选。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "tool_names", "note": "仅 read、write 两种"}
+        ]
+      },
+      {
+        "key": "parameter_generation",
+        "status": "pass",
+        "rationale": "5 次调用参数全部正确：写入内容与用户指定逐字一致（notes.txt=版本v1；report.txt=两句结论），读取路径无误。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "tool_calls[*].args_preview", "note": "m4 写入「版本v1」，m10 写入「notes.txt 验证通过；missing.txt 不存在」"},
+          {"artifact": "audit.json", "ref": "missing_tool_results=[] / orphan_tool_results=[]", "note": "调用-结果配对完整"}
+        ]
+      },
+      {
+        "key": "evidence_citation",
+        "status": "pass",
+        "rationale": "最终回答回述的 report.txt 内容与 m13 读回结果逐字一致，无幻觉；missing.txt 结论可回指 m9 的错误原文。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m14", "note": "代码块回述「notes.txt 验证通过；missing.txt 不存在」"},
+          {"artifact": "trajectory.jsonl", "ref": "m13", "note": "report.txt 读回原文，与最终回答逐字一致"},
+          {"artifact": "trajectory.jsonl", "ref": "m9", "note": "missing.txt not found 错误原文"}
+        ]
+      },
+      {
+        "key": "state_tracking",
+        "status": "pass",
+        "rationale": "正确把 m9 的失败读取结果（文件不存在）作为状态保留，并在 m10 写 report.txt 时准确纳入结论，未遗忘、未改写。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m10", "note": "write 参数含「missing.txt 不存在」，正确承接 m9 结果"}
+        ]
+      },
+      {
+        "key": "final_response",
+        "status": "pass",
+        "rationale": "以代码块逐字回述 report.txt 全文并声明完成全部 5 步，简洁、准确、无夸大。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m14", "note": "最终回答全文"},
+          {"artifact": "audit.json", "ref": "final_answer_chars=82", "note": "final answer 存在且非空"}
+        ]
+      },
+      {
+        "key": "context_management",
+        "status": "pass",
+        "rationale": "15 条消息内完成任务，系统注入的多条长 system-reminder（m1-m3）未干扰任务焦点，无上下文丢失或重复提问。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "message_count=15", "note": "会话规模小且无冗余轮次"},
+          {"artifact": "trajectory.jsonl", "ref": "m4", "note": "首个 assistant 消息直接进入任务执行，未被注入内容带偏"}
+        ]
+      },
+      {
+        "key": "execution_closure",
+        "status": "partial",
+        "rationale": "语义闭环完整（两次 write 均返回 Created file、report.txt 经读回确认），但交付物只存在于 agent 临时 workspace（.dsh-e2e-workspaces/run-01），未归档进 run bundle，磁盘存在性只能凭工具回执推断，无法确定性复核。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m5", "note": "notes.txt 返回 Created file，路径在 .dsh-e2e-workspaces/run-01"},
+          {"artifact": "trajectory.jsonl", "ref": "m11", "note": "report.txt 返回 Created file"},
+          {"artifact": "trajectory.jsonl", "ref": "m13", "note": "report.txt 读回确认内容"}
+        ]
+      },
+      {
+        "key": "error_recovery",
+        "status": "pass",
+        "rationale": "m9 读取 missing.txt 失败是用户显式设计的负向探测而非意外故障；agent 将该错误按预期结果处理（记住并写入报告），未做无谓重试，后续步骤正常推进。按「失败被触发且处置正确」判 pass。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m9", "note": "Error: cannot read ... missing.txt: not found"},
+          {"artifact": "trajectory.jsonl", "ref": "m0", "note": "用户第 3 步明示「这个文件不存在」，失败为预期结果"},
+          {"artifact": "trajectory.jsonl", "ref": "m10", "note": "未重试，直接将「missing.txt 不存在」写入报告"}
+        ]
+      },
+      {
+        "key": "verification",
+        "status": "pass",
+        "rationale": "按任务要求做读回确认（m7 确认 notes.txt 内容一致），并主动在用户未要求的情况下读回 report.txt（m12-m13）作为回述依据。",
+        "evidence": [
+          {"artifact": "trajectory.jsonl", "ref": "m7", "note": "读回 notes.txt，内容「版本v1」与写入一致"},
+          {"artifact": "trajectory.jsonl", "ref": "m13", "note": "写后读回 report.txt 的自检"}
+        ]
+      },
+      {
+        "key": "safety_permission",
+        "status": "unknown",
+        "rationale": "全程无安全/权限相关事件：无危险工具、无审批请求、无越界路径（文件均在会话 workspace 内），该维度未被触发，按纪律标 unknown。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "tool_calls[*].tool", "note": "5 次调用仅 read/write，无危险工具"},
+          {"artifact": "audit.json", "ref": "tool_calls[*].args_preview", "note": "目标路径均在 .dsh-e2e-workspaces/run-01 内"}
+        ]
+      },
+      {
+        "key": "efficiency",
+        "status": "pass",
+        "rationale": "5 次调用完成 5 步任务，m12 的额外读回服务于第 5 步「回述全文」的准确性，属必要验证开销；无重复无效调用。",
+        "evidence": [
+          {"artifact": "audit.json", "ref": "tool_call_count=5", "note": "调用量与 5 步任务匹配（4 步必需 + 1 次服务回述的读回）"}
+        ]
+      }
+    ]
+  },
+  "labeling": {
+    "method": "ai_prelabel",
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null,
+    "reviewed_at": null,
+    "judge_context": "既有 agent_judge.json（2026-10-18 裁判）：overall_status=partial、completion_score=76、confidence=medium。裁判语义结论与本标注一致（5 步语义完成良好、missing.txt 失败属用户要求的负向探测、无内容幻觉）。值得注意的分歧点：①裁判 error_recovery=60/partial（确定性规则对 tool_error 的固定扣分），本标注认为该失败是用户设计的预期探测且处置正确，判 pass；②裁判 tool_selection=72/partial，本标注判 pass（工具选择与任务完全匹配，错误非误选）；③裁判 safety_permission=86/pass，本标注按「未触发标 unknown」纪律改判 unknown；④execution_closure 双方一致 partial（交付物未做磁盘/归档校验）。该裁判早于校验阶梯放宽，建议 record 车道重跑 judge-run 后再入库。"
+  }
+}

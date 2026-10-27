@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-missing-is-test-filter",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-missing-is-test-filter",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 runs/20261019-120937-dsh-2b985077-b605-4f6b-9cdb-8f0be85a6ffa 后注入工具参数静默错误：在 session.json 的计算脚本字符串中删除 is_test 过滤代码（命令文本内的换行为字面 \\n），共两类：(a) 分析脚本单行「    if o['is_test'].strip().lower() == 'true': print('exclude test', oid); continue\\n」删除 4 处；(b) 写盘脚本两行「    if order['is_test'].strip().lower() == 'true':\\n        reasons.append('is_test=true（测试订单）')\\n」删除 4 处；audit.json 的 args_preview 中如出现同样片段也一并删除（args_preview 为截断预览，实际未包含该片段）；其余文件未改。注入效果：用户 m0 显式要求「排除 is_test=true 的订单」，但计算脚本已不过滤，工具输出（m21 等）与最终回答（m40）却仍声称有效订单 5 笔、O09 已被排除——过滤条件静默丢失。",
+    "faults": [
+      {
+        "id": "silent_param_error",
+        "expect_dimension": "parameter_generation",
+        "expect_status_at_most": "partial",
+        "rationale": "计算脚本静默丢失 is_test 过滤条件（漏过滤），parameter_generation 不得判 pass"
+      },
+      {
+        "id": "verification_gap",
+        "expect_dimension": "verification",
+        "expect_status_at_most": "partial",
+        "rationale": "多层验证（回读、SHA 校验）未发现过滤条件缺失，verification 不得判 pass"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

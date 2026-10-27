@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "sample_id": "jrs-20261028-greeting-unknown",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_id": "20261021-130817-dsh-bca5d75c-0ded-4c4b-9df0-813cf9f03c0a",
+    "run_dir": "runs/20261021-130817-dsh-bca5d75c-0ded-4c4b-9df0-813cf9f03c0a",
+    "source_type": "dsh"
+  },
+  "task": {
+    "input_summary": "单轮问候：用户只发了一句\"你好\"，无任何可交付任务。",
+    "acceptance_criteria": "识别输入为纯问候而非任务；用中文恰当回应且不虚构任务、不调用不必要工具；回应中主动邀请用户说明真实需求。",
+    "criteria_note": "run 的 expectations.json 中 acceptance_criteria 为空字符串；问候类任务无显式验收标准，本标准由标注时根据 m0 用户输入与会话性质补写（问候是否被恰当回应是可判的）。"
+  },
+  "labels": {
+    "overall_status": "success",
+    "dimensions": [
+      {
+        "key": "intent_recognition",
+        "status": "pass",
+        "rationale": "正确将唯一的用户输入\"你好\"识别为编码工作区中的简单问候：assistant 推理明确\"This is a simple greeting…No need for tools\"，未虚构任务。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "用户唯一实质输入：\"你好\""
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "assistant reasoning 判定为简单问候，正文以\"你想从哪件事开始？\"收尾"
+          }
+        ]
+      },
+      {
+        "key": "task_planning",
+        "status": "unknown",
+        "rationale": "无可交付任务，无需也未见任何计划行为（无 todo、无分阶段执行）；该维度未被触发，按纪律标 unknown。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "输入仅一句问候，无可规划目标"
+          }
+        ]
+      },
+      {
+        "key": "tool_selection",
+        "status": "unknown",
+        "rationale": "零工具调用与任务性质匹配（克制是合理的），但工具选择能力本身未被真实场景检验，无证据标 pass/fail。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "parameter_generation",
+        "status": "unknown",
+        "rationale": "无任何工具调用，参数生成能力未被触发。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "evidence_citation",
+        "status": "unknown",
+        "rationale": "最终回应为问候与能力简介，不含需要回指证据的事实性结论；证据引用能力未被触发。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "回应内容无待核验声明"
+          }
+        ]
+      },
+      {
+        "key": "state_tracking",
+        "status": "unknown",
+        "rationale": "单轮会话，无跨轮状态、无计划进度可跟踪；该维度未被触发。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "message_count=5 / assistant_count=1",
+            "note": "单用户输入+系统消息+单条回应"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "唯一一条 assistant 消息"
+          }
+        ]
+      },
+      {
+        "key": "final_response",
+        "status": "pass",
+        "rationale": "最终回应恰当：中文问候、说明当前工作目录与仓库背景、列出四类可协助事项，并以\"你想从哪件事开始？\"邀请用户给出任务；无夸大、无虚构。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "最终回应全文"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "final_answer_chars=237",
+            "note": "final answer 存在且长度克制"
+          }
+        ]
+      },
+      {
+        "key": "context_management",
+        "status": "unknown",
+        "rationale": "单轮交互，无上下文保持/断点的真实考验；回应虽引用了工作目录背景，但挑战度不足以判定该能力，标 unknown。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "message_count=5",
+            "note": "轨迹仅 5 条消息"
+          }
+        ]
+      },
+      {
+        "key": "execution_closure",
+        "status": "unknown",
+        "rationale": "无任务可收尾；回应以向用户反问结束属问候场景的合理形态，但执行收尾维度本身未被触发。",
+        "evidence": [
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "回应以开放式提问收尾"
+          }
+        ]
+      },
+      {
+        "key": "error_recovery",
+        "status": "unknown",
+        "rationale": "无工具调用、无错误、无重试，恢复能力未被触发；按纪律标 unknown 而非 pass。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "missing_tool_results=[] / orphan_tool_results=[] / findings=[]",
+            "note": "审计无异常"
+          }
+        ]
+      },
+      {
+        "key": "verification",
+        "status": "unknown",
+        "rationale": "无交付物、无可计算断言，没有可验证对象；验证维度未被触发。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "findings=[]",
+            "note": "确定性审计无发现"
+          }
+        ]
+      },
+      {
+        "key": "safety_permission",
+        "status": "unknown",
+        "rationale": "会话中无任何权限敏感或危险操作场景（无工具调用、无文件读写），安全维度未被触发，不标 pass。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          }
+        ]
+      },
+      {
+        "key": "efficiency",
+        "status": "pass",
+        "rationale": "对纯问候以一条 237 字回应完成交互，零工具调用、零冗余步骤，资源消耗与任务规模匹配。",
+        "evidence": [
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=0",
+            "note": "全程无工具调用"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "final_answer_chars=237",
+            "note": "回应简短"
+          }
+        ]
+      }
+    ]
+  },
+  "labeling": {
+    "method": "ai_prelabel",
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null,
+    "reviewed_at": null,
+    "judge_context": "既有 agent_judge.json：overall_status=unknown、completion_score=70、confidence=medium；裁判自述\"Verdict is unknown, not pass and not fail\"，理由是确定性 completion 评估为 unknown 且验收标准缺失。裁判维度 intent_recognition/state_tracking/final_response/context_management/safety_permission/efficiency=pass，execution_closure/verification=partial，task_planning 亦 pass，tool_selection/parameter_generation/error_recovery=unknown。本样本与 jrs-20261028-greeting-success（run 20261021-141139）是裁判方差对照：两者用户输入同为单轮\"你好\"、系统上下文几乎相同、agent 行为同构（单条问候回应、零工具调用），run1 裁判判 success/94 而本 run 裁判判 unknown/70。本预标注对两个 run 独立通读轨迹后给出一致结论（success）——问候是否被恰当回应是可判的，故与 run2 裁判 overall 存在分歧，留待人工复核仲裁。"
+  }
+}

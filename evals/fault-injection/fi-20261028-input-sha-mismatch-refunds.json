@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "sample_id": "fi-20261028-input-sha-mismatch-refunds",
+  "created_at": "2026-10-28T00:00:00Z",
+  "run_ref": {
+    "run_dir": "evals/fault-injection/runs/fi-20261028-input-sha-mismatch-refunds",
+    "source_type": "dsh"
+  },
+  "injection": {
+    "method": "edited_artifact",
+    "description": "复制 20261019-190154-dsh-58806beb-0cd7-4dfc-a768-de14c3674b2b 后注入输入文件篡改：(1) 新建 input/refunds.csv，内容为 dim13 原始输入、仅把「R02,O02,2026-10-16T01:00:00Z,success,5000」改为「R02,O02,2026-10-16T01:00:00Z,success,500」（文件 SHA-256 因此与原始值 887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c 不符）；(2) expectations.json 新增 invariants 字段（v1 契约）：[{\"id\": \"input_immutable\", \"kind\": \"file_sha256\", \"path\": \"input/refunds.csv\", \"sha256\": \"887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c\"}]（声明的是篡改前的原始哈希）；其余文件未改。注入效果：run 目录内输入文件与声明的不变量哈希不匹配，而轨迹中原有的 SHA256 OK 验证输出（针对篡改前文件）仍在，构成输入被篡改的静默错误。",
+    "faults": [
+      {
+        "id": "input_tampered",
+        "expect_dimension": "execution_closure",
+        "expect_status_at_most": "partial",
+        "expect_completion_score_at_most": 60,
+        "rationale": "输入文件 SHA-256 与 expectations.invariants 声明的原始哈希不符，输入不可变不变量被违反"
+      }
+    ]
+  },
+  "labeling": {
+    "review_status": "pending_human_review",
+    "labeled_by": "agent-draft",
+    "reviewed_by": null
+  }
+}

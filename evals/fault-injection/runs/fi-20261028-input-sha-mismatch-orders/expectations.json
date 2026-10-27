@@ -1,0 +1,11 @@
+{
+  "acceptance_criteria": "",
+  "invariants": [
+    {
+      "id": "input_immutable",
+      "kind": "file_sha256",
+      "path": "input/orders.csv",
+      "sha256": "b5cd8bfffa1c3f6d448cf53cf5873118d473a8f2024b10a9970ddf530d8e7b9a"
+    }
+  ]
+}
