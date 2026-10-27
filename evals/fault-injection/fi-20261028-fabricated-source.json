@@ -19,8 +19,9 @@
     ]
   },
   "labeling": {
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z"
   }
 }

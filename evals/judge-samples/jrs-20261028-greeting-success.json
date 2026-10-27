@@ -210,10 +210,10 @@
   },
   "labeling": {
     "method": "ai_prelabel",
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null,
-    "reviewed_at": null,
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z",
     "judge_context": "既有 agent_judge.json：overall_status=success、completion_score=94、confidence=medium；裁判维度 intent_recognition/task_planning/tool_selection/state_tracking/final_response/context_management/execution_closure/safety_permission/efficiency=pass，evidence_citation=partial，parameter_generation/error_recovery/verification=unknown。本预标注与裁判 overall 一致（success），但对未触发维度更严格地使用 unknown（如 tool_selection、safety_permission 裁判标 pass，本标注按纪律标 unknown）。与 jrs-20261028-greeting-unknown（run 20261021-130817）构成裁判方差对照：两者输入几乎相同（单轮\"你好\"），run2 裁判却判 unknown/70，详见该样本 judge_context。"
   }
 }

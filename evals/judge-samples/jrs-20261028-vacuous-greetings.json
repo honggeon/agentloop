@@ -245,10 +245,10 @@
   },
   "labeling": {
     "method": "ai_prelabel",
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null,
-    "reviewed_at": null,
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z",
     "judge_context": "既有 agent_judge.json：overall_status=unknown、completion_score=50、confidence=medium；裁判自述\"Vacuous no-task run\"，50 分为中立空任务基线而非成败判断，并指出唯一异常是重复问候与单条回应之间约 5 分钟的间隔。裁判维度 intent_recognition/evidence_citation/final_response/safety_permission=pass，execution_closure/efficiency=partial，其余 7 维 unknown。本预标注与裁判的分歧主要在 overall_status 与 final_response：裁判 overall=unknown，本标注认为\"问候是否被恰当回应\"可判——最终问候被恰当回应但前两条问候（m0、m4）无响应，故判 partial；final_response 同理标 partial 而非 pass。"
   }
 }

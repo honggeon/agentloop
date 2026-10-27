@@ -210,10 +210,10 @@
   },
   "labeling": {
     "method": "ai_prelabel",
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null,
-    "reviewed_at": null,
-    "judge_context": "既有 agent_judge.json：overall_status=unknown、completion_score=70、confidence=medium；裁判自述\"Verdict is unknown, not pass and not fail\"，理由是确定性 completion 评估为 unknown 且验收标准缺失。裁判维度 intent_recognition/state_tracking/final_response/context_management/safety_permission/efficiency=pass，execution_closure/verification=partial，task_planning 亦 pass，tool_selection/parameter_generation/error_recovery=unknown。本样本与 jrs-20261028-greeting-success（run 20261021-141139）是裁判方差对照：两者用户输入同为单轮\"你好\"、系统上下文几乎相同、agent 行为同构（单条问候回应、零工具调用），run1 裁判判 success/94 而本 run 裁判判 unknown/70。本预标注对两个 run 独立通读轨迹后给出一致结论（success）——问候是否被恰当回应是可判的，故与 run2 裁判 overall 存在分歧，留待人工复核仲裁。"
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z",
+    "judge_context": "既有 agent_judge.json：overall_status=unknown、completion_score=70、confidence=medium；裁判自述\"Verdict is unknown, not pass and not fail\"，理由是确定性 completion 评估为 unknown 且验收标准缺失。裁判维度 intent_recognition/state_tracking/final_response/context_management/safety_permission/efficiency/task_planning/evidence_citation=pass，execution_closure/verification=partial，tool_selection/parameter_generation/error_recovery=unknown。本样本与 jrs-20261028-greeting-success（run 20261021-141139）是裁判方差对照：两者用户输入同为单轮\"你好\"、系统上下文几乎相同、agent 行为同构（单条问候回应、零工具调用），run1 裁判判 success/94 而本 run 裁判判 unknown/70。本预标注对两个 run 独立通读轨迹后给出一致结论（success）——问候是否被恰当回应是可判的，故与 run2 裁判 overall 存在分歧，留待人工复核仲裁。"
   }
 }

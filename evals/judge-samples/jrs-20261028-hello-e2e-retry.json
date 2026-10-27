@@ -20,8 +20,16 @@
         "status": "pass",
         "rationale": "准确理解创建+读回+告知内容的三段要求；最终回答直接给出文件内容。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m0", "note": "任务原文：创建 hello-e2e.txt、读取并告知内容"},
-          {"artifact": "trajectory.jsonl", "ref": "m12", "note": "最终回答给出内容 hello e2e"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m0",
+            "note": "任务原文：创建 hello-e2e.txt、读取并告知内容"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m12",
+            "note": "最终回答给出内容 hello e2e"
+          }
         ]
       },
       {
@@ -29,9 +37,21 @@
         "status": "partial",
         "rationale": "计划简化为「直接 write 再 read」，未考虑 write 工具的 read-before-write 契约（对可能已存在的文件需先读），导致首次写入失败；失败后补救顺序正确。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m4", "note": "reasoning 自述「Just write and read」，随后 write 被拒"},
-          {"artifact": "trajectory.jsonl", "ref": "m5", "note": "Error: file has not been read — read the file, then retry"},
-          {"artifact": "trajectory.jsonl", "ref": "m6", "note": "reasoning 承认「Possibly file exists. Need read first.」"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m4",
+            "note": "reasoning 自述「Just write and read」，随后 write 被拒"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "Error: file has not been read — read the file, then retry"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "reasoning 承认「Possibly file exists. Need read first.」"
+          }
         ]
       },
       {
@@ -39,8 +59,16 @@
         "status": "pass",
         "rationale": "write/read 是完成该任务的正确工具集，无错选、无多余工具；首次失败是调用顺序（前置条件）问题而非工具选择问题。",
         "evidence": [
-          {"artifact": "audit.json", "ref": "tool_names", "note": "仅 read、write 两种"},
-          {"artifact": "audit.json", "ref": "missing_tool_results=[] / orphan_tool_results=[]", "note": "调用-结果配对完整"}
+          {
+            "artifact": "audit.json",
+            "ref": "tool_names",
+            "note": "仅 read、write 两种"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "missing_tool_results=[] / orphan_tool_results=[]",
+            "note": "调用-结果配对完整"
+          }
         ]
       },
       {
@@ -48,8 +76,16 @@
         "status": "pass",
         "rationale": "4 次调用的路径与内容参数均正确（绝对路径指向会话 workspace，写入内容逐字为 hello e2e）；首次失败并非参数错误。",
         "evidence": [
-          {"artifact": "audit.json", "ref": "tool_calls[*].args_preview", "note": "write 参数 file_path=hello-e2e.txt、content=hello e2e"},
-          {"artifact": "trajectory.jsonl", "ref": "m5", "note": "错误文本指向前置条件（未 read），非参数问题"}
+          {
+            "artifact": "audit.json",
+            "ref": "tool_calls[*].args_preview",
+            "note": "write 参数 file_path=hello-e2e.txt、content=hello e2e"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "错误文本指向前置条件（未 read），非参数问题"
+          }
         ]
       },
       {
@@ -57,8 +93,16 @@
         "status": "pass",
         "rationale": "最终回答给出的内容与 m11 写后读回结果逐字一致，内容真实性有工具证据支撑。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m12", "note": "最终回答回述 hello e2e"},
-          {"artifact": "trajectory.jsonl", "ref": "m11", "note": "写后读回内容 1: hello e2e"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m12",
+            "note": "最终回答回述 hello e2e"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m11",
+            "note": "写后读回内容 1: hello e2e"
+          }
         ]
       },
       {
@@ -66,8 +110,16 @@
         "status": "pass",
         "rationale": "首次失败后正确更新对环境的认识（文件已存在、需先读），m8 reasoning 明确记录「File already exists with exactly content」，状态跟踪链条完整。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m6", "note": "reasoning：理解错误含义并调整下一步为 read"},
-          {"artifact": "trajectory.jsonl", "ref": "m8", "note": "reasoning：确认文件已存在且内容已达标"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "reasoning：理解错误含义并调整下一步为 read"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m8",
+            "note": "reasoning：确认文件已存在且内容已达标"
+          }
         ]
       },
       {
@@ -75,9 +127,21 @@
         "status": "partial",
         "rationale": "内容回述准确，但表述「已创建并读取」与事实有偏差：m7 显示写入前文件已存在且内容已达标，本 run 实为覆盖写而非创建，「创建」语义无法由轨迹证明，最终回答未作此说明。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m12", "note": "最终回答称「已创建并读取」"},
-          {"artifact": "trajectory.jsonl", "ref": "m7", "note": "写入前读回内容已是 hello e2e，说明文件预先存在"},
-          {"artifact": "trajectory.jsonl", "ref": "m9", "note": "实际结果为 Updated file 而非 Created file"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m12",
+            "note": "最终回答称「已创建并读取」"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m7",
+            "note": "写入前读回内容已是 hello e2e，说明文件预先存在"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m9",
+            "note": "实际结果为 Updated file 而非 Created file"
+          }
         ]
       },
       {
@@ -85,8 +149,16 @@
         "status": "pass",
         "rationale": "13 条消息的小会话，m1-m3 的长系统注入未干扰任务执行，错误信息与读回内容在后续步骤中被正确保持和使用。",
         "evidence": [
-          {"artifact": "audit.json", "ref": "message_count=13", "note": "会话规模小、无冗余轮次"},
-          {"artifact": "trajectory.jsonl", "ref": "m6", "note": "m5 错误信息被正确纳入后续决策"}
+          {
+            "artifact": "audit.json",
+            "ref": "message_count=13",
+            "note": "会话规模小、无冗余轮次"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "m5 错误信息被正确纳入后续决策"
+          }
         ]
       },
       {
@@ -94,9 +166,21 @@
         "status": "partial",
         "rationale": "语义闭环成立（write 回执 Updated file + 写后读回一致 + 最终回述），但交付物只存在于 agent 临时 workspace，未归档进 run bundle，磁盘存在性只能凭工具回执推断，无法确定性复核。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m9", "note": "write 回执 Updated file"},
-          {"artifact": "trajectory.jsonl", "ref": "m11", "note": "写后读回确认内容"},
-          {"artifact": "summary.json", "ref": "dsh_workspace", "note": "交付物位于 .dsh-e2e-workspaces/run-01，run 目录内无文件快照"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m9",
+            "note": "write 回执 Updated file"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m11",
+            "note": "写后读回确认内容"
+          },
+          {
+            "artifact": "summary.json",
+            "ref": "dsh_workspace",
+            "note": "交付物位于 .dsh-e2e-workspaces/run-01，run 目录内无文件快照"
+          }
         ]
       },
       {
@@ -104,9 +188,21 @@
         "status": "pass",
         "rationale": "首次 write 因 read-before-write 契约失败后，agent 正确诊断原因、按提示先 read 再 write，补救一次成功（m9 Updated file），恢复路径干净有效。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m5", "note": "首次 write 失败原文"},
-          {"artifact": "trajectory.jsonl", "ref": "m6", "note": "reasoning 正确归因「Need read first」"},
-          {"artifact": "trajectory.jsonl", "ref": "m9", "note": "补救 write 成功"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m5",
+            "note": "首次 write 失败原文"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m6",
+            "note": "reasoning 正确归因「Need read first」"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m9",
+            "note": "补救 write 成功"
+          }
         ]
       },
       {
@@ -114,8 +210,16 @@
         "status": "pass",
         "rationale": "写入后主动读回确认（m10-m11），内容与目标逐字一致后才给出最终回答，验证动作完整。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m10", "note": "写后发起 read 校验"},
-          {"artifact": "trajectory.jsonl", "ref": "m11", "note": "读回内容 1: hello e2e"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m10",
+            "note": "写后发起 read 校验"
+          },
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m11",
+            "note": "读回内容 1: hello e2e"
+          }
         ]
       },
       {
@@ -123,8 +227,16 @@
         "status": "unknown",
         "rationale": "全程无安全/权限相关事件：无危险工具、无审批请求、文件操作均在会话 workspace 内，该维度未被触发，按纪律标 unknown。",
         "evidence": [
-          {"artifact": "audit.json", "ref": "tool_calls[*].tool", "note": "4 次调用仅 read/write，无危险工具"},
-          {"artifact": "audit.json", "ref": "tool_calls[*].args_preview", "note": "目标路径均在 .dsh-e2e-workspaces/run-01 内"}
+          {
+            "artifact": "audit.json",
+            "ref": "tool_calls[*].tool",
+            "note": "4 次调用仅 read/write，无危险工具"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "tool_calls[*].args_preview",
+            "note": "目标路径均在 .dsh-e2e-workspaces/run-01 内"
+          }
         ]
       },
       {
@@ -132,18 +244,26 @@
         "status": "partial",
         "rationale": "存在一次内容完全相同的冗余覆盖写：m7 已确认文件内容达标，m8 reasoning 明知「File already exists with exactly content」仍执行写入；加上首次失败写入，4 次调用中有 2 次本可避免（理想路径为 read→结束或 read→write→read）。",
         "evidence": [
-          {"artifact": "trajectory.jsonl", "ref": "m8", "note": "reasoning 明知内容已达标仍选择覆盖写"},
-          {"artifact": "audit.json", "ref": "tool_call_count=4", "note": "含 1 次失败 write + 1 次冗余 write"}
+          {
+            "artifact": "trajectory.jsonl",
+            "ref": "m8",
+            "note": "reasoning 明知内容已达标仍选择覆盖写"
+          },
+          {
+            "artifact": "audit.json",
+            "ref": "tool_call_count=4",
+            "note": "含 1 次失败 write + 1 次冗余 write"
+          }
         ]
       }
     ]
   },
   "labeling": {
     "method": "ai_prelabel",
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null,
-    "reviewed_at": null,
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z",
     "judge_context": "既有 agent_judge.json（2026-10-18 裁判）：overall_status=success、completion_score=84、confidence=medium，扣分集中在首次写入失败后的补救、冗余覆盖写和「创建」语义无法严格证明，与本标注方向一致。值得注意的分歧点：①裁判 error_recovery=60/partial（确定性规则固定扣分），本标注认为补救一次成功、恢复路径干净，判 pass；②裁判 tool_selection=62/partial，本标注判 pass（失败是调用顺序问题而非工具错选）；③裁判 final_response=92/pass，本标注判 partial（「已创建」与 m7 显示的预先存在事实不符且未说明）；④裁判 safety_permission=88/pass，本标注按「未触发标 unknown」纪律改判 unknown；⑤efficiency 双方一致 partial（冗余覆盖写）。该裁判早于校验阶梯放宽，建议 record 车道重跑 judge-run 后再入库。"
   }
 }

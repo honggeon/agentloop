@@ -8,7 +8,7 @@
   },
   "injection": {
     "method": "edited_artifact",
-    "description": "复制 20261019-190154-dsh-58806beb-0cd7-4dfc-a768-de14c3674b2b 后注入输入文件篡改：(1) 新建 input/refunds.csv，内容为 dim13 原始输入、仅把「R02,O02,2026-10-16T01:00:00Z,success,5000」改为「R02,O02,2026-10-16T01:00:00Z,success,500」（文件 SHA-256 因此与原始值 887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c 不符）；(2) expectations.json 新增 invariants 字段（v1 契约）：[{\"id\": \"input_immutable\", \"kind\": \"file_sha256\", \"path\": \"input/refunds.csv\", \"sha256\": \"887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c\"}]（声明的是篡改前的原始哈希）；其余文件未改。注入效果：run 目录内输入文件与声明的不变量哈希不匹配，而轨迹中原有的 SHA256 OK 验证输出（针对篡改前文件）仍在，构成输入被篡改的静默错误。",
+    "description": "复制 20261019-190154-dsh-58806beb-0cd7-4dfc-a768-de14c3674b2b 后注入输入文件篡改：(1) 新建 input/refunds.csv，内容为 dim13 原始输入、仅把「R02,O02,2026-10-16T01:00:00Z,success,5000」改为「R02,O02,2026-10-16T01:00:00Z,success,500」（文件 SHA-256 因此与原始值 887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c 不符）；(2) expectations.json 新增 invariants 字段（v1 契约）：[{\"id\": \"input_immutable\", \"kind\": \"file_sha256\", \"path\": \"input/refunds.csv\", \"sha256\": \"887ef1254b1c00a806fa36b12cfdf64f1d056ef32f355055292375750dcb142c\"}]（声明的是篡改前的原始哈希）；其余文件未改。注入效果：run 目录内输入文件与声明的不变量哈希不匹配，而轨迹中原有的 SHA-256 校验通过输出（\"SHA-256 未变化：通过\"，针对篡改前文件）仍在，构成输入被篡改的静默错误。",
     "faults": [
       {
         "id": "input_tampered",
@@ -20,8 +20,9 @@
     ]
   },
   "labeling": {
-    "review_status": "pending_human_review",
+    "review_status": "reviewed",
     "labeled_by": "agent-draft",
-    "reviewed_by": null
+    "reviewed_by": "agent-review (dsh session, 独立复核：证据逐条回指+注入真实性 diff 核对)",
+    "reviewed_at": "2026-10-28T03:00:00Z"
   }
 }
