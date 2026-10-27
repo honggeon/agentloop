@@ -75,6 +75,13 @@ def main(argv=None) -> int:
         help="报告输出格式。",
     )
 
+    verify = subparsers.add_parser(
+        "verify-run",
+        help="对已裁判的运行目录重放确定性校验，并与已存 agent_judge.json 比对（只读）。",
+    )
+    verify.add_argument("--run", required=True, help="运行目录，例如 runs/<run-id>。")
+    verify.add_argument("--json", action="store_true", help="以 JSON 格式输出比对结果。")
+
     proxy = subparsers.add_parser("metrics-proxy", help="启动一个 OpenAI 兼容的 LLM 指标代理。")
     proxy.add_argument("--upstream-base-url", required=True, help="上游 LLM 服务的 base URL。")
     proxy.add_argument("--host", default="127.0.0.1", help="代理监听地址。")
@@ -185,6 +192,8 @@ def main(argv=None) -> int:
         return _render_run(args)
     if args.command == "judge-run":
         return _judge_run(args)
+    if args.command == "verify-run":
+        return _verify_run(args)
     if args.command == "metrics-proxy":
         return _metrics_proxy(args)
     if args.command == "import-llm-calls":
@@ -509,6 +518,21 @@ def _judge_run(args) -> int:
         print("Wrote %s" % paths["markdown_path"])
     print("Wrote %s" % paths["chart_path"])
     return 0
+
+
+def _verify_run(args) -> int:
+    from .verify import render_verify_text, verify_run
+
+    try:
+        result = verify_run(args.run)
+    except FileNotFoundError as exc:
+        print("verify-run failed: %s" % exc, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(render_verify_text(result))
+    return 0 if result["ok"] else 2
 
 
 def _metrics_proxy(args) -> int:

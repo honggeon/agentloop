@@ -372,6 +372,28 @@ Scoring authority: deterministic checks outrank the LLM judge. This round scores
 
 The existing deterministic commands do not require DeepAgent dependencies or model credentials.
 
+### Verify a judged run (deterministic replay)
+
+`verify-run` replays the deterministic layer of a judged run and compares it
+against the stored `agent_judge.json` — evidence reliability
+(`judge_reliability.evidence_coverage` / `invalid_evidence_count`), the four
+deterministic dimension rules (`score_trace.final_score`) and the quality cap
+(`metrics.quality_score_cap`). It is read-only and needs no network or model
+credentials; judge-sourced semantic scores are not replayable and are listed
+as out of scope. Any mismatch exits with code 2 (tamper detection and
+historical-report regression checks):
+
+```bash
+python3 -m auditrail.cli verify-run --run runs/<run-dir> [--json]
+```
+
+Related calibration tooling (also deterministic): `evals/compare_judge.py
+--samples-dir evals/judge-samples` aggregates judge-vs-baseline agreement over
+reviewed gold samples, and `evals/run_fault_injection.py --dir
+evals/fault-injection` measures recall on injected known faults (sample
+formats: `docs/superpowers/specs/2026-10-21-judge-regression-sample-format.md`
+and `evals/fault-injection/README.md`).
+
 ## Web Dashboard
 
 Create local config:
