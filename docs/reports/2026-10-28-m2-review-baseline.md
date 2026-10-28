@@ -91,3 +91,36 @@
 - 机械校验：10 jrs + 11 fi 契约全绿（13 维度 key、状态枚举、断言存在性、副本自包含、必需产物齐全）。
 - 语义复核：3 路并行子代理（jrs 前 5 / jrs 后 5 / fi 11），fi 首路子代理失败后拆为 6+5 两批重派完成。
 - 证据核对总量：jrs 257 条 + fi 11 组 diff/sha256/zipfile 实测。
+
+## 6. M3 锚点扩展验收（2026-10-28，rubric/规则版本 v1）
+
+规则版本：`DIMENSION_RUBRICS` v1（C3，13 维度三档锚点 + required_checks）、`intent_recognition_cap`（C4，第 5 条确定性维度规则）、交付物内容校验 + `expectations.json` invariants `file_sha256` v1（C5）。三个子任务各自独立提交（43f7ce1 / 90bfd3d / 469bdc0），每步后重跑对比。
+
+### 6.1 金集（replay 车道）：与 §2.1 基线逐字节一致
+
+M3 三个子任务均不改写已存 `agent_judge.json`（rubric 只影响重跑裁判后的新报告；新确定性规则只在新写入时生效），因此聚合数字不变：overall 一致率 80%，各维度 agreement 与 §2.1 相同，**无恶化**。record 车道重跑（rubric 生效后的裁判分）仍待模型 key，届时本节需更新。
+
+### 6.2 fi 注入库：replay 检出面扩大
+
+- `run_fault_injection`（消费已存报告）仍为 caught 3/16，与基线一致——陈旧报告口径不变。
+- **确定性层独立检出新增 4 例**（`assess_run_quality` 直接实证，无模型调用）：
+
+| fi 样本 | M3 后确定性检出 |
+|---|---|
+| corrupt-xlsx | `deliverables.invalid=[output/summary.xlsx]` + delivery/high finding（坏 zip） |
+| empty-report-md | `deliverables.invalid=[output/report.md]` + delivery/high finding（纯空白 md） |
+| input-sha-mismatch-orders | delivery/high finding：input/orders.csv 哈希与 invariants 声明不一致 |
+| input-sha-mismatch-refunds | delivery/high finding：input/refunds.csv 哈希与 invariants 声明不一致 |
+
+加上 M2 已实证的 3 例（fabricated-quote / fabricated-source / fake-recovery-no-attempt 经 verify-run 证据失效检出），replay 车道确定性可推导故障的检出从 3 类扩展到 7 类。其余（静默参数错误 missing-is-test-filter / right-closed-window / wrong-detail-csv、假恢复语义层）仍需 record 车道重裁判。
+
+### 6.3 verify-run 回归
+
+- 历史真实 run 抽样：20261018-224557、20261023-141305、20261026-082638 —— 每步后均为全 match；
+- 4 个交付物/输入类 fi 副本：全 match（新 finding 不影响 quality_score_cap 比对，无新增封顶）；
+- C4 规则已注册进 verify.py 白名单（rule/check id），旧报告无 intent_recognition score_trace 时按既有口径跳过，不误报 mismatch。
+
+### 6.4 测试与回归
+
+- 新增确定性测试：C3 ×6（rubric 结构/prompt 注入/软门禁三分支）、C4 ×6（cap 50/70、keep、全 pass/全 unknown/无信封不触发、证据逐字校验）、C5 ×11（坏 xlsx/空 md/假 PDF/有效文件/未产出不变/invariants 匹配与不匹配+缺失文件+旧格式+越界拒绝/写报告证据有效）。
+- 全量回归：`uv run pytest -q` 1130 passed, 2 skipped（系统 python3 缺 fastapi 依赖，按约定使用 uv 环境）。
