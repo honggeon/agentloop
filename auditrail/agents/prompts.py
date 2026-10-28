@@ -173,7 +173,7 @@ def _render_dimension_rubrics() -> str:
 
     lines = [
         "",
-        "维度评分锚点（rubric）：给分必须落在分数带锚点上，并把 required_checks 逐项填进该维度的 evidence_chain.checks（check id 必须与下表一致）；标注了「需要反证」的维度，给 pass 前必须主动寻找反证并写进 counter_evidence，找不到反证也要在 checks 结论中说明已查找。",
+        "维度评分锚点（rubric）：给分必须落在分数带锚点上，并把 required_checks 逐项填进该维度的 evidence_chain.checks（check id 必须与下表一致）；标注了「需要反证」的维度，给 pass 前必须主动寻找反证并写进 counter_evidence，找不到反证也要在 checks 结论中说明已查找。反证的 quote 与支撑证据同样必须逐字引用真实产物；找不到逐字反证时，把反证观点写进该 check 的 conclusion 并标 type=inference，不要硬凑或转述 quote。",
     ]
     for key, rubric in DIMENSION_RUBRICS.items():
         label = DIMENSION_DEFINITIONS[key]
@@ -196,6 +196,7 @@ EVIDENCE_FORMAT_REQUIREMENT = """
 - 禁止 "msg N ..."、"消息 N ..."、"第 N 条 ..." 这类描述式引用：quote 必须是可直接复制粘贴的原文片段，不得概括、翻译、缩写或改写，哪怕意思正确也会被判无效。
 - quote 里如需包含双引号、换行等字符请原样保留，系统按原始文本校验，无需转义。
 - 找不到逐字原文支撑的结论，把 type 标为 inference，不要硬凑或编造 quote。
+- counter_evidence（反证）的 quote 同样必须逐字引用真实产物、同样会被逐字校验；找不到逐字反证时，把反证观点写进 check 的 conclusion（标 type=inference），不要硬凑 quote 或写转述散文。
 - 引用逐字校验通过只代表引用真实存在，不代表结论被系统证明；不要把推断标成 fact。
 """
 

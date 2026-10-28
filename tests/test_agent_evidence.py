@@ -449,3 +449,103 @@ def test_whitespace_collapsed_quote_is_valid(tmp_path):
     assert reliability["invalid_evidence_count"] == 1
     assert reliability["invalid_evidence"][0]["location"] == "findings.1"
     assert reliability["invalid_evidence"][0]["reason"] == "quote_not_found"
+
+
+# -- support/counter 拆分计数（契约 C-fix，基线报告 §7.5 ①）-----------------
+
+
+def test_reliability_splits_invalid_counts_by_support_and_counter(tmp_path):
+    run = _write_full_run(tmp_path)
+    report = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "summary": "x",
+            "findings": [
+                {
+                    "severity": "high",
+                    "category": "tool",
+                    "title": "finding 级无效引用",
+                    "type": "fact",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": "not-in-artifact"}],
+                    "recommendation": "x",
+                }
+            ],
+            "dimensions": {
+                "error_recovery": {
+                    "score": 60,
+                    "status": "partial",
+                    "source": "judge",
+                    "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "timeout"}],
+                    "evidence_chain": {
+                        "checks": [
+                            {
+                                "id": "c1",
+                                "criterion": "c",
+                                "result": "pass",
+                                "conclusion": "c",
+                                "type": "fact",
+                                "evidence": [{"source": "trajectory.jsonl", "message_index": 1, "quote": "timeout"}],
+                                "counter_evidence": [
+                                    {"source": "trajectory.jsonl", "message_index": 0, "quote": "转述的反证 prose"},
+                                    {"source": "trajectory.jsonl", "message_index": 0, "quote": "另一条无效反证"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            },
+        }
+    )
+
+    reliability = validate_judge_evidence(run, report)
+
+    # 总数语义不变；findings 级无效引用支撑 finding 结论，计入 support 侧。
+    assert reliability["invalid_evidence_count"] == 3
+    assert reliability["invalid_counter_evidence_count"] == 2
+    assert reliability["invalid_support_evidence_count"] == 1
+    assert (
+        reliability["invalid_support_evidence_count"] + reliability["invalid_counter_evidence_count"]
+        == reliability["invalid_evidence_count"]
+    )
+    invalid_locations = {row["location"] for row in reliability["invalid_evidence"]}
+    assert "dimensions.error_recovery.checks.0.counter" in invalid_locations
+
+
+def test_old_report_reliability_normalizes_with_conservative_split(tmp_path):
+    # 旧报告（无 support/counter 拆分字段）归一化兼容：保守地把全部无效引用
+    # 归入 support 侧，维持"任一无效即清零"的旧语义。
+    report = normalize_judge_report(
+        {
+            "overall_status": "failed",
+            "summary": "x",
+            "judge_reliability": {
+                "evidence_coverage": 0.5,
+                "invalid_evidence_count": 2,
+                "total_evidence_count": 4,
+                "valid_evidence_count": 2,
+            },
+        }
+    )
+    reliability = report["judge_reliability"]
+    assert reliability["invalid_support_evidence_count"] == 2
+    assert reliability["invalid_counter_evidence_count"] == 0
+    assert reliability["invalid_evidence_count"] == 2
+
+    # 新字段存在时原样透传。
+    report2 = normalize_judge_report(
+        {
+            "overall_status": "failed",
+            "summary": "x",
+            "judge_reliability": {
+                "evidence_coverage": 0.5,
+                "invalid_evidence_count": 3,
+                "invalid_support_evidence_count": 1,
+                "invalid_counter_evidence_count": 2,
+                "total_evidence_count": 6,
+                "valid_evidence_count": 3,
+            },
+        }
+    )
+    reliability2 = report2["judge_reliability"]
+    assert reliability2["invalid_support_evidence_count"] == 1
+    assert reliability2["invalid_counter_evidence_count"] == 2

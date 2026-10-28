@@ -449,3 +449,111 @@ def test_intent_recognition_missing_or_unusable_envelope_does_not_trigger(tmp_pa
     dimension2 = _intent_dimension(run2, judge_score=90)["intent_recognition"]
     assert dimension2["score"] == 90
     assert "evidence_chain" not in dimension2
+
+
+# -- evidence_citation 反证契约（契约 C-fix，基线报告 §7.5 ①）----------------
+
+
+def _counter_evidence_report(counter_quote, support_quote="查一下 agent 评测", support_index=0):
+    """evidence_citation 维度：一条支撑引用 + 一条反证引用。"""
+    return normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "x",
+            "dimensions": {
+                "evidence_citation": {
+                    "score": 90,
+                    "status": "pass",
+                    "source": "judge",
+                    "evidence": [],
+                    "evidence_chain": {
+                        "checks": [
+                            {
+                                "id": "citation_quality",
+                                "criterion": "引用是否逐字真实",
+                                "result": "pass",
+                                "conclusion": "支撑结论的引用逐字真实。",
+                                "type": "fact",
+                                "evidence": [
+                                    {"source": "trajectory.jsonl", "message_index": support_index, "quote": support_quote}
+                                ],
+                                "counter_evidence": [
+                                    {"source": "trajectory.jsonl", "message_index": 2, "quote": counter_quote}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            },
+        }
+    )
+
+
+def test_evidence_citation_counter_only_invalid_does_not_zero(tmp_path):
+    # 反证（counter_evidence）的 quote 是转述散文、未通过逐字校验，但支撑侧
+    # 引用干净：维度不清零，按 coverage 计分，并在 gaps 中记录反证问题。
+    run = _write_tool_run(tmp_path)
+    report = _counter_evidence_report(counter_quote="转述：最终回答内容空泛")
+    reliability = validate_judge_evidence(run, report)
+    assert reliability["invalid_counter_evidence_count"] == 1
+    assert reliability["invalid_support_evidence_count"] == 0
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["evidence_citation"]
+
+    # 归一化会把 check 的支撑引用并入维度顶层 evidence，total=3（2 支撑 + 1
+    # 反证），valid=2 → coverage 0.6667 → 67 分。
+    assert dimension["score"] == 67
+    assert dimension["status"] == "partial"
+    gaps = dimension["evidence_chain"]["gaps"]
+    assert any("反证" in gap and "逐字校验" in gap for gap in gaps), gaps
+
+
+def test_evidence_citation_support_invalid_still_zeroes(tmp_path):
+    # 支撑侧引用无效（check evidence 转述散文）：维持原行为，维度清零判 fail。
+    run = _write_tool_run(tmp_path)
+    report = _counter_evidence_report(counter_quote="最终回答", support_quote="转述的支撑引用")
+    reliability = validate_judge_evidence(run, report)
+    # 归一化并入使无效支撑引用在顶层与 check 中各计一次。
+    assert reliability["invalid_support_evidence_count"] == 2
+    assert reliability["invalid_counter_evidence_count"] == 0
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["evidence_citation"]
+
+    assert dimension["score"] == 0
+    assert dimension["status"] == "fail"
+
+
+def test_evidence_citation_mixed_invalid_zeroes(tmp_path):
+    # 支撑侧与反证同时无效：清零，reason 同时提及两侧。
+    run = _write_tool_run(tmp_path)
+    report = _counter_evidence_report(counter_quote="转述的反证", support_quote="转述的支撑引用")
+    reliability = validate_judge_evidence(run, report)
+    assert reliability["invalid_support_evidence_count"] == 2
+    assert reliability["invalid_counter_evidence_count"] == 1
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["evidence_citation"]
+
+    assert dimension["score"] == 0
+    assert dimension["status"] == "fail"
+    rule = dimension["evidence_chain"]["score_trace"]["rules"][-1]
+    assert "支撑" in rule["reason"] and "反证" in rule["reason"]
+
+
+def test_evidence_citation_legacy_reliability_without_split_zeroes(tmp_path):
+    # 旧可靠性数据（无 support/counter 拆分字段）：任一无效引用仍清零，向后兼容。
+    run = _write_tool_run(tmp_path)
+    report = _counter_evidence_report(counter_quote="转述的反证")
+    reliability = validate_judge_evidence(run, report)
+    assert reliability["invalid_evidence_count"] == 1
+    del reliability["invalid_support_evidence_count"]
+    del reliability["invalid_counter_evidence_count"]
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["evidence_citation"]
+
+    assert dimension["score"] == 0
+    assert dimension["status"] == "fail"

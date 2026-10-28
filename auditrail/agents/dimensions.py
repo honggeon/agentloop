@@ -372,6 +372,15 @@ def _evidence_citation_rule(
 ) -> dict[str, Any] | None:
     total = int(reliability.get("total_evidence_count") or 0)
     invalid = int(reliability.get("invalid_evidence_count") or 0)
+    invalid_support_raw = reliability.get("invalid_support_evidence_count")
+    if invalid_support_raw is None:
+        # 旧可靠性数据没有 support/counter 拆分：保守地把全部无效引用计入
+        # support 侧，维持"任一无效即清零"的旧行为。
+        invalid_support = invalid
+        invalid_counter = 0
+    else:
+        invalid_support = int(invalid_support_raw or 0)
+        invalid_counter = int(reliability.get("invalid_counter_evidence_count") or 0)
     valid_rows = _valid_judge_evidence(report, reliability)
 
     checks = []
@@ -396,7 +405,9 @@ def _evidence_citation_rule(
         )
         gaps.append("裁判报告缺少证据引用，无法对语义结论做机械校验。")
         reason = "裁判报告没有提供任何证据引用。"
-    elif invalid:
+    elif invalid_support:
+        # 只有支撑结论的引用无效才清零；反证（counter_evidence）的引用质量
+        # 是可靠性的次要信号，不清零、只在下方按 coverage 计分时记录 gap。
         score = 0
         summary = "Invalid evidence references were found."
         recommendation = "Fix source, message_index, or quote references."
@@ -406,21 +417,28 @@ def _evidence_citation_rule(
             evidence = _misquote_evidence(reliability, artifacts)
         if not evidence:
             evidence = _artifact_availability_evidence(artifacts)
-        invalid_locations = [
-            str(row.get("location") or "") for row in reliability.get("invalid_evidence") or [] if isinstance(row, dict)
+        support_locations = [
+            str(row.get("location") or "")
+            for row in reliability.get("invalid_evidence") or []
+            if isinstance(row, dict) and not str(row.get("location") or "").endswith(".counter")
         ]
         checks.append(
             {
                 "id": "invalid_references",
                 "criterion": "裁判引用的 source/message_index/quote 是否通过逐字校验",
                 "result": "fail",
-                "conclusion": "%s 条引用未通过逐字校验：%s。" % (invalid, ", ".join(invalid_locations[:5]) or "unknown"),
+                "conclusion": "%s 条支撑侧引用未通过逐字校验：%s。"
+                % (invalid_support, ", ".join(support_locations[:5]) or "unknown"),
                 "type": "fact",
                 "evidence": evidence,
                 "counter_evidence": [],
             }
         )
-        reason = "发现 %s 条无效证据引用。" % invalid
+        if invalid_counter:
+            gaps.append("%s 条反证引用未通过逐字校验（次要信号，不影响清零判定）。" % invalid_counter)
+            reason = "发现 %s 条无效支撑证据引用，另 %s 条反证引用无效。" % (invalid_support, invalid_counter)
+        else:
+            reason = "发现 %s 条无效支撑证据引用。" % invalid_support
     else:
         score = round(float(reliability.get("evidence_coverage") or 0) * 100)
         summary = "%s/%s evidence references are valid." % (reliability.get("valid_evidence_count", 0), total)
@@ -437,7 +455,14 @@ def _evidence_citation_rule(
                 "counter_evidence": [],
             }
         )
-        reason = "证据覆盖率 %s%% 由逐字校验确定性计算。" % score
+        if invalid_counter:
+            gaps.append("%s 条反证引用未通过逐字校验（次要信号，不清零、按 coverage 正常计分）。" % invalid_counter)
+            reason = "证据覆盖率 %s%% 由逐字校验确定性计算；%s 条反证引用无效，仅记录不清零。" % (
+                score,
+                invalid_counter,
+            )
+        else:
+            reason = "证据覆盖率 %s%% 由逐字校验确定性计算。" % score
 
     return {
         "score": score,

@@ -198,3 +198,26 @@ M3 rubric **部分达到预期**：fi record 召回率 3/16→7/16（出口达�
 3. 静默参数错误类（missing-is-test-filter、right-closed-window）裁判语义层系统性盲区，评估加确定性规则（输出数据 vs 过滤条件的机械复核）；
 4. 用同一模型（kimi-for-coding）在 rubric 关闭状态重跑一次金集做消融，分离"模型更换"与"rubric 注入"的贡献，当前 §7.2 的下降不能全部归因 rubric；
 5. greeting 方差未收敛，多次裁判一致性（spec §8 非目标）可能需要提前排期。
+
+### 7.6 修复记录：evidence_citation 反证契约摩擦（契约 C-fix，对应 §7.5 建议①）
+
+**改动**（当日完成，未重跑裁判，仅确定性层修复 + verify-run 重放核对）：
+
+1. `auditrail/agents/evidence.py`：`validate_judge_evidence` 新增 additive 字段 `invalid_support_evidence_count` / `invalid_counter_evidence_count`，按 `_collect_evidence` 的 `is_support` 标记拆分；findings 级证据（支撑 finding 结论）归入 support 侧，`invalid_evidence_count` 总数语义不变。`schemas._normalize_judge_reliability` 同步透传：旧报告无拆分字段时保守归入 support 侧（维持"任一无效即清零"旧语义）。
+2. `auditrail/agents/dimensions.py` `_evidence_citation_rule`：清零分支改为只在 `invalid_support_evidence_count > 0` 时触发；仅反证无效时按 coverage 正常计分，并在该维度 `evidence_chain.gaps` 追加"N 条反证引用未通过逐字校验"说明；混合无效仍清零。
+3. `auditrail/agents/prompts.py`：rubric 反证要求与 `EVIDENCE_FORMAT_REQUIREMENT` 补充反证纪律——反证 quote 同样必须逐字引用真实产物，找不到逐字反证时把反证观点写进 check 的 conclusion（标 type=inference），不要硬凑 quote。
+4. 测试：`tests/test_agent_evidence.py` / `tests/test_agent_dimensions.py` 新增 6 例（仅 counter 无效不清零且 gaps 有记录、support 无效仍清零、混合无效仍清零、拆分计数正确、旧报告归一化兼容、旧可靠性数据 fallback）。全量 `uv run pytest -q`：1136 passed, 2 skipped。
+
+**verify-run 重放比对（21 个 record 车道 run）**：18/21 全 match；3 例出现预期 mismatch（均为 `dimensions.evidence_citation.score_trace.final_score` stored=0 → replayed>0），逐案核对：
+
+| run | stored | replayed | 无效引用拆分（重放视图） | 核对结论 |
+|---|---|---|---|---|
+| jrs-20261028-dim13-full-run | 0 | 90 | counter×3（quote_not_found），support×0 | ✅ 纯反证无效，旧报告被反证清零、新规则不清零 |
+| jrs-20261028-hello-e2e-retry | 0 | 71 | counter×28（missing_quote 空 quote），support×0 | ✅ 纯反证无效（§7.4 的 32 条空 quote counter 簇），新规则不清零 |
+| fi-20261028-corrupt-xlsx | 0 | 69 | counter×28（missing_quote），support×0 | ✅ 纯反证无效，新规则不清零（该 fi 的 caught 依据是 C5 交付物校验，不受影响） |
+
+其余 7 份 stored=0 的报告重放仍为 0（方向正确，不属于 mismatch）：confirmation-gate（support×8，含引用不存在的 evaluation.json）、greeting-unknown（support×3）、hermes（混合 support×5 + counter×8）、fabricated-quote（support×2 source_not_found，注入在 support 侧）、input-sha-mismatch-orders（support×4）、input-sha-mismatch-refunds（support×3）、missing-is-test-filter（support×12）——支撑侧或混合无效仍按旧语义清零。
+
+**fi 断言复核**：`python3 evals/run_fault_injection.py` 召回 7/16 与 §7.3 完全一致；fabricated-quote 仍 caught（ec=fail/0，注入在 support 侧不受本修复影响）、fabricated-source 仍 missed（裁判语义未发现，与本修复无关）。
+
+**后续**：本修复改变了确定性层对新裁判报告的评分口径，上述 3 例金集/fi 的 ec 维度一致率需在下次裁判重跑后按新规则重估（§7.2 的 ec 30% 数字含本修复已消除的 FN 簇）。

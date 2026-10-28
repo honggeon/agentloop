@@ -20,6 +20,8 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
     artifacts = _load_artifacts(Path(run_path))
     evidence_rows = _collect_evidence(report)
     invalid = []
+    invalid_support = 0
+    invalid_counter = 0
     index_corrections: list[dict[str, Any]] = []
     valid_count = 0
     valid_by_location: dict[str, int] = {}
@@ -43,6 +45,13 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
                 )
         else:
             invalid.append({"location": location, **evidence, "reason": result})
+            # 无效引用按支撑/反证拆分计数：findings 级证据（dimension_key 为
+            # None）支撑 finding 结论，归入 support 侧；带维度归属的
+            # is_support=False 行即 counter_evidence，归入 counter 侧。
+            if is_support or dimension_key is None:
+                invalid_support += 1
+            else:
+                invalid_counter += 1
         if dimension_key and is_support:
             dimension_support_total[dimension_key] = dimension_support_total.get(dimension_key, 0) + 1
 
@@ -97,6 +106,8 @@ def validate_judge_evidence(run_path: str | Path, report: dict[str, Any]) -> dic
         "evidence_coverage": round(valid_count / total, 4) if total else 0,
         "unsupported_claim_count": unsupported,
         "invalid_evidence_count": len(invalid),
+        "invalid_support_evidence_count": invalid_support,
+        "invalid_counter_evidence_count": invalid_counter,
         "index_corrected_count": len(index_corrections),
         "index_corrections": index_corrections,
         "fact_inference_mismatch_count": mismatch,

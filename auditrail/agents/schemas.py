@@ -845,10 +845,19 @@ def _normalize_judge_reliability(value: object) -> Dict[str, Any]:
     corrections = item.get("index_corrections") or []
     if not isinstance(corrections, list):
         corrections = []
+    invalid_total = max(0, int(item.get("invalid_evidence_count") or 0))
+    invalid_support = item.get("invalid_support_evidence_count")
+    invalid_counter = item.get("invalid_counter_evidence_count")
+    if invalid_support is None and invalid_counter is None:
+        # 旧报告无 support/counter 拆分字段：保守地把全部无效引用归入
+        # support 侧，维持"任一无效即清零"的旧语义。
+        invalid_support, invalid_counter = invalid_total, 0
     return {
         "evidence_coverage": max(0, min(1, float(coverage))),
         "unsupported_claim_count": max(0, int(item.get("unsupported_claim_count") or 0)),
-        "invalid_evidence_count": max(0, int(item.get("invalid_evidence_count") or 0)),
+        "invalid_evidence_count": invalid_total,
+        "invalid_support_evidence_count": max(0, int(invalid_support or 0)),
+        "invalid_counter_evidence_count": max(0, int(invalid_counter or 0)),
         "index_corrected_count": max(0, int(item.get("index_corrected_count") or 0)),
         "index_corrections": [row for row in corrections if isinstance(row, dict)],
         "fact_inference_mismatch_count": max(0, int(item.get("fact_inference_mismatch_count") or 0)),
