@@ -28,7 +28,12 @@ def assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability:
     artifacts = _ArtifactQuotes(audit, trajectory)
 
     _apply_rule(dimensions, "tool_selection", _tool_selection_rule(audit, artifacts), cap=True)
-    _apply_rule(dimensions, "execution_closure", _execution_closure_rule(trajectory, normalized, artifacts), cap=False)
+    _apply_rule(
+        dimensions,
+        "execution_closure",
+        _execution_closure_rule(trajectory, normalized, artifacts, delivery_failure=_proven_delivery_failure(run_dir)),
+        cap=False,
+    )
     _apply_rule(dimensions, "error_recovery", _error_recovery_rule(audit, artifacts), cap=True)
     _apply_rule(dimensions, "evidence_citation", _evidence_citation_rule(reliability, normalized, artifacts), cap=False)
     _apply_rule(dimensions, "intent_recognition", _intent_recognition_rule(run_dir), cap=True)
@@ -240,8 +245,22 @@ def _tool_selection_rule(audit: dict[str, Any], artifacts: _ArtifactQuotes) -> d
     }
 
 
+def _proven_delivery_failure(run_dir: Path) -> bool:
+    """Re-derive the proven-delivery-failure signal from run artifacts.
+
+    Computed from artifacts (not read from the judge report's merged
+    findings) so the write path and the verify-run replay path see identical
+    inputs — ``_judge_proposal_view`` strips quality findings before replay.
+    Lazy import: tools.py imports this module at top level.
+    """
+    from .tools import assess_run_quality
+
+    quality = assess_run_quality(str(run_dir))
+    return bool(quality.get("proven_delivery_failure"))
+
+
 def _execution_closure_rule(
-    trajectory: list[dict[str, Any]], report: dict[str, Any], artifacts: _ArtifactQuotes
+    trajectory: list[dict[str, Any]], report: dict[str, Any], artifacts: _ArtifactQuotes, *, delivery_failure: bool = False
 ) -> dict[str, Any] | None:
     if not trajectory:
         return None
@@ -270,12 +289,19 @@ def _execution_closure_rule(
         score, summary, recommendation = 20, "No final assistant response was captured.", "Require final response before closing a run."
         result = "fail"
         conclusion = "轨迹末尾没有非空的 assistant 最终回答。"
+    reason = "执行闭环由轨迹末尾是否存在最终回答确定性决定。"
+    if delivery_failure:
+        # 已证实的交付失败（产出内容无效或输入不变量被违反）把候选分封顶到
+        # partial 档：存在最终回答不等于交付可信。信号由 run 产物重推，
+        # 与 verify-run 重放路径输入一致。
+        score = min(score, 60)
+        reason += "存在已证实的交付物内容无效或输入不变量违反，候选分封顶 60。"
     return {
         "score": score,
         "summary": summary,
         "recommendation": recommendation,
         "rule_id": "execution_closure_set",
-        "reason": "执行闭环由轨迹末尾是否存在最终回答确定性决定。",
+        "reason": reason,
         "evidence": evidence,
         "checks": [
             {

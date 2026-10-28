@@ -849,9 +849,9 @@ def test_assess_run_quality_flags_corrupt_xlsx_as_invalid_deliverable(tmp_path):
 
     assert quality["deliverables"]["produced"] == [".xlsx"]
     assert quality["deliverables"]["invalid"] == ["output/summary.xlsx"]
-    # verification 语义不变（不新增封顶），invalid 是 additive 字段
+    # verification 语义不变，invalid 是 additive 字段；已证实的内容无效交付物封顶 60（§7.5 ②）
     assert quality["deliverables"]["verification"] == "verified"
-    assert quality["completion"]["score_cap"] == 100
+    assert quality["completion"]["score_cap"] == 60
     finding = next(f for f in quality["findings"] if f["category"] == "delivery" and f["severity"] == "high")
     assert "output/summary.xlsx" in finding["title"]
     assert finding["type"] == "fact"
@@ -917,7 +917,7 @@ def test_assess_run_quality_invariant_file_sha256_mismatch_produces_delivery_fin
     assert finding["severity"] == "high"
     assert finding["type"] == "fact"
     assert finding["evidence"] and finding["evidence"][0]["source"] == "expectations.json"
-    assert quality["completion"]["score_cap"] == 100  # 不变量违例生成 finding，不封顶
+    assert quality["completion"]["score_cap"] == 60  # 不变量违例是已证实失败，封顶 60（§7.5 ②）
 
 
 def test_assess_run_quality_invariant_file_sha256_match_is_silent(tmp_path):
@@ -981,3 +981,44 @@ def test_write_judge_report_persists_invalid_deliverable_finding_with_valid_evid
     finding = next(f for f in report["findings"] if "content validation" in f["title"])
     assert finding["type"] == "fact"  # 证据通过逐字校验，未被降级
     assert report["judge_reliability"]["invalid_evidence_count"] == 0
+
+
+def test_assess_run_quality_caps_score_at_60_on_invalid_deliverable(tmp_path):
+    # 已产出但内容无效的交付物是已证实失败（不同于 unverifiable）：封顶 60。
+    run = _write_deliverable_run(tmp_path, "请汇总数据并输出 xlsx 报表", {"output/summary.xlsx": b"not a zip"})
+    quality = assess_run_quality(str(run))
+
+    assert quality["proven_delivery_failure"] is True
+    assert quality["completion"]["score_cap"] == 60
+
+
+def test_assess_run_quality_caps_score_at_60_on_invariant_violation(tmp_path):
+    import hashlib
+
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {"input/orders.csv": "tampered,content\n"})
+    digest = hashlib.sha256("original,content\n".encode()).hexdigest()
+    _write_expectations(
+        run,
+        {"invariants": [{"id": "orders-immutable", "kind": "file_sha256", "path": "input/orders.csv", "sha256": digest}]},
+    )
+    quality = assess_run_quality(str(run))
+
+    assert quality["proven_delivery_failure"] is True
+    assert quality["completion"]["score_cap"] == 60
+
+
+def test_assess_run_quality_proven_delivery_failure_false_when_clean(tmp_path):
+    run = _write_deliverable_run(tmp_path, "请汇总数据并输出 xlsx 报表", {"output/summary.xlsx": _valid_xlsx_bytes()})
+    quality = assess_run_quality(str(run))
+
+    assert quality["proven_delivery_failure"] is False
+    assert quality["completion"]["score_cap"] == 100
+
+
+def test_assess_run_quality_unverifiable_deliverable_still_not_proven_failure(tmp_path):
+    # 未产出交付物：维持 unverifiable 语义，不算已证实失败、不封顶。
+    run = _write_deliverable_run(tmp_path, "请生成 xlsx 报表", {})
+    quality = assess_run_quality(str(run))
+
+    assert quality["proven_delivery_failure"] is False
+    assert quality["completion"]["score_cap"] == 100

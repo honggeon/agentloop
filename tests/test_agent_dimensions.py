@@ -557,3 +557,68 @@ def test_evidence_citation_legacy_reliability_without_split_zeroes(tmp_path):
 
     assert dimension["score"] == 0
     assert dimension["status"] == "fail"
+
+
+# -- proven delivery failure caps execution_closure (§7.5 ②) ---------------
+
+
+def _write_deliverable_failure_run(tmp_path, valid=False):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "summary.json").write_text(
+        json.dumps({"title": "请输出 notes.md 说明"}, ensure_ascii=False), encoding="utf-8"
+    )
+    (run / "audit.json").write_text(json.dumps({"tool_calls": [], "findings": []}), encoding="utf-8")
+    rows = [
+        {"index": 0, "role": "user", "content": "请输出 notes.md 说明"},
+        {"index": 1, "role": "assistant", "content": "已完成并产出 notes.md。"},
+    ]
+    (run / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8"
+    )
+    (run / "notes.md").write_text("# 说明\n内容" if valid else "   \n  ", encoding="utf-8")
+    return run
+
+
+def test_execution_closure_caps_at_60_on_proven_delivery_failure(tmp_path):
+    # 已产出但内容无效的交付物是已证实的 delivery 失败：执行闭环候选分封顶 60。
+    run = _write_deliverable_failure_run(tmp_path, valid=False)
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": _judge_unknown_dimensions(),
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+    dimension = dimensions["execution_closure"]
+
+    assert dimension["score"] == 60
+    assert dimension["status"] == "partial"
+    trace = dimension["evidence_chain"]["score_trace"]
+    assert trace["deterministic_score"] == 60
+    assert "交付" in trace["rules"][-1]["reason"]
+
+
+def test_execution_closure_not_capped_when_deliverable_valid(tmp_path):
+    # 交付物内容有效：不封顶，维持原有 90 分。
+    run = _write_deliverable_failure_run(tmp_path, valid=True)
+    report = normalize_judge_report(
+        {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "ok",
+            "dimensions": _judge_unknown_dimensions(),
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+
+    dimensions = assess_dimensions(run, report, reliability)
+
+    assert dimensions["execution_closure"]["score"] == 90
+    assert dimensions["execution_closure"]["status"] == "pass"

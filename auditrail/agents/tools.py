@@ -227,8 +227,9 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
 
     # Content-level validation (contract C5): a produced file whose content is
     # mechanically invalid (corrupt zip, fake PDF header, blank markdown) is a
-    # delivery finding, but never a new cap — the "unverifiable workspace"
-    # reasoning above is untouched, and ``verification`` keeps its semantics.
+    # delivery finding. Unlike the "unverifiable workspace" case above, a
+    # produced-but-invalid file inside the run bundle IS verified evidence of
+    # failure, so it caps completion (§7.5 ②); ``missing`` stays uncapped.
     invalid_deliverables = _validate_produced_deliverables(run_dir, produced)
     for relative in invalid_deliverables:
         findings.append(
@@ -241,7 +242,16 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
                 "recommendation": "Re-generate the deliverable and verify it parses/opens before claiming completion.",
             }
         )
-    findings.extend(_invariant_findings(run_dir, evidence_chain))
+    invariant_findings = _invariant_findings(run_dir, evidence_chain)
+    findings.extend(invariant_findings)
+
+    # Proven delivery failure (invalid produced content or violated input
+    # invariant) caps completion at 60; the flag is part of the quality output
+    # so the execution_closure rule can re-derive it from run artifacts and
+    # the write path stays equivalent to the verify-run replay path.
+    proven_delivery_failure = bool(invalid_deliverables) or bool(invariant_findings)
+    if proven_delivery_failure:
+        score_cap = min(score_cap, 60)
 
     if tool_failure:
         findings.append(
@@ -271,6 +281,7 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
             "invalid": invalid_deliverables,
             "verification": deliverable_verification,
         },
+        "proven_delivery_failure": proven_delivery_failure,
         "evidence_chain": evidence_chain,
         "findings": findings,
         "evaluation": {"status": envelope_status, "note": envelope_note},
