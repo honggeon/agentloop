@@ -1022,3 +1022,24 @@ def test_assess_run_quality_unverifiable_deliverable_still_not_proven_failure(tm
 
     assert quality["proven_delivery_failure"] is False
     assert quality["completion"]["score_cap"] == 100
+
+
+def test_write_judge_report_rubric_gate_silent_when_rubrics_disabled(tmp_path, monkeypatch):
+    # 消融等 rubric=off 场景：裁判从未被要求填 required_checks，软门禁不应记录。
+    monkeypatch.setenv("AUDITRAIL_JUDGE_RUBRICS", "off")
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "x",
+            "findings": [],
+            "dimensions": full_judge_dimensions(final_response=_scored_judge_dimension()),
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    notes = report["judge_reliability"]["notes"]
+    assert not any(note.startswith("rubric_missing_checks") for note in notes), notes

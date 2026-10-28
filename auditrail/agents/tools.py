@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from .dimensions import assess_dimensions, verbatim_quote
 from .evidence import validate_judge_evidence
-from .prompts import DIMENSION_RUBRICS
+from .prompts import DIMENSION_RUBRICS, judge_rubrics_enabled
 from .schemas import DIMENSION_DEFINITIONS, missing_judge_dimensions, normalize_judge_report, render_judge_markdown
 from ..judges import reports as judge_reports
 from ..judges.proposals import JudgeProposalError
@@ -411,7 +411,11 @@ def _rubric_missing_checks(dimensions: Dict[str, Any]) -> List[str]:
     Soft gate for contract C3: purely informational, never blocks publishing.
     Only ``source == "judge"`` dimensions participate — deterministic rules
     generate their own checks, and unknown dimensions are honest abstentions.
+    When rubrics are disabled (``AUDITRAIL_JUDGE_RUBRICS=off``, e.g. ablation
+    runs) the judge was never asked for these checks, so nothing is reported.
     """
+    if not judge_rubrics_enabled():
+        return []
     missing: List[str] = []
     for key, dimension in dimensions.items():
         if not isinstance(dimension, dict):
