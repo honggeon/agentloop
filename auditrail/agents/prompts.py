@@ -168,6 +168,23 @@ DIMENSION_RUBRICS = {
 }
 
 
+#: 消融实验开关（契约 C3 rubric 注入）：置为 off/0/false/no 时，report_writer
+#: 提示词不注入 DIMENSION_RUBRICS 锚点与 required_checks，回到 rubric 生效前
+#: 的口径。默认注入（on），交付行为不变。由 ``build_report_writer_prompt`` 在
+#: 构建子智能体时读取，便于同一进程内不同裁判轮次使用不同口径。
+JUDGE_RUBRICS_ENV = "AUDITRAIL_JUDGE_RUBRICS"
+
+_JUDGE_RUBRICS_FALSEY = {"0", "false", "no", "off"}
+
+
+def judge_rubrics_enabled(environ=None) -> bool:
+    """``AUDITRAIL_JUDGE_RUBRICS`` 是否为开（缺省为开）。"""
+    import os
+
+    env = os.environ if environ is None else environ
+    return str(env.get(JUDGE_RUBRICS_ENV, "on")).strip().lower() not in _JUDGE_RUBRICS_FALSEY
+
+
 def _render_dimension_rubrics() -> str:
     from .schemas import DIMENSION_DEFINITIONS
 
@@ -268,7 +285,7 @@ ROOT_CAUSE_ANALYST_PROMPT = """你是根因分析专家。
 """ + EVIDENCE_FORMAT_REQUIREMENT
 
 
-REPORT_WRITER_PROMPT = """你是报告生成专家。
+REPORT_WRITER_PROMPT_BASE = """你是报告生成专家。
 
 你负责输出最终 JSON，并通过 write_judge_report 写入 run 目录。JSON 必须包含：
 - overall_status: success|partial|failed|unknown
@@ -317,9 +334,27 @@ dimensions 缺少任何一个维度 key 都是结构不完整，系统会拒绝�
 
 findings 中每项必须包含 severity、category、title、type、evidence、recommendation。
 最终回答也必须返回同一个 JSON 对象。
+"""
 
+#: rubric 注入时附带的绑定语句（rubric 关闭时连同锚点一并省略）。
+_RUBRIC_BINDING = """
 维度评分必须遵守文末的 rubric：分数落在对应分数带锚点上；每个非 unknown 维度必须把该维度 rubric 的 required_checks 逐项填进 evidence_chain.checks（check id 与 rubric 一致），未填齐的维度会被系统记录在 judge_reliability.notes。
-""" + _render_dimension_rubrics() + EVIDENCE_FORMAT_REQUIREMENT
+"""
+
+
+def build_report_writer_prompt(*, environ=None) -> str:
+    """按 ``AUDITRAIL_JUDGE_RUBRICS`` 开关组装 report_writer 系统提示词。
+
+    默认（on）注入 DIMENSION_RUBRICS 锚点与 required_checks，与
+    ``REPORT_WRITER_PROMPT`` 常量一致；off 时回到 rubric 生效前的口径
+    （仅基础契约 + 证据格式要求），用于开/关消融实验。
+    """
+    rubric_block = _RUBRIC_BINDING + _render_dimension_rubrics() if judge_rubrics_enabled(environ) else ""
+    return REPORT_WRITER_PROMPT_BASE + rubric_block + EVIDENCE_FORMAT_REQUIREMENT
+
+
+#: 默认（rubric 注入开启）的 report_writer 提示词，保持既有交付口径。
+REPORT_WRITER_PROMPT = build_report_writer_prompt(environ={JUDGE_RUBRICS_ENV: "on"})
 
 #: report_writer 的 write_judge_report 工具被发布门禁拒绝时返回的修正指引。
 #: 拒绝只是工具级反馈，子智能体应补全报告后在同一轮内重新调用工具。

@@ -5,10 +5,10 @@ from typing import Any
 
 from .prompts import (
     REPORT_REJECTED_FEEDBACK,
-    REPORT_WRITER_PROMPT,
     ROOT_CAUSE_ANALYST_PROMPT,
     TOOL_AUDITOR_PROMPT,
     TRAJECTORY_ANALYST_PROMPT,
+    build_report_writer_prompt,
 )
 from .tools import (
     assess_run_quality,
@@ -70,7 +70,8 @@ def build_subagents(model_spec: Any) -> list[dict]:
         {
             "name": "report_writer",
             "description": "生成结构化 JSON、Markdown 报告和图表数据。",
-            "system_prompt": REPORT_WRITER_PROMPT,
+            # rubric 注入按 AUDITRAIL_JUDGE_RUBRICS 在构建时读取（默认注入）。
+            "system_prompt": build_report_writer_prompt(),
             "tools": [assess_run_quality, build_chart_data, _write_judge_report_with_feedback],
             "model": model_spec,
         },
