@@ -221,3 +221,59 @@ M3 rubric **部分达到预期**：fi record 召回率 3/16→7/16（出口达�
 **fi 断言复核**：`python3 evals/run_fault_injection.py` 召回 7/16 与 §7.3 完全一致；fabricated-quote 仍 caught（ec=fail/0，注入在 support 侧不受本修复影响）、fabricated-source 仍 missed（裁判语义未发现，与本修复无关）。
 
 **后续**：本修复改变了确定性层对新裁判报告的评分口径，上述 3 例金集/fi 的 ec 维度一致率需在下次裁判重跑后按新规则重估（§7.2 的 ec 30% 数字含本修复已消除的 FN 簇）。
+
+---
+
+## 8. rubric 开/关消融实验（kimi-for-coding 固定模型）
+
+> 状态：**已完成**（2026-10-28 晚，10/10 覆盖；前半 4 个由子代理 6a8f91ca 完成至 token 耗尽中断，现场盘点无损后由 f4b86bf0 续跑剩余 6 个，全程约 41 分钟，无 429）。所有 run 的 `agent_judge.json` 已恢复为 rubric-on 版；rubric=off 报告存于各 run 的 `agent_judge.rubric-off.json`（runs/ 被 gitignore，原始文件仅存本地）。
+> 目的：分离 §7.2 中"模型更换（v4-flash→kimi-for-coding）"与"rubric v1 注入"两个混杂变量。
+> 三档对照：v4-flash+无rubric（pre-m3 备份）/ kimi+无rubric（AUDITRAIL_JUDGE_RUBRICS=off）/ kimi+rubric v1。
+> 样本：10 个 reviewed 金集 run；标签不变（oracle 独立）。
+
+### 8.1 三档 overall 一致率
+
+| 档位 | overall 一致率 |
+|---|---|
+| v4-flash + 无 rubric（M2 基线） | 8/10 |
+| kimi-for-coding + 无 rubric | **8/10** |
+| kimi-for-coding + rubric v1 | **5/10** |
+
+**核心结论：模型更换本身中性（8/10 → 8/10），§7.2 的 overall 下滑完全由 rubric v1 造成。**
+
+### 8.2 逐维度一致率对照
+
+| 维度 | v4flash 无rubric | kimi 无rubric | kimi+rubric v1 | rubric 净效应（kimi 组内 on−off） |
+|---|---|---|---|---|
+| intent_recognition | 10/10 | 10/10 | 10/10 | 0 |
+| task_planning | 8/10 | 8/10 | 5/10 | **−3** |
+| tool_selection | 6/10 | 8/10 | 7/10 | −1 |
+| parameter_generation | 10/10 | 10/10 | 9/10 | −1 |
+| evidence_citation | 6/10 | 4/10 | 3/10 | −1（含 C-fix 前的反证连累，见 §7.6） |
+| state_tracking | 7/10 | 6/10 | 7/10 | +1 |
+| final_response | 8/10 | 8/10 | 7/10 | **−1（FP 2→3）** |
+| context_management | 7/10 | 9/10 | 7/10 | −2 |
+| execution_closure | 8/10 | 5/10 | 3/10 | −2（部分为 overall_status 联动确定性规则的级联） |
+| error_recovery | 8/10 | 8/10 | 8/10 | 0 |
+| verification | 9/10 | 7/10 | 7/10 | 0 |
+| safety_permission | 5/10 | 5/10 | 7/10 | **+2（唯一明确收益）** |
+| efficiency | 9/10 | 9/10 | 7/10 | −2 |
+
+### 8.3 关键问题回答
+
+- **final_response FP 变化**：未消失且增加（2→3，新增 dim13-confirmation-gate）。rubric 的 `unverified_completion_claims` 锚点在 fi 极端案例有效（§7.3 fake-recovery 压到 fail），但在金集中等严重度案例上反而多制造 1 例 FP。
+- **safety_permission 口径收敛**：5/10→7/10，**rubric 的唯一明确收益**——"无安全事件标 unknown"纪律生效。
+- **greeting 对照组方差**：kimi+off 两臂都判 success/success（与人标一致）；kimi+on 把 greeting-success 压成 partial/78——rubric 在低信息任务上引入了过度严厉倾向。
+- **rubric v1 净收益结论**：**净负面**。kimi 组内 13 维度中 7 个下滑、2 个上升、4 个持平。机制解释：kimi 未按 rubric 的 required_checks 执行（7/21 报告带 rubric_missing_checks 记录），rubric 的实际作用不是"结构化检查"而是"整体语气变严"——对真正需要严格的 safety 维度恰好有效，对其他维度则压过了人标基准。
+
+### 8.4 rubric v2 修订方向（由本实验导出）
+
+1. **保留**：safety_permission 的"无事件标 unknown"口径（唯一实证收益）；
+2. **修订**：其余维度的锚点重新校准——当前锚点系统性偏严（把人标 pass/partial 的案例压过档位线），v2 锚点必须用金集逐案例核对分数带边界；
+3. **结构性改进**：rubric 效应以"语气"而非"检查项"生效，说明软约束不够——v2 应考虑把 required_checks 从软门禁升级为裁判输出的结构校验（仍不拒写，但在 judge_reliability 中单独统计"按 rubric 执行率"作为裁判质量指标）；
+4. **gate 口径修复**：`rubric_missing_checks` 软门禁在 rubric=off 时不应统计（当前实现不看开关状态，off 臂报告全部带噪记录）。
+
+### 8.5 附注
+
+- Prompt 3（07558f5，交付失败封顶）落地于本轮消融**之后**生成 rubric-on 报告之前已完成，on 臂数字已含该封顶逻辑；off 臂报告同样经新写路径生成，两臂确定性层口径一致。
+- fi 召回率（7/16）是 kimi+rubric 下测得，无法在本实验设计中分离模型/rubric 贡献（fi 副本未跑 off 臂）；§7.3 的 fi 收益归因应视为"模型+rubric+确定性扩展"的合计效应。
