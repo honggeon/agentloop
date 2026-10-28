@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from .dimensions import assess_dimensions, verbatim_quote
 from .evidence import validate_judge_evidence
+from .prompts import DIMENSION_RUBRICS
 from .schemas import DIMENSION_DEFINITIONS, missing_judge_dimensions, normalize_judge_report, render_judge_markdown
 from ..judges import reports as judge_reports
 from ..judges.proposals import JudgeProposalError
@@ -372,6 +373,34 @@ def _downgrade_unsupported_dimensions(normalized: Dict[str, Any], reliability: D
     return downgraded
 
 
+def _rubric_missing_checks(dimensions: Dict[str, Any]) -> List[str]:
+    """List judge-sourced, non-unknown dimensions missing rubric required_checks.
+
+    Soft gate for contract C3: purely informational, never blocks publishing.
+    Only ``source == "judge"`` dimensions participate — deterministic rules
+    generate their own checks, and unknown dimensions are honest abstentions.
+    """
+    missing: List[str] = []
+    for key, dimension in dimensions.items():
+        if not isinstance(dimension, dict):
+            continue
+        if dimension.get("source") != "judge" or dimension.get("status") == "unknown":
+            continue
+        rubric = DIMENSION_RUBRICS.get(key)
+        if not rubric:
+            continue
+        chain = dimension.get("evidence_chain")
+        present = {
+            str(check.get("id") or "")
+            for check in (chain or {}).get("checks") or []
+            if isinstance(check, dict)
+        }
+        absent = [check["id"] for check in rubric["required_checks"] if check["id"] not in present]
+        if absent:
+            missing.append("%s 缺 %s" % (key, ", ".join(absent)))
+    return missing
+
+
 def write_judge_report(
     run_path: str,
     report: object,
@@ -438,6 +467,14 @@ def write_judge_report(
         merged_notes.append(
             "normalized %s scored dimension(s) to unknown: no valid evidence (%s)"
             % (len(downgraded_dimensions), ", ".join(downgraded_dimensions))
+        )
+    # 软门禁（契约 C3）：judge 来源且已给出结论（status != unknown）的维度，
+    # 若缺 rubric 要求的 required_checks，只记录不拒写——旧提案（无 checks
+    # 结构）必须照常归一化写出。deterministic 来源维度不参与统计。
+    rubric_missing = _rubric_missing_checks(normalized.get("dimensions") or {})
+    if rubric_missing:
+        merged_notes.append(
+            "rubric_missing_checks: judge 来源维度缺少 required_checks — %s" % "; ".join(rubric_missing)
         )
     reliability["notes"] = merged_notes
     normalized["judge_reliability"] = reliability

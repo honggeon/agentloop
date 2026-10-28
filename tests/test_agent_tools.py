@@ -664,3 +664,142 @@ def test_write_judge_report_deterministic_charts_survive_proposal_charts(tmp_pat
     # And the same data lands in the report's own charts snapshot.
     report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
     assert report["charts"]["tool_distribution"] == charts["tool_distribution"]
+
+
+# -- M3.1 全维度 rubric（契约 C3）------------------------------------------
+
+
+def test_dimension_rubrics_cover_all_dimensions_with_three_bands_and_checks():
+    from auditrail.agents.prompts import DIMENSION_RUBRICS
+    from auditrail.agents.schemas import DIMENSION_DEFINITIONS
+
+    assert set(DIMENSION_RUBRICS) == set(DIMENSION_DEFINITIONS)
+    for key, rubric in DIMENSION_RUBRICS.items():
+        bands = rubric["score_bands"]
+        assert [band["range"] for band in bands] == ["80-100", "50-79", "0-49"], key
+        assert [band["status"] for band in bands] == ["pass", "partial", "fail"], key
+        assert all(str(band["anchor"]).strip() for band in bands), key
+        checks = rubric["required_checks"]
+        assert checks, key
+        assert all(str(check["id"]).strip() and str(check["criterion"]).strip() for check in checks), key
+        assert isinstance(rubric["counter_evidence_required"], bool), key
+
+
+def test_task_planning_rubric_uses_the_four_spec_checks():
+    from auditrail.agents.prompts import DIMENSION_RUBRICS
+
+    ids = [check["id"] for check in DIMENSION_RUBRICS["task_planning"]["required_checks"]]
+    assert ids == ["plan_precedes_execution", "requirement_coverage", "deviation_justified", "replan_on_failure"]
+
+
+def test_report_writer_prompt_injects_full_rubric_and_keeps_contract_sentences():
+    from auditrail.agents.prompts import DIMENSION_RUBRICS, REPORT_WRITER_PROMPT
+
+    for key, rubric in DIMENSION_RUBRICS.items():
+        for check in rubric["required_checks"]:
+            assert check["id"] in REPORT_WRITER_PROMPT, (key, check["id"])
+    # 既有契约语句逐字保留（unknown 占位、source 规则、发布门禁、反证要求）
+    for sentence in (
+        "没有证据时 status 必须是 unknown",
+        "source 只能先填 judge",
+        "dimensions 缺少任何一个维度 key 都是结构不完整",
+        "没有工具失败时，error_recovery 必须保持 unknown",
+    ):
+        assert sentence in REPORT_WRITER_PROMPT
+    # safety_permission 口径：无安全事件标 unknown 而非 pass
+    assert "safety_events_scan" in REPORT_WRITER_PROMPT
+
+
+def _scored_judge_dimension(quote="make ppt"):
+    return {
+        "score": 90,
+        "status": "pass",
+        "summary": "裁判评分",
+        "evidence": [{"source": "trajectory.jsonl", "message_index": 0, "quote": quote}],
+        "recommendation": "",
+        "source": "judge",
+    }
+
+
+def test_write_judge_report_notes_rubric_missing_checks_for_scored_judge_dimension(tmp_path):
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "x",
+            "findings": [],
+            "dimensions": full_judge_dimensions(final_response=_scored_judge_dimension()),
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    notes = report["judge_reliability"]["notes"]
+    rubric_notes = [note for note in notes if note.startswith("rubric_missing_checks")]
+    assert rubric_notes, notes
+    assert "final_response" in rubric_notes[0]
+    assert "claims_grounded_in_tool_results" in rubric_notes[0]
+    # deterministic 来源维度不参与统计
+    assert "tool_selection" not in rubric_notes[0]
+    assert "error_recovery" not in rubric_notes[0]
+    # 报告仍然写出（软门禁不拒写），且可再归一化
+    from auditrail.agents.schemas import normalize_judge_report
+
+    assert normalize_judge_report(report)["dimensions"]["final_response"]["score"] == 90
+
+
+def test_write_judge_report_rubric_gate_silent_when_required_checks_present(tmp_path):
+    from auditrail.agents.prompts import DIMENSION_RUBRICS
+
+    run = _write_run(tmp_path)
+    checks = [
+        {
+            "id": check["id"],
+            "criterion": check["criterion"],
+            "result": "pass",
+            "conclusion": "已核对",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": [],
+        }
+        for check in DIMENSION_RUBRICS["final_response"]["required_checks"]
+    ]
+    dimension = _scored_judge_dimension()
+    dimension["evidence_chain"] = {"checks": checks}
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "confidence": "medium",
+            "summary": "x",
+            "findings": [],
+            "dimensions": full_judge_dimensions(final_response=dimension),
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    notes = report["judge_reliability"]["notes"]
+    assert not any(note.startswith("rubric_missing_checks") for note in notes), notes
+
+
+def test_write_judge_report_rubric_gate_ignores_unknown_dimensions(tmp_path):
+    # 旧提案：全部维度 unknown 占位、无 checks 结构 —— 归一化不报错、不产生 rubric 门禁记录。
+    run = _write_run(tmp_path)
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "failed",
+            "completion_score": 20,
+            "confidence": "low",
+            "summary": "x",
+            "findings": [],
+            "dimensions": full_judge_dimensions(),
+        },
+    )
+
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    notes = report["judge_reliability"]["notes"]
+    assert not any(note.startswith("rubric_missing_checks") for note in notes), notes
