@@ -31,6 +31,7 @@ def assess_dimensions(run_path: str | Path, report: dict[str, Any], reliability:
     _apply_rule(dimensions, "execution_closure", _execution_closure_rule(trajectory, normalized, artifacts), cap=False)
     _apply_rule(dimensions, "error_recovery", _error_recovery_rule(audit, artifacts), cap=True)
     _apply_rule(dimensions, "evidence_citation", _evidence_citation_rule(reliability, normalized, artifacts), cap=False)
+    _apply_rule(dimensions, "intent_recognition", _intent_recognition_rule(run_dir), cap=True)
     return dimensions
 
 
@@ -447,6 +448,76 @@ def _evidence_citation_rule(
         "evidence": evidence,
         "checks": checks,
         "gaps": gaps,
+    }
+
+
+def _intent_recognition_rule(run_dir: Path) -> dict[str, Any] | None:
+    """Cap intent_recognition from evaluation.json expectation results (C4).
+
+    A failed *required* expectation is a hard signal that the run did not do
+    what was asked, so the judge's intent score may not exceed 50; optional
+    failures cap at 70. The rule only caps — execution problems belong to
+    other dimensions — and it never fires without a completed envelope, with
+    all-unknown results (unknown is never a failure), or with no failures at
+    all (a pass proves nothing beyond the envelope's own scope).
+    """
+    from ..evaluation import load_evaluation
+
+    envelope = load_evaluation(run_dir)
+    if not envelope or envelope.get("status") != "completed":
+        return None
+    results = [row for row in envelope.get("expectation_results") or [] if isinstance(row, dict)]
+    if not results or all(row.get("status") == "unknown" for row in results):
+        return None
+    required_failed = [row for row in results if row.get("required") and row.get("status") == "fail"]
+    optional_failed = [row for row in results if not row.get("required") and row.get("status") == "fail"]
+    if required_failed:
+        score, triggered, check_id, reason = (
+            50,
+            required_failed,
+            "required_expectations_failed",
+            "evaluation.json 必需验收项 %s 状态为 fail，意图识别确定性封顶 50。",
+        )
+    elif optional_failed:
+        score, triggered, check_id, reason = (
+            70,
+            optional_failed,
+            "optional_expectations_failed",
+            "evaluation.json 可选验收项 %s 状态为 fail，意图识别确定性封顶 70。",
+        )
+    else:
+        return None
+
+    dump = json.dumps(envelope, ensure_ascii=False, default=str)
+    evidence: list[dict[str, Any]] = []
+    for entry in triggered[:5]:
+        quote = verbatim_quote(str(entry.get("id") or ""), dump) or verbatim_quote(str(entry.get("message") or ""), dump)
+        if quote:
+            evidence.append({"source": "evaluation.json", "quote": quote})
+    if not evidence:
+        # ``"status": "fail"`` appears verbatim under json.dumps' default
+        # separators whenever a failing entry exists; it is the minimal
+        # honest quote when neither id nor message survives verbatim matching.
+        evidence.append({"source": "evaluation.json", "quote": '"status": "fail"'})
+    ids = ", ".join(str(entry.get("id")) for entry in triggered[:5])
+    return {
+        "score": score,
+        "summary": "Required expectation(s) failed in evaluation.json." if required_failed else "Optional expectation(s) failed in evaluation.json.",
+        "recommendation": "Treat failed acceptance expectations as a cap on intent recognition; explain remaining ambiguity in the summary.",
+        "rule_id": "intent_recognition_cap",
+        "reason": reason % ids,
+        "evidence": evidence,
+        "checks": [
+            {
+                "id": check_id,
+                "criterion": "evaluation.json 验收项中是否存在失败的必需/可选条目",
+                "result": "fail",
+                "conclusion": "验收项 %s 状态为 fail。" % ids,
+                "type": "fact",
+                "evidence": evidence,
+                "counter_evidence": [],
+            }
+        ],
     }
 
 

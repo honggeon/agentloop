@@ -329,3 +329,123 @@ def test_score_and_status_stay_consistent(tmp_path):
             assert status == "partial"
         else:
             assert status == "fail"
+
+
+# -- M3.2 expectation 驱动 intent_recognition 封顶（契约 C4）----------------
+
+
+def _write_envelope_run(tmp_path, results=None, status="completed"):
+    """A tool run plus an evaluation.json envelope with the given expectation_results."""
+    run = _write_tool_run(tmp_path)
+    from auditrail.evaluation import new_envelope, write_evaluation
+
+    envelope = new_envelope(status)
+    envelope["expectation_results"] = list(results or [])
+    write_evaluation(run, envelope)
+    return run
+
+
+def _expectation_result(expectation_id, required, status):
+    from auditrail.evaluation import make_expectation_result
+
+    return make_expectation_result(expectation_id, required=required, status=status, message="断言未通过")
+
+
+def _intent_dimension(run, judge_score=90):
+    report = _report_with_judge_scores({"intent_recognition": judge_score})
+    reliability = validate_judge_evidence(run, report)
+    return assess_dimensions(run, report, reliability)
+
+
+def test_intent_recognition_required_failure_caps_at_50(tmp_path):
+    run = _write_envelope_run(tmp_path, [_expectation_result("req-output-orders", True, "fail")])
+    report = _report_with_judge_scores({"intent_recognition": 90})
+    reliability = validate_judge_evidence(run, report)
+
+    dimension = assess_dimensions(run, report, reliability)["intent_recognition"]
+
+    assert dimension["score"] == 50
+    assert dimension["status"] == "partial"
+    assert dimension["source"] == "deterministic+judge"
+    trace = dimension["evidence_chain"]["score_trace"]
+    rule = trace["rules"][0]
+    assert rule["id"] == "intent_recognition_cap"
+    assert rule["action"] == "cap"
+    assert rule["before"] == 90
+    assert rule["candidate"] == 50
+    assert rule["after"] == 50
+    assert "req-output-orders" in rule["reason"]
+    assert rule["evidence"]
+    _assert_generated_evidence_valid(run, assess_dimensions(run, report, reliability))
+
+
+def test_intent_recognition_optional_failure_caps_at_70(tmp_path):
+    run = _write_envelope_run(
+        tmp_path,
+        [_expectation_result("req-ok", True, "pass"), _expectation_result("opt-format", False, "fail")],
+    )
+    dimension = _intent_dimension(run, judge_score=95)["intent_recognition"]
+
+    assert dimension["score"] == 70
+    assert dimension["status"] == "partial"
+    rule = dimension["evidence_chain"]["score_trace"]["rules"][0]
+    assert rule["action"] == "cap"
+    assert rule["candidate"] == 70
+    assert "opt-format" in rule["reason"]
+    _assert_generated_evidence_valid(run, _intent_dimension(run, judge_score=95))
+
+
+def test_intent_recognition_lower_judge_score_is_kept(tmp_path):
+    run = _write_envelope_run(tmp_path, [_expectation_result("req-1", True, "fail")])
+    report = normalize_judge_report(
+        {
+            "overall_status": "partial",
+            "completion_score": 60,
+            "summary": "x",
+            "dimensions": {
+                "intent_recognition": {"score": 40, "status": "fail", "summary": "judge", "source": "judge"},
+            },
+        }
+    )
+    reliability = validate_judge_evidence(run, report)
+    dimension = assess_dimensions(run, report, reliability)["intent_recognition"]
+
+    assert dimension["score"] == 40  # judge score kept, never raised
+    assert dimension["status"] == "fail"
+    rule = dimension["evidence_chain"]["score_trace"]["rules"][0]
+    assert rule["action"] == "keep"
+    assert rule["before"] == 40
+    assert rule["after"] == 40
+
+
+def test_intent_recognition_all_pass_does_not_trigger(tmp_path):
+    run = _write_envelope_run(tmp_path, [_expectation_result("req-1", True, "pass")])
+    dimension = _intent_dimension(run, judge_score=90)["intent_recognition"]
+
+    assert dimension["score"] == 90
+    assert dimension["source"] == "judge"
+    assert "evidence_chain" not in dimension
+
+
+def test_intent_recognition_all_unknown_does_not_trigger(tmp_path):
+    run = _write_envelope_run(tmp_path, [_expectation_result("req-1", True, "unknown")])
+    dimension = _intent_dimension(run, judge_score=90)["intent_recognition"]
+
+    assert dimension["score"] == 90
+    assert "evidence_chain" not in dimension
+
+
+def test_intent_recognition_missing_or_unusable_envelope_does_not_trigger(tmp_path):
+    # 无信封
+    run = _write_tool_run(tmp_path)
+    dimension = _intent_dimension(run, judge_score=90)["intent_recognition"]
+    assert dimension["score"] == 90
+    assert "evidence_chain" not in dimension
+
+    # 非 completed 信封（pending）
+    other = tmp_path / "other"
+    other.mkdir()
+    run2 = _write_envelope_run(other, [_expectation_result("req-1", True, "fail")], status="pending")
+    dimension2 = _intent_dimension(run2, judge_score=90)["intent_recognition"]
+    assert dimension2["score"] == 90
+    assert "evidence_chain" not in dimension2

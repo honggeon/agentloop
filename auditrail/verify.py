@@ -4,7 +4,7 @@
 
 1. 重算 ``validate_judge_evidence``，比对 ``judge_reliability`` 的
    ``evidence_coverage`` / ``invalid_evidence_count``；
-2. 重算 ``assess_dimensions``，比对 4 条确定性规则的
+2. 重算 ``assess_dimensions``，比对 5 条确定性规则的
    ``score_trace.final_score``；
 3. 重算 ``assess_run_quality``，比对 ``metrics.quality_score_cap``。
 
@@ -24,8 +24,8 @@ from .agents.evidence import validate_judge_evidence
 from .agents.schemas import normalize_judge_report
 from .agents.tools import assess_run_quality
 
-#: 确定性规则覆盖的维度（auditrail/agents/dimensions.py 注册的 4 条规则）。
-RULE_DIMENSIONS = ("tool_selection", "execution_closure", "error_recovery", "evidence_citation")
+#: 确定性规则覆盖的维度（auditrail/agents/dimensions.py 注册的 5 条规则）。
+RULE_DIMENSIONS = ("tool_selection", "execution_closure", "error_recovery", "evidence_citation", "intent_recognition")
 
 #: 确定性规则生成的 score_trace rule id，用于从已存报告中剥离确定性层
 #: 叠加的内容，重建裁判原始提案视图。
@@ -34,6 +34,7 @@ _DETERMINISTIC_RULE_IDS = {
     "execution_closure_set",
     "error_recovery_cap",
     "evidence_citation_set",
+    "intent_recognition_cap",
 }
 
 #: 确定性规则生成的 evidence_chain check id（同上）。
@@ -46,6 +47,8 @@ _DETERMINISTIC_CHECK_IDS = {
     "judge_evidence_provided",
     "invalid_references",
     "evidence_coverage",
+    "required_expectations_failed",
+    "optional_expectations_failed",
 }
 
 

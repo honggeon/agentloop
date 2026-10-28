@@ -88,7 +88,10 @@ def test_verify_run_flags_judge_dimensions_out_of_scope(tmp_path):
         item for item in result["skipped"] if item.get("reason", "").find("judge") >= 0
     ]
     assert judge_sourced, "expected judge-sourced dimensions to be listed as out of scope"
-    assert "dimensions.intent_recognition" in skipped
+    # task_planning 是纯 judge 语义维度；intent_recognition 自 C4 起有确定性
+    # 封顶规则，无 score_trace 的旧报告以“规则未记录”口径跳过确定性比对。
+    assert "dimensions.task_planning" in skipped
+    assert skipped["dimensions.intent_recognition.score_trace.final_score"]["reason"].find("score_trace") >= 0
 
 
 def test_verify_run_detects_tampered_dimension_score(tmp_path):
