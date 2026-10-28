@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "active_engine": "judge",
+  "active_engine": "deepagent",
   "reports": [
     {
       "engine": "claude-judge",
@@ -13,7 +13,7 @@
     {
       "engine": "deepagent",
       "available": true,
-      "published_at": "2026-10-19T04:49:48.942681+00:00",
+      "published_at": "2026-10-28T06:59:43.062480+00:00",
       "json_path": "judges/deepagent/agent_judge.json",
       "markdown_path": "judges/deepagent/agent_judge.md",
       "chart_path": "judges/deepagent/chart_data.json"
@@ -25,6 +25,14 @@
       "json_path": "judges/judge/agent_judge.json",
       "markdown_path": "judges/judge/agent_judge.md",
       "chart_path": "judges/judge/chart_data.json"
+    },
+    {
+      "engine": "report_writer",
+      "available": true,
+      "published_at": "2026-10-28T06:56:23.929429+00:00",
+      "json_path": "judges/report_writer/agent_judge.json",
+      "markdown_path": "judges/report_writer/agent_judge.md",
+      "chart_path": "judges/report_writer/chart_data.json"
     }
   ]
 }

@@ -3,9 +3,17 @@
   "active_engine": "deepagent",
   "reports": [
     {
+      "engine": "agent-judge",
+      "available": true,
+      "published_at": "2026-10-28T04:54:02.210658+00:00",
+      "json_path": "judges/agent-judge/agent_judge.json",
+      "markdown_path": "judges/agent-judge/agent_judge.md",
+      "chart_path": "judges/agent-judge/chart_data.json"
+    },
+    {
       "engine": "deepagent",
       "available": true,
-      "published_at": "2026-10-18T15:15:23.731457+00:00",
+      "published_at": "2026-10-28T04:58:33.205418+00:00",
       "json_path": "judges/deepagent/agent_judge.json",
       "markdown_path": "judges/deepagent/agent_judge.md",
       "chart_path": "judges/deepagent/chart_data.json"

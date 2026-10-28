@@ -6,7 +6,7 @@
     },
     {
       "severity": "medium",
-      "count": 2
+      "count": 1
     }
   ],
   "tool_distribution": [
@@ -54,40 +54,40 @@
       "label": "工具选择",
       "score": 90,
       "status": "pass",
-      "source": "deterministic"
+      "source": "deterministic+judge"
     },
     {
       "dimension": "parameter_generation",
       "label": "参数生成",
-      "score": 95,
+      "score": 90,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "evidence_citation",
       "label": "证据引用",
-      "score": 92,
+      "score": 90,
       "status": "pass",
-      "source": "judge"
+      "source": "deterministic+judge"
     },
     {
       "dimension": "state_tracking",
       "label": "状态更新",
-      "score": 94,
+      "score": 90,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "final_response",
       "label": "最终表达",
-      "score": 94,
+      "score": 95,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "context_management",
       "label": "上下文管理",
-      "score": 95,
+      "score": 90,
       "status": "pass",
       "source": "judge"
     },
@@ -103,19 +103,19 @@
       "label": "错误恢复",
       "score": null,
       "status": "unknown",
-      "source": "judge"
+      "source": "deterministic"
     },
     {
       "dimension": "verification",
       "label": "验证能力",
-      "score": 82,
-      "status": "partial",
-      "source": "judge"
+      "score": 95,
+      "status": "pass",
+      "source": "deterministic+judge"
     },
     {
       "dimension": "safety_permission",
       "label": "安全与权限",
-      "score": 100,
+      "score": 90,
       "status": "pass",
       "source": "deterministic+judge"
     },
@@ -124,7 +124,7 @@
       "label": "成本与效率",
       "score": 90,
       "status": "pass",
-      "source": "deterministic+judge"
+      "source": "judge"
     }
   ],
   "deterministic_finding_severity": [],

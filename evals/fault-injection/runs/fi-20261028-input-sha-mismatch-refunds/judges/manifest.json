@@ -5,7 +5,7 @@
     {
       "engine": "deepagent",
       "available": true,
-      "published_at": "2026-10-19T11:38:35.555502+00:00",
+      "published_at": "2026-10-28T07:15:17.883897+00:00",
       "json_path": "judges/deepagent/agent_judge.json",
       "markdown_path": "judges/deepagent/agent_judge.md",
       "chart_path": "judges/deepagent/chart_data.json"

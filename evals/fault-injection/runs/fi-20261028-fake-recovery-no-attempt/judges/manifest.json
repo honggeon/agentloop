@@ -1,7 +1,15 @@
 {
   "version": 1,
-  "active_engine": "auditrail-judge",
+  "active_engine": "deepagent",
   "reports": [
+    {
+      "engine": "agent-judge",
+      "available": true,
+      "published_at": "2026-10-28T06:41:20.288247+00:00",
+      "json_path": "judges/agent-judge/agent_judge.json",
+      "markdown_path": "judges/agent-judge/agent_judge.md",
+      "chart_path": "judges/agent-judge/chart_data.json"
+    },
     {
       "engine": "auditrail-judge",
       "available": true,
@@ -9,6 +17,22 @@
       "json_path": "judges/auditrail-judge/agent_judge.json",
       "markdown_path": "judges/auditrail-judge/agent_judge.md",
       "chart_path": "judges/auditrail-judge/chart_data.json"
+    },
+    {
+      "engine": "deepagent",
+      "available": true,
+      "published_at": "2026-10-28T06:43:16.739526+00:00",
+      "json_path": "judges/deepagent/agent_judge.json",
+      "markdown_path": "judges/deepagent/agent_judge.md",
+      "chart_path": "judges/deepagent/chart_data.json"
+    },
+    {
+      "engine": "report_writer",
+      "available": true,
+      "published_at": "2026-10-28T05:02:45.537390+00:00",
+      "json_path": "judges/report_writer/agent_judge.json",
+      "markdown_path": "judges/report_writer/agent_judge.md",
+      "chart_path": "judges/report_writer/chart_data.json"
     }
   ]
 }
