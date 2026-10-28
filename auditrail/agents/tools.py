@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -223,6 +225,24 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
     else:
         deliverable_verification = "none"
 
+    # Content-level validation (contract C5): a produced file whose content is
+    # mechanically invalid (corrupt zip, fake PDF header, blank markdown) is a
+    # delivery finding, but never a new cap — the "unverifiable workspace"
+    # reasoning above is untouched, and ``verification`` keeps its semantics.
+    invalid_deliverables = _validate_produced_deliverables(run_dir, produced)
+    for relative in invalid_deliverables:
+        findings.append(
+            {
+                "severity": "high",
+                "category": "delivery",
+                "title": "Produced deliverable failed content validation: %s" % relative,
+                "type": "fact",
+                "evidence": evidence_chain,
+                "recommendation": "Re-generate the deliverable and verify it parses/opens before claiming completion.",
+            }
+        )
+    findings.extend(_invariant_findings(run_dir, evidence_chain))
+
     if tool_failure:
         findings.append(
             {
@@ -248,6 +268,7 @@ def assess_run_quality(run_path: str) -> Dict[str, Any]:
             "requested": requested,
             "produced": produced,
             "missing": missing,
+            "invalid": invalid_deliverables,
             "verification": deliverable_verification,
         },
         "evidence_chain": evidence_chain,
@@ -629,19 +650,112 @@ def _requested_deliverables(summary: Dict[str, Any], trajectory: Any) -> List[st
     return requested
 
 
-def _produced_deliverables(run_dir: Path, requested: List[str]) -> List[str]:
-    if not requested:
-        return []
-    produced = set()
+def _iter_deliverable_files(run_dir: Path):
     for path in run_dir.rglob("*"):
         if not path.is_file() or path.name in _RUN_ARTIFACT_NAMES:
             continue
         relative_parts = path.relative_to(run_dir).parts[:-1]
         if any(part in _RUN_ARTIFACT_DIRS for part in relative_parts):
             continue
-        if path.suffix.lower() in requested:
-            produced.add(path.suffix.lower())
+        yield path
+
+
+def _produced_deliverables(run_dir: Path, requested: List[str]) -> List[str]:
+    if not requested:
+        return []
+    produced = {
+        path.suffix.lower()
+        for path in _iter_deliverable_files(run_dir)
+        if path.suffix.lower() in requested
+    }
     return sorted(produced)
+
+
+def _validate_produced_deliverables(run_dir: Path, produced: List[str]) -> List[str]:
+    """Mechanical content validation of produced deliverables (contract C5).
+
+    Pure stdlib, no semantic guessing: OOXML files (.pptx/.docx/.xlsx) must be
+    zip archives containing ``[Content_Types].xml``, PDFs must carry the
+    ``%PDF-`` header, Markdown must be non-blank. Returns sorted run-relative
+    paths of invalid files.
+    """
+    if not produced:
+        return []
+    invalid = []
+    for path in _iter_deliverable_files(run_dir):
+        suffix = path.suffix.lower()
+        if suffix not in produced:
+            continue
+        if not _deliverable_content_valid(path, suffix):
+            invalid.append(str(path.relative_to(run_dir)))
+    return sorted(invalid)
+
+
+def _deliverable_content_valid(path: Path, suffix: str) -> bool:
+    try:
+        if suffix in {".pptx", ".docx", ".xlsx"}:
+            if not zipfile.is_zipfile(path):
+                return False
+            with zipfile.ZipFile(path) as archive:
+                return "[Content_Types].xml" in archive.namelist()
+        if suffix == ".pdf":
+            return path.read_bytes()[:5] == b"%PDF-"
+        if suffix == ".md":
+            return bool(path.read_text(encoding="utf-8", errors="replace").strip())
+    except OSError:
+        return False
+    return True
+
+
+def _invariant_findings(run_dir: Path, evidence_chain: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Consume expectations.json ``invariants`` v1 (contract C5).
+
+    Only the ``file_sha256`` kind is defined: the named run-directory file's
+    hash must match the declared value, otherwise the input was tampered with
+    (or the file is missing) and a delivery finding is produced. Unknown
+    kinds and out-of-run paths are skipped, never treated as violations. No
+    ``invariants`` field means the legacy behavior, byte for byte.
+    """
+    from ..runtime import load_expectations
+
+    expectations_path = run_dir / "expectations.json"
+    if not expectations_path.exists():
+        return []
+    expectations = load_expectations(run_dir)
+    invariants = expectations.get("invariants")
+    if not isinstance(invariants, list):
+        return []
+    dump = json.dumps(expectations, ensure_ascii=False, default=str)
+    root = run_dir.resolve()
+    findings: List[Dict[str, Any]] = []
+    for invariant in invariants:
+        if not isinstance(invariant, dict) or invariant.get("kind") != "file_sha256":
+            continue
+        relative = str(invariant.get("path") or "")
+        expected = str(invariant.get("sha256") or "").strip().lower()
+        if not relative or not expected:
+            continue
+        target = (run_dir / relative).resolve()
+        if target != root and root not in target.parents:
+            continue
+        actual = None
+        if target.is_file():
+            actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual == expected:
+            continue
+        quote = verbatim_quote(expected, dump) or verbatim_quote(relative, dump) or '"sha256"'
+        state = "missing" if actual is None else "hash mismatch"
+        findings.append(
+            {
+                "severity": "high",
+                "category": "delivery",
+                "title": "Input invariant violated (%s): %s" % (state, relative),
+                "type": "fact",
+                "evidence": [{"source": "expectations.json", "quote": quote}],
+                "recommendation": "Restore the declared input file or re-declare the invariant; a tampered input invalidates derived results.",
+            }
+        )
+    return findings
 
 
 def _last_assistant_message(trajectory: Any) -> Optional[Dict[str, Any]]:

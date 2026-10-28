@@ -803,3 +803,181 @@ def test_write_judge_report_rubric_gate_ignores_unknown_dimensions(tmp_path):
     report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
     notes = report["judge_reliability"]["notes"]
     assert not any(note.startswith("rubric_missing_checks") for note in notes), notes
+
+
+# -- M3.3 交付物内容不变量（契约 C5）----------------------------------------
+
+
+def _write_deliverable_run(tmp_path, title, files):
+    """A run whose user request asks for a deliverable and whose bundle contains `files`."""
+    run = tmp_path / "runs" / "deliverable-run"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps({"title": title}, ensure_ascii=False), encoding="utf-8")
+    (run / "audit.json").write_text(
+        json.dumps({"tool_calls": [{"index": 1, "tool": "write_file", "status": "ok", "args_preview": "a"}], "findings": []}),
+        encoding="utf-8",
+    )
+    rows = [
+        {"index": 0, "role": "user", "content": title},
+        {"index": 1, "role": "assistant", "content": "已完成并产出文件。"},
+    ]
+    (run / "trajectory.jsonl").write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+    for relative, content in files.items():
+        target = run / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+    return run
+
+
+def _valid_xlsx_bytes():
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("xl/workbook.xml", "<workbook/>")
+    return buffer.getvalue()
+
+
+def test_assess_run_quality_flags_corrupt_xlsx_as_invalid_deliverable(tmp_path):
+    run = _write_deliverable_run(tmp_path, "请汇总数据并输出 xlsx 报表", {"output/summary.xlsx": b"not a zip"})
+    quality = assess_run_quality(str(run))
+
+    assert quality["deliverables"]["produced"] == [".xlsx"]
+    assert quality["deliverables"]["invalid"] == ["output/summary.xlsx"]
+    # verification 语义不变（不新增封顶），invalid 是 additive 字段
+    assert quality["deliverables"]["verification"] == "verified"
+    assert quality["completion"]["score_cap"] == 100
+    finding = next(f for f in quality["findings"] if f["category"] == "delivery" and f["severity"] == "high")
+    assert "output/summary.xlsx" in finding["title"]
+    assert finding["type"] == "fact"
+
+
+def test_assess_run_quality_accepts_valid_xlsx(tmp_path):
+    run = _write_deliverable_run(tmp_path, "请汇总数据并输出 xlsx 报表", {"output/summary.xlsx": _valid_xlsx_bytes()})
+    quality = assess_run_quality(str(run))
+
+    assert quality["deliverables"]["invalid"] == []
+    assert not any(f["category"] == "delivery" and f["severity"] == "high" for f in quality["findings"])
+
+
+def test_assess_run_quality_flags_empty_markdown_and_fake_pdf(tmp_path):
+    run = _write_deliverable_run(
+        tmp_path,
+        "请输出 pdf 报告和 notes.md 说明",
+        {"output/report.pdf": b"plain text, no header", "output/notes.md": "   \n  "},
+    )
+    quality = assess_run_quality(str(run))
+
+    assert quality["deliverables"]["invalid"] == ["output/notes.md", "output/report.pdf"]
+    titles = [f["title"] for f in quality["findings"] if f["category"] == "delivery" and f["severity"] == "high"]
+    assert any("report.pdf" in title for title in titles)
+    assert any("notes.md" in title for title in titles)
+
+
+def test_assess_run_quality_accepts_real_pdf_and_nonempty_markdown(tmp_path):
+    run = _write_deliverable_run(
+        tmp_path,
+        "请输出 pdf 报告和 notes.md 说明",
+        {"output/report.pdf": b"%PDF-1.7 fake-but-headed", "output/notes.md": "# 说明\n内容"},
+    )
+    quality = assess_run_quality(str(run))
+    assert quality["deliverables"]["invalid"] == []
+
+
+def test_assess_run_quality_missing_deliverable_stays_unverifiable_without_invalid(tmp_path):
+    # 未产出交付物：维持 unverifiable 语义，不新增封顶、不出现 invalid 条目。
+    run = _write_deliverable_run(tmp_path, "请生成 xlsx 报表", {})
+    quality = assess_run_quality(str(run))
+
+    assert quality["deliverables"]["verification"] == "unverifiable"
+    assert quality["deliverables"]["invalid"] == []
+    assert quality["completion"]["score_cap"] == 100
+
+
+def _write_expectations(run, payload):
+    (run / "expectations.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_assess_run_quality_invariant_file_sha256_mismatch_produces_delivery_finding(tmp_path):
+    import hashlib
+
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {"input/orders.csv": "tampered,content\n"})
+    digest = hashlib.sha256("original,content\n".encode()).hexdigest()
+    _write_expectations(run, {"acceptance_criteria": "", "invariants": [{"id": "input_immutable", "kind": "file_sha256", "path": "input/orders.csv", "sha256": digest}]})
+    quality = assess_run_quality(str(run))
+
+    finding = next((f for f in quality["findings"] if "invariant" in f["title"].lower()), None)
+    assert finding is not None
+    assert finding["category"] == "delivery"
+    assert finding["severity"] == "high"
+    assert finding["type"] == "fact"
+    assert finding["evidence"] and finding["evidence"][0]["source"] == "expectations.json"
+    assert quality["completion"]["score_cap"] == 100  # 不变量违例生成 finding，不封顶
+
+
+def test_assess_run_quality_invariant_file_sha256_match_is_silent(tmp_path):
+    import hashlib
+
+    content = "original,content\n"
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {"input/orders.csv": content})
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    _write_expectations(run, {"acceptance_criteria": "", "invariants": [{"id": "input_immutable", "kind": "file_sha256", "path": "input/orders.csv", "sha256": digest}]})
+    quality = assess_run_quality(str(run))
+
+    assert not any("invariant" in f["title"].lower() for f in quality["findings"])
+
+
+def test_assess_run_quality_invariant_missing_file_is_violation(tmp_path):
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {})
+    _write_expectations(run, {"invariants": [{"id": "input_immutable", "kind": "file_sha256", "path": "input/orders.csv", "sha256": "ab" * 32}]})
+    quality = assess_run_quality(str(run))
+    assert any("invariant" in f["title"].lower() for f in quality["findings"])
+
+
+def test_assess_run_quality_legacy_expectations_without_invariants_unchanged(tmp_path):
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {"input/orders.csv": "a,b\n"})
+    _write_expectations(run, {"acceptance_criteria": "无 invariants 字段的旧格式"})
+    baseline = assess_run_quality(str(run))
+    (run / "expectations.json").unlink()
+    legacy = assess_run_quality(str(run))
+    assert baseline == legacy
+
+
+def test_assess_run_quality_invariant_rejects_unknown_kind_and_traversal(tmp_path):
+    run = _write_deliverable_run(tmp_path, "处理输入 CSV", {"input/orders.csv": "a,b\n"})
+    _write_expectations(
+        run,
+        {
+            "invariants": [
+                {"id": "regex", "kind": "content_regex", "path": "input/orders.csv", "pattern": ".*"},
+                {"id": "escape", "kind": "file_sha256", "path": "../outside.csv", "sha256": "ab" * 32},
+            ]
+        },
+    )
+    quality = assess_run_quality(str(run))
+    # v1 只消费 file_sha256；越界路径被拒绝且不算违例
+    assert not any("invariant" in f["title"].lower() for f in quality["findings"])
+
+
+def test_write_judge_report_persists_invalid_deliverable_finding_with_valid_evidence(tmp_path):
+    run = _write_deliverable_run(tmp_path, "请汇总数据并输出 xlsx 报表", {"output/summary.xlsx": b"not a zip"})
+    write_judge_report(
+        str(run),
+        {
+            "overall_status": "success",
+            "completion_score": 90,
+            "confidence": "high",
+            "summary": "x",
+            "findings": [],
+            "dimensions": full_judge_dimensions(),
+        },
+    )
+    report = json.loads((run / "agent_judge.json").read_text(encoding="utf-8"))
+    finding = next(f for f in report["findings"] if "content validation" in f["title"])
+    assert finding["type"] == "fact"  # 证据通过逐字校验，未被降级
+    assert report["judge_reliability"]["invalid_evidence_count"] == 0

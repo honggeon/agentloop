@@ -458,6 +458,25 @@ failures also write `error.json`. All artifact writes are atomic
 minimum wins) and forces judge `overall_status=failed` — an LLM judge cannot
 override it; dimensions without evidence stay `unknown` with a null score.
 
+`expectations.json` may optionally declare input immutability invariants (v1:
+only `kind="file_sha256"`):
+
+```json
+{"invariants": [{"id": "input_immutable", "kind": "file_sha256", "path": "input/orders.csv", "sha256": "..."}]}
+```
+
+The deterministic quality check (`assess_run_quality`) re-hashes the named
+run-directory file and records a high-severity `delivery` finding on mismatch
+or a missing file; it never caps the score for this. Produced deliverables in
+the run bundle are also content-validated mechanically (OOXML must be a zip
+containing `[Content_Types].xml`, PDFs need the `%PDF-` header, Markdown must
+be non-blank); invalid files are listed under the additive
+`deliverables.invalid` field with a `delivery` finding. Producer-side
+convention for `evaluation.json` (cases/runner 链路，auditrail 核心不实现)：
+when an artifact check finds `exists=true` but the content is invalid, fill
+`valid=false` and set `status=fail` so a required artifact triggers the
+existing 40 cap.
+
 ## Agent Test Platform (Phase 1): Test Suites and Batch Runs
 
 Phase 1 adds TestSuite CRUD and sequential batch execution on the same
