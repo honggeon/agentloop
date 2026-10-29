@@ -1,0 +1,153 @@
+{
+  "finding_severity": [
+    {
+      "severity": "high",
+      "count": 2
+    },
+    {
+      "severity": "low",
+      "count": 2
+    },
+    {
+      "severity": "medium",
+      "count": 3
+    }
+  ],
+  "tool_distribution": [
+    {
+      "tool": "bash",
+      "count": 10
+    },
+    {
+      "tool": "edit",
+      "count": 1
+    },
+    {
+      "tool": "read",
+      "count": 9
+    },
+    {
+      "tool": "todo_write",
+      "count": 3
+    }
+  ],
+  "phase_timeline": [
+    {
+      "phase": "use tools",
+      "tool_count": 23,
+      "tools": [
+        "bash",
+        "edit",
+        "read",
+        "todo_write"
+      ]
+    }
+  ],
+  "dimension_scores": [
+    {
+      "dimension": "intent_recognition",
+      "label": "意图识别",
+      "score": 70,
+      "status": "partial",
+      "source": "judge"
+    },
+    {
+      "dimension": "task_planning",
+      "label": "任务规划",
+      "score": 65,
+      "status": "partial",
+      "source": "judge"
+    },
+    {
+      "dimension": "tool_selection",
+      "label": "工具选择",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "parameter_generation",
+      "label": "参数生成",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "evidence_citation",
+      "label": "证据引用",
+      "score": 0,
+      "status": "fail",
+      "source": "deterministic+judge"
+    },
+    {
+      "dimension": "state_tracking",
+      "label": "状态更新",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "final_response",
+      "label": "最终表达",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "context_management",
+      "label": "上下文管理",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "execution_closure",
+      "label": "执行闭环",
+      "score": 65,
+      "status": "partial",
+      "source": "deterministic+judge"
+    },
+    {
+      "dimension": "error_recovery",
+      "label": "错误恢复",
+      "score": null,
+      "status": "unknown",
+      "source": "judge"
+    },
+    {
+      "dimension": "verification",
+      "label": "验证能力",
+      "score": 90,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "safety_permission",
+      "label": "安全与权限",
+      "score": 85,
+      "status": "pass",
+      "source": "judge"
+    },
+    {
+      "dimension": "efficiency",
+      "label": "成本与效率",
+      "score": 70,
+      "status": "partial",
+      "source": "judge"
+    }
+  ],
+  "deterministic_finding_severity": [],
+  "quality_summary": {
+    "requested_deliverables": 1,
+    "produced_deliverables": 0,
+    "missing_deliverables": 1
+  },
+  "judge_reliability": {
+    "evidence_coverage": 0.7286,
+    "unsupported_claim_count": 0,
+    "invalid_evidence_count": 38,
+    "fact_inference_mismatch_count": 0,
+    "unsupported_dimension_count": 0,
+    "dimension_evidence_mismatch_count": 0
+  }
+}

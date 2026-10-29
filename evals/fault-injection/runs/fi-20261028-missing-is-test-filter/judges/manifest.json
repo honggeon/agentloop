@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "active_engine": "deepagent",
+  "active_engine": "report_writer",
   "reports": [
     {
       "engine": "claude-judge",
@@ -29,7 +29,7 @@
     {
       "engine": "report_writer",
       "available": true,
-      "published_at": "2026-10-28T07:22:53.776133+00:00",
+      "published_at": "2026-10-28T13:36:13.232195+00:00",
       "json_path": "judges/report_writer/agent_judge.json",
       "markdown_path": "judges/report_writer/agent_judge.md",
       "chart_path": "judges/report_writer/chart_data.json"

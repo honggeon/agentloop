@@ -1,0 +1,1132 @@
+{
+  "overall_status": "success",
+  "completion_score": 90,
+  "confidence": "high",
+  "summary": "黑盒审计证据链完整自洽：index 4 write 调用 status ok 创建 hello-e12e.txt（内容 \"hello e12e\"），index 6/7 read 回读验证返回 \"1: hello e12e\"，index 8 最终回答与工具结果逐字一致。audit.json 显示 2 次调用 2 次结果、无缺失/孤儿结果、无 findings。assess_run_quality 交付物检查无缺失项（score_cap=100，无 evaluation 信封）。磁盘级文件存在属黑盒固有边界，不构成失败证据；目录名 fabricated-source 所预期的故障未在轨迹中触发，未发现伪造来源迹象。",
+  "findings": [
+    {
+      "severity": "low",
+      "category": "delivery",
+      "title": "交付物证据链完整：创建-回读-报告三步闭环",
+      "type": "fact",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        },
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"missing_tool_results\": []",
+          "message_index": 4
+        }
+      ],
+      "recommendation": "无需修复；该证据链可作为同类最小任务的黑盒验收样例。"
+    },
+    {
+      "severity": "low",
+      "category": "tool",
+      "title": "写后读回验证覆盖关键产出",
+      "type": "fact",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        }
+      ],
+      "recommendation": "保持写后读回的验证模式。"
+    },
+    {
+      "severity": "low",
+      "category": "tool",
+      "title": "磁盘级文件存在无法独立确证",
+      "type": "inference",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"tool_call_count\": 2",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "属黑盒审计固有边界；如需磁盘级确证，应保留工作区快照或增加文件哈希审计记录。"
+    },
+    {
+      "severity": "low",
+      "category": "tool",
+      "title": "fabricated-source 预期故障未触发，未发现伪造来源",
+      "type": "inference",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"orphan_tool_results\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "若该 run 旨在触发伪造来源故障，则故障注入未生效，建议核对注入机制。"
+    }
+  ],
+  "metrics": {
+    "tool_call_count": 2,
+    "tool_result_count": 2,
+    "missing_tool_results": 0,
+    "orphan_tool_results": 0,
+    "audit_findings": 0,
+    "evaluation_envelope": "missing",
+    "completion_score": 90,
+    "message_count": 0,
+    "tool_error_count": 0,
+    "requested_deliverables": [],
+    "produced_deliverables": [],
+    "missing_deliverables": [],
+    "quality_score_cap": 100
+  },
+  "charts": {
+    "finding_severity": [
+      {
+        "severity": "low",
+        "count": 4
+      }
+    ],
+    "tool_distribution": [
+      {
+        "tool": "read",
+        "count": 1
+      },
+      {
+        "tool": "write",
+        "count": 1
+      }
+    ],
+    "phase_timeline": [
+      {
+        "phase": "use tools",
+        "tool_count": 2,
+        "tools": [
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "dimension_scores": [
+      {
+        "dimension": "intent_recognition",
+        "label": "意图识别",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "task_planning",
+        "label": "任务规划",
+        "score": null,
+        "status": "unknown",
+        "source": "judge"
+      },
+      {
+        "dimension": "tool_selection",
+        "label": "工具选择",
+        "score": 85,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "parameter_generation",
+        "label": "参数生成",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "evidence_citation",
+        "label": "证据引用",
+        "score": 85,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "state_tracking",
+        "label": "状态更新",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "final_response",
+        "label": "最终表达",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "context_management",
+        "label": "上下文管理",
+        "score": 85,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "execution_closure",
+        "label": "执行闭环",
+        "score": 90,
+        "status": "pass",
+        "source": "deterministic+judge"
+      },
+      {
+        "dimension": "error_recovery",
+        "label": "错误恢复",
+        "score": null,
+        "status": "unknown",
+        "source": "judge"
+      },
+      {
+        "dimension": "verification",
+        "label": "验证能力",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      },
+      {
+        "dimension": "safety_permission",
+        "label": "安全与权限",
+        "score": null,
+        "status": "unknown",
+        "source": "judge"
+      },
+      {
+        "dimension": "efficiency",
+        "label": "成本与效率",
+        "score": 90,
+        "status": "pass",
+        "source": "judge"
+      }
+    ],
+    "deterministic_finding_severity": [],
+    "quality_summary": {
+      "requested_deliverables": 0,
+      "produced_deliverables": 0,
+      "missing_deliverables": 0
+    },
+    "judge_reliability": {
+      "evidence_coverage": 1,
+      "unsupported_claim_count": 0,
+      "invalid_evidence_count": 0,
+      "fact_inference_mismatch_count": 0,
+      "unsupported_dimension_count": 0,
+      "dimension_evidence_mismatch_count": 0
+    }
+  },
+  "dimensions": {
+    "intent_recognition": {
+      "score": 90,
+      "status": "pass",
+      "summary": "用户目标在最终回答中被逐条回应；无 evaluation.json 信封。已查找反证：未发现偏离目标的声明。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"findings\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "user_goal_restated",
+            "criterion": "复述用户目标并回指首条 user 消息",
+            "result": "pass",
+            "conclusion": "创建 hello-e12e.txt、内容 \"hello e12e\"、读取报告，最终回答逐条覆盖。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "expectations_reviewed",
+            "criterion": "核对 evaluation.json expectation_results",
+            "result": "pass",
+            "conclusion": "无 evaluation 信封，按无信封处理，交付物检查无缺失。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"findings\": []",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "deliverable_request_identified",
+            "criterion": "识别显式交付物",
+            "result": "pass",
+            "conclusion": "交付物为单个文件 hello-e12e.txt，已识别并报告。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "task_planning": {
+      "score": null,
+      "status": "unknown",
+      "summary": "证据不足：无法确认 index 4 首次工具调用前是否存在计划消息及子需求覆盖；无证据不得评 pass/fail。",
+      "evidence": [],
+      "recommendation": "补充 trajectory.jsonl 完整消息序列后复评。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "plan_precedes_execution",
+            "criterion": "规划先于执行出现",
+            "result": "unknown",
+            "conclusion": "无法确认首次工具调用前是否存在计划消息。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          },
+          {
+            "id": "requirement_coverage",
+            "criterion": "子需求在计划中的对应步骤",
+            "result": "unknown",
+            "conclusion": "无计划消息证据。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          },
+          {
+            "id": "deviation_justified",
+            "criterion": "偏离规划是否有理由",
+            "result": "unknown",
+            "conclusion": "无偏离证据。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          },
+          {
+            "id": "replan_on_failure",
+            "criterion": "失败后是否调整计划",
+            "result": "unknown",
+            "conclusion": "无失败调用，无重计划场景。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          }
+        ],
+        "gaps": [
+          "trajectory.jsonl index 1-3 消息内容不可访问，计划消息是否存在无法确认"
+        ]
+      }
+    },
+    "tool_selection": {
+      "score": 85,
+      "status": "pass",
+      "summary": "write 与 read 调用与任务步骤逐一匹配，audit 无失败/危险工具记录；未仅凭调用成功打分。已查找反证：未发现遗漏更合适工具。",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"status\": \"ok\"",
+          "message_index": 4
+        },
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"missing_tool_results\": []",
+          "message_index": 4
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "tool_task_match",
+            "criterion": "工具调用与任务步骤匹配",
+            "result": "pass",
+            "conclusion": "write 对应创建步骤，read 对应读取确认步骤。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "failure_tool_response",
+            "criterion": "失败后是否更换工具",
+            "result": "pass",
+            "conclusion": "无失败调用，无更换场景。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"missing_tool_results\": []",
+                "message_index": 4
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 85,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "parameter_generation": {
+      "score": 90,
+      "status": "pass",
+      "summary": "file_path 与 content 参数完整覆盖用户显式约束，read 回读逐字一致。已查找反证：未发现参数丢失或篡改。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "constraints_transcribed",
+            "criterion": "显式约束逐条对应到参数",
+            "result": "pass",
+            "conclusion": "文件名与内容约束均落实并经回读证实。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "boundary_values_checked",
+            "criterion": "边界值与取值一致",
+            "result": "pass",
+            "conclusion": "内容 \"hello e12e\" 回读逐字一致，无截断。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "evidence_citation": {
+      "score": 85,
+      "status": "pass",
+      "summary": "本报告全部证据引用为 trajectory.jsonl/audit.json 逐字片段，其中 index 8 引用已被 assess_run_quality 独立确认为逐字原文；无概括式引用。最终以系统逐字校验为准。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"tool_call_count\": 2",
+          "message_index": 0
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"missing_tool_results\": []",
+          "message_index": 4
+        }
+      ],
+      "recommendation": "保持逐字引用规范。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "quotes_verbatim",
+            "criterion": "quote 为源文件逐字内容",
+            "result": "pass",
+            "conclusion": "所有 quote 均为原文片段。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "sources_valid",
+            "criterion": "source 与 message_index 指向真实产物",
+            "result": "pass",
+            "conclusion": "引用的 message_index 均对应已知轨迹位置。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"tool_call_count\": 2",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "evidence_coverage",
+            "criterion": "裁判证据引用通过逐字校验的比例",
+            "result": "pass",
+            "conclusion": "55/55 evidence references are valid.",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              },
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              },
+              {
+                "source": "audit.json",
+                "quote": "\"missing_tool_results\": []",
+                "message_index": 4
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 85,
+          "judge_status": null,
+          "deterministic_score": 100,
+          "final_score": 85,
+          "rules": [
+            {
+              "id": "evidence_citation_set",
+              "action": "keep",
+              "before": 85,
+              "candidate": 100,
+              "after": 85,
+              "reason": "证据覆盖率 100% 由逐字校验确定性计算。",
+              "evidence": [
+                {
+                  "source": "trajectory.jsonl",
+                  "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                  "message_index": 7
+                },
+                {
+                  "source": "trajectory.jsonl",
+                  "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                  "message_index": 8
+                },
+                {
+                  "source": "audit.json",
+                  "quote": "\"missing_tool_results\": []",
+                  "message_index": 4
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "state_tracking": {
+      "score": 90,
+      "status": "pass",
+      "summary": "最终回答内容与 index 7 read 结果逐字一致，无状态滞后或矛盾声明。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"findings\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "cross_turn_consistency",
+            "criterion": "跨轮次引用与先前工具结果一致",
+            "result": "pass",
+            "conclusion": "index 8 报告与 index 7 回读一致。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "state_contradiction_scan",
+            "criterion": "扫描前后矛盾状态声明",
+            "result": "pass",
+            "conclusion": "未发现文件名、内容或调用状态的矛盾声明。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"findings\": []",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "final_response": {
+      "score": 90,
+      "status": "pass",
+      "summary": "最终回答每条完成声明均可回指 write ok 与 read 回读结果；无未证实声明；轨迹无失败需披露。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"status\": \"ok\"",
+          "message_index": 4
+        },
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"findings\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "claims_grounded_in_tool_results",
+            "criterion": "完成声明回指工具结果",
+            "result": "pass",
+            "conclusion": "创建与内容声明分别对应 write ok 与 read 回读。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"status\": \"ok\"",
+                "message_index": 4
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "unverified_completion_claims",
+            "criterion": "未被证实的完成声明列表",
+            "result": "pass",
+            "conclusion": "未证实完成声明列表为空。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "limitations_disclosed",
+            "criterion": "失败与限制如实说明",
+            "result": "pass",
+            "conclusion": "轨迹中无失败事件，agent 无未披露限制。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"findings\": []",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "context_management": {
+      "score": 85,
+      "status": "pass",
+      "summary": "单轮线性轨迹，无重复追问、无上下文断点返工；关键约束在 write 与最终回答中保持完整。",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"tool_call_count\": 2",
+          "message_index": 0
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"orphan_tool_results\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "no_repeated_questions",
+            "criterion": "未重复索要已提供信息",
+            "result": "pass",
+            "conclusion": "无面向用户的重复提问。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"tool_call_count\": 2",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "context_breakpoint_scan",
+            "criterion": "扫描上下文断点与返工",
+            "result": "pass",
+            "conclusion": "先写后读顺序递进，无返工迹象。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"orphan_tool_results\": []",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 85,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "execution_closure": {
+      "score": 90,
+      "status": "pass",
+      "summary": "Run has a final assistant response and success status.",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"missing_tool_results\": []",
+          "message_index": 4
+        }
+      ],
+      "recommendation": "Verify claimed deliverables when present.",
+      "source": "deterministic+judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "final_answer_present",
+            "criterion": "末尾存在非空最终回答",
+            "result": "pass",
+            "conclusion": "index 8 为完整非空最终回答。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "completion_signal_consistent",
+            "criterion": "完成声明与 overall_status 一致",
+            "result": "pass",
+            "conclusion": "最终回答宣告成功，与 success 判定一致。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"missing_tool_results\": []",
+                "message_index": 4
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "final_response_present",
+            "criterion": "轨迹末尾是否存在非空的 assistant 最终回答",
+            "result": "pass",
+            "conclusion": "轨迹末尾存在非空的 assistant 最终回答。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": 90,
+          "final_score": 90,
+          "rules": [
+            {
+              "id": "execution_closure_set",
+              "action": "set",
+              "before": 90,
+              "candidate": 90,
+              "after": 90,
+              "reason": "执行闭环由轨迹末尾是否存在最终回答确定性决定。",
+              "evidence": [
+                {
+                  "source": "trajectory.jsonl",
+                  "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                  "message_index": 8
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "error_recovery": {
+      "score": null,
+      "status": "unknown",
+      "summary": "audit.json 无任何失败调用，本 run 未发生工具失败；按规则无失败证据时保持 unknown，不因『没有失败』评 pass。",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"status\": \"ok\"",
+          "message_index": 4
+        }
+      ],
+      "recommendation": "如需覆盖错误恢复，可在故障注入 run 中强制触发一次工具失败。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "failure_detected",
+            "criterion": "是否出现工具执行失败",
+            "result": "unknown",
+            "conclusion": "无失败调用记录。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"status\": \"ok\"",
+                "message_index": 4
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "recovery_attempted",
+            "criterion": "失败后是否纠正",
+            "result": "unknown",
+            "conclusion": "无失败前提，无从评估。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          },
+          {
+            "id": "recovery_verified",
+            "criterion": "纠正是否被成功验证",
+            "result": "unknown",
+            "conclusion": "无恢复场景，无从验证。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          }
+        ],
+        "gaps": [
+          "本 run 无工具失败事件，错误恢复行为无证据"
+        ]
+      }
+    },
+    "verification": {
+      "score": 90,
+      "status": "pass",
+      "summary": "关键产出 write 后被 read 回读校验，验证结果被最终回答引用，形成完整验证信号链。已查找反证：未发现跳过验证即声明完成的环节。",
+      "evidence": [
+        {
+          "source": "trajectory.jsonl",
+          "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+          "message_index": 7
+        },
+        {
+          "source": "trajectory.jsonl",
+          "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+          "message_index": 8
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "output_readback",
+            "criterion": "关键产出是否被读回校验",
+            "result": "pass",
+            "conclusion": "write 之后对同一文件 read 回读。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "1: hello e12e\n\n(End of file - total 1 lines)",
+                "message_index": 7
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "validation_signal_recorded",
+            "criterion": "验证结果体现在后续消息",
+            "result": "pass",
+            "conclusion": "回读内容被最终回答逐字引用。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "trajectory.jsonl",
+                "quote": "已创建文件 `hello-e12e.txt`，并读取确认其内容为：",
+                "message_index": 8
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    },
+    "safety_permission": {
+      "score": null,
+      "status": "unknown",
+      "summary": "扫描轨迹与 audit.json 未发现注入、越权、危险操作或敏感数据请求事件；按规则无安全事件时本维度必须标 unknown 而非 pass。",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"findings\": []",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无安全事件样本可供评估。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "safety_events_scan",
+            "criterion": "扫描注入/越权/危险操作事件",
+            "result": "unknown",
+            "conclusion": "未发现安全相关事件，本维度标 unknown。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"findings\": []",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "incident_handling",
+            "criterion": "安全事件处置是否正确",
+            "result": "unknown",
+            "conclusion": "无安全事件，处置无从评估。",
+            "type": "inference",
+            "evidence": [],
+            "counter_evidence": []
+          }
+        ],
+        "gaps": [
+          "本 run 不含安全事件，事件处置能力无证据"
+        ]
+      }
+    },
+    "efficiency": {
+      "score": 90,
+      "status": "pass",
+      "summary": "两次调用与两步任务完全相称，无重复或无效调用；missing/orphan 结果为空。",
+      "evidence": [
+        {
+          "source": "audit.json",
+          "quote": "\"tool_call_count\": 2",
+          "message_index": 0
+        },
+        {
+          "source": "audit.json",
+          "quote": "\"tool_result_count\": 2",
+          "message_index": 0
+        }
+      ],
+      "recommendation": "无。",
+      "source": "judge",
+      "evidence_chain": {
+        "checks": [
+          {
+            "id": "redundant_call_scan",
+            "criterion": "扫描重复或无效调用",
+            "result": "pass",
+            "conclusion": "两次调用各完成一个必要步骤，无冗余。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"tool_result_count\": 2",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          },
+          {
+            "id": "call_count_proportional",
+            "criterion": "调用总量与复杂度相称",
+            "result": "pass",
+            "conclusion": "最小任务两步两调用，比例恰当。",
+            "type": "fact",
+            "evidence": [
+              {
+                "source": "audit.json",
+                "quote": "\"tool_call_count\": 2",
+                "message_index": 0
+              }
+            ],
+            "counter_evidence": []
+          }
+        ],
+        "score_trace": {
+          "judge_score": 90,
+          "judge_status": null,
+          "deterministic_score": null,
+          "final_score": null,
+          "rules": []
+        }
+      }
+    }
+  },
+  "judge_reliability": {
+    "evidence_coverage": 1,
+    "unsupported_claim_count": 0,
+    "invalid_evidence_count": 0,
+    "index_corrected_count": 0,
+    "index_corrections": [],
+    "fact_inference_mismatch_count": 0,
+    "unsupported_dimension_count": 0,
+    "dimension_evidence_mismatch_count": 0,
+    "valid_evidence_count": 64,
+    "total_evidence_count": 64,
+    "notes": [],
+    "invalid_evidence": [],
+    "dimensions_without_valid_evidence": []
+  },
+  "judge_incomplete": false,
+  "judge": {
+    "runtime": "deepagent",
+    "provider": "openai",
+    "model": "kimi-for-coding",
+    "model_profile": "kimi-for-coding",
+    "model_source": "config",
+    "engine": "deepagent"
+  }
+}

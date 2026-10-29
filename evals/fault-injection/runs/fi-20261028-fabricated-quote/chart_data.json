@@ -2,7 +2,7 @@
   "finding_severity": [
     {
       "severity": "low",
-      "count": 4
+      "count": 2
     }
   ],
   "tool_distribution": [
@@ -36,49 +36,49 @@
     {
       "dimension": "task_planning",
       "label": "任务规划",
-      "score": 60,
-      "status": "partial",
+      "score": 85,
+      "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "tool_selection",
       "label": "工具选择",
-      "score": 85,
+      "score": 100,
       "status": "pass",
-      "source": "deterministic+judge"
+      "source": "judge"
     },
     {
       "dimension": "parameter_generation",
       "label": "参数生成",
-      "score": 90,
+      "score": 100,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "evidence_citation",
       "label": "证据引用",
-      "score": 0,
-      "status": "fail",
-      "source": "deterministic+judge"
+      "score": 90,
+      "status": "pass",
+      "source": "judge"
     },
     {
       "dimension": "state_tracking",
       "label": "状态更新",
-      "score": 85,
+      "score": 100,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "final_response",
       "label": "最终表达",
-      "score": 90,
+      "score": 100,
       "status": "pass",
       "source": "judge"
     },
     {
       "dimension": "context_management",
       "label": "上下文管理",
-      "score": 85,
+      "score": 90,
       "status": "pass",
       "source": "judge"
     },
@@ -99,7 +99,7 @@
     {
       "dimension": "verification",
       "label": "验证能力",
-      "score": 85,
+      "score": 100,
       "status": "pass",
       "source": "judge"
     },
@@ -113,9 +113,9 @@
     {
       "dimension": "efficiency",
       "label": "成本与效率",
-      "score": 90,
+      "score": 100,
       "status": "pass",
-      "source": "deterministic+judge"
+      "source": "judge"
     }
   ],
   "deterministic_finding_severity": [],
@@ -125,9 +125,9 @@
     "missing_deliverables": 0
   },
   "judge_reliability": {
-    "evidence_coverage": 0.9565,
+    "evidence_coverage": 1,
     "unsupported_claim_count": 0,
-    "invalid_evidence_count": 2,
+    "invalid_evidence_count": 0,
     "fact_inference_mismatch_count": 0,
     "unsupported_dimension_count": 0,
     "dimension_evidence_mismatch_count": 0

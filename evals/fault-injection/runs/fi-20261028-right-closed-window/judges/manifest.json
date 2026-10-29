@@ -5,7 +5,7 @@
     {
       "engine": "deepagent",
       "available": true,
-      "published_at": "2026-10-28T07:12:06.186759+00:00",
+      "published_at": "2026-10-28T13:34:00.891740+00:00",
       "json_path": "judges/deepagent/agent_judge.json",
       "markdown_path": "judges/deepagent/agent_judge.md",
       "chart_path": "judges/deepagent/chart_data.json"
@@ -17,6 +17,14 @@
       "json_path": "judges/deepagents/agent_judge.json",
       "markdown_path": "judges/deepagents/agent_judge.md",
       "chart_path": "judges/deepagents/chart_data.json"
+    },
+    {
+      "engine": "report_writer",
+      "available": true,
+      "published_at": "2026-10-28T13:30:41.953333+00:00",
+      "json_path": "judges/report_writer/agent_judge.json",
+      "markdown_path": "judges/report_writer/agent_judge.md",
+      "chart_path": "judges/report_writer/chart_data.json"
     }
   ]
 }

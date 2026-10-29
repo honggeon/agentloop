@@ -277,3 +277,29 @@ M3 rubric **部分达到预期**：fi record 召回率 3/16→7/16（出口达�
 
 - Prompt 3（07558f5，交付失败封顶）落地于本轮消融**之后**生成 rubric-on 报告之前已完成，on 臂数字已含该封顶逻辑；off 臂报告同样经新写路径生成，两臂确定性层口径一致。
 - fi 召回率（7/16）是 kimi+rubric 下测得，无法在本实验设计中分离模型/rubric 贡献（fi 副本未跑 off 臂）；§7.3 的 fi 收益归因应视为"模型+rubric+确定性扩展"的合计效应。
+
+---
+
+## 9. fi 召回终值：Prompt 3 封顶生效后的 record 车道重测（2026-10-28 晚）
+
+> 触发：Prompt 3（07558f5，已证实交付失败封顶 60）落地后，重跑 11 个 fi 副本裁判（kimi-for-coding + rubric v1，默认配置）。
+> 执行：子代理 bd1970b5 完成 10/11 后 token 耗尽中断；编排会话盘点现场（全部有 pre-cap 备份，无半成品），补跑最后一个（wrong-detail-csv）。
+
+### 9.1 召回率：3/16（M2 replay）→ 7/16（M3 record）→ **10/16（最终）**
+
+转 caught 的 3 条全部为 Prompt 3 的直接收益：empty-report-md / input-sha-mismatch-orders / input-sha-mismatch-refunds 的 `expect_completion_score_at_most=60` 断言，因新写路径 `quality_score_cap=60` 生效而命中。
+
+### 9.2 剩余 6 条 missed 逐案归因
+
+| fault | 归因 | 类别 |
+|---|---|---|
+| fabricated-quote / fabricated_citation | **车道错配**：该 fault 注入在裁判报告内（编造引用），重跑裁判生成了全新诚实报告，注入体被覆盖——不是真漏判。此类样本的验证车道是确定性重放（verify-run 对注入报告的 invalid 检出已在 M2 复核实证），**不应纳入 record 重跑清单** | 样本设计注记 |
+| missing-is-test-filter ×2（parameter_generation / verification） | 裁判未发现脚本中 is_test 过滤被删（工具输出仍声称已排除） | **真漏判**——静默参数错误，需任务级确定性 oracle |
+| right-closed-window / verification_gap | 裁判未复核窗口边界条件的语义（断言被篡改但输出自洽） | **真漏判**——同上 |
+| wrong-detail-csv ×2（execution_closure / intent_recognition） | CSV 可解析、内容语义错误（含 is_test 订单 O09），超出 C5 机械校验范围；裁判未发现（completion=90） | **真漏判**——需内容级 oracle |
+
+### 9.3 结论
+
+1. **确定性层的召回责任已尽到**：机械可判的 4 类故障（无效交付物、输入篡改、编造引用、假恢复）全部可捕获；剩余 4 个 missed fault 全部是"工具全成功、结果语义错"的静默错误，属于设计文档中确认的"需要任务级 oracle"范畴（§7.5 ③，未立项）。
+2. **样本车道纪律修订**：fabricated-quote / fabricated-source 两个报告级注入样本标注为"replay-only"——record 重跑会覆盖注入体，其验证走 verify-run 重放（已在 §7.6 与 M2 复核中实证可检出）。
+3. Prompt 3 的边际收益精确符合预期（7/16 → 10/16，+3 即预测的三例）。

@@ -3,12 +3,36 @@
   "active_engine": "deepagent",
   "reports": [
     {
+      "engine": "agent-judge",
+      "available": true,
+      "published_at": "2026-10-28T12:41:30.040932+00:00",
+      "json_path": "judges/agent-judge/agent_judge.json",
+      "markdown_path": "judges/agent-judge/agent_judge.md",
+      "chart_path": "judges/agent-judge/chart_data.json"
+    },
+    {
       "engine": "deepagent",
       "available": true,
-      "published_at": "2026-10-28T04:54:58.873957+00:00",
+      "published_at": "2026-10-28T12:42:42.949295+00:00",
       "json_path": "judges/deepagent/agent_judge.json",
       "markdown_path": "judges/deepagent/agent_judge.md",
       "chart_path": "judges/deepagent/chart_data.json"
+    },
+    {
+      "engine": "default",
+      "available": true,
+      "published_at": "2026-10-28T12:35:57.738379+00:00",
+      "json_path": "judges/default/agent_judge.json",
+      "markdown_path": "judges/default/agent_judge.md",
+      "chart_path": "judges/default/chart_data.json"
+    },
+    {
+      "engine": "report_writer",
+      "available": true,
+      "published_at": "2026-10-28T12:34:04.442760+00:00",
+      "json_path": "judges/report_writer/agent_judge.json",
+      "markdown_path": "judges/report_writer/agent_judge.md",
+      "chart_path": "judges/report_writer/chart_data.json"
     }
   ]
 }
